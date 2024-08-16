@@ -211,19 +211,22 @@ def get_data():
         sys.stdout.write('\r\033[K')
     data = base64.standard_b64decode(data)
     with temporary_directory(dir=HOME, prefix='.kitty-ssh-kitten-untar-') as tdir, tarfile.open(fileobj=io.BytesIO(data)) as tf:
-        tf.extractall(tdir)
+        try:
+            tf.extractall(tdir, filter='data')
+        except TypeError:
+            tf.extractall(tdir)
         with open(tdir + '/data.sh') as f:
             env_vars = f.read()
-            apply_env_vars(env_vars)
-            data_dir = os.environ.pop('KITTY_SSH_KITTEN_DATA_DIR')
-            if not os.path.isabs(data_dir):
-                data_dir = os.path.join(HOME, data_dir)
-            data_dir = os.path.abspath(data_dir)
-            shell_integration_dir = os.path.join(data_dir, 'shell-integration')
-            compile_terminfo(tdir + '/home')
-            move(tdir + '/home', HOME)
-            if os.path.exists(tdir + '/root'):
-                move(tdir + '/root', '/')
+        apply_env_vars(env_vars)
+        data_dir = os.environ.pop('KITTY_SSH_KITTEN_DATA_DIR')
+        if not os.path.isabs(data_dir):
+            data_dir = os.path.join(HOME, data_dir)
+        data_dir = os.path.abspath(data_dir)
+        shell_integration_dir = os.path.join(data_dir, 'shell-integration')
+        compile_terminfo(tdir + '/home')
+        move(tdir + '/home', HOME)
+        if os.path.exists(tdir + '/root'):
+            move(tdir + '/root', '/')
 
 
 def exec_zsh_with_integration():

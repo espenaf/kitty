@@ -9,6 +9,7 @@ from kitty.fast_data_types import KeyEvent as WindowSystemKeyEvent
 from kitty.fast_data_types import get_boss
 from kitty.key_encoding import decode_key_event_as_window_system_key
 from kitty.options.utils import parse_send_text_bytes
+from kitty.utils import sanitize_for_bracketed_paste
 
 from .base import (
     MATCH_TAB_OPTION,
@@ -55,7 +56,7 @@ class ClearSession(SessionAction):
             for wid in s.window_ids:
                 qw = boss.window_id_map.get(wid)
                 if qw is not None:
-                    qw.screen.render_unfocused_cursor = 0
+                    qw.screen.render_unfocused_cursor = False
 
 
 class FocusChangedSession(SessionAction):
@@ -64,14 +65,14 @@ class FocusChangedSession(SessionAction):
         s = sessions_map.get(self.sid)
         if s is not None:
             boss = get_boss()
-            val = int(focused)
             for wid in s.window_ids:
                 qw = boss.window_id_map.get(wid)
                 if qw is not None:
-                    qw.screen.render_unfocused_cursor = val
+                    qw.screen.render_unfocused_cursor = focused
 
 
 class SendText(RemoteCommand):
+    disallow_responses = True
     protocol_spec = __doc__ = '''
     data+/str: The data being sent. Can be either: text: followed by text or base64: followed by standard base64 encoded bytes
     match/str: A string indicating the window to send text to
@@ -79,6 +80,7 @@ class SendText(RemoteCommand):
     all/bool: A boolean indicating all windows should be matched.
     exclude_active/bool: A boolean that prevents sending text to the active window
     session_id/str: A string that identifies a "broadcast session"
+    bracketed_paste/choices.disable.auto.enable: Whether to wrap the text in bracketed paste escape codes
     '''
     short_desc = 'Send arbitrary text to specified windows'
     desc = (
@@ -88,8 +90,12 @@ class SendText(RemoteCommand):
         " and :code:`'\\\\u21fa'` to send Unicode characters. Remember to use single-quotes otherwise"
         ' the backslash is interpreted as a shell escape character. If you use the :option:`kitten @ send-text --match` option'
         ' the text will be sent to all matched windows. By default, text is sent to'
-        ' only the currently active window.'
+        ' only the currently active window. Note that errors are not reported, for technical reasons,'
+        ' so send-text always succeeds, even if no text was sent to any window.'
     )
+    # since send-text can send data over the tty to the window in which it was
+    # run --no-reponse is always in effect for it, hence errors are not
+    # reported.
     options_spec = MATCH_WINDOW_OPTION + '\n\n' + MATCH_TAB_OPTION.replace('--match -m', '--match-tab -t') + '''\n
 --all
 type=bool-set
@@ -110,12 +116,23 @@ not interpreted for escapes. If stdin is a terminal, you can press :kbd:`Ctrl+D`
 --from-file
 Path to a file whose contents you wish to send. Note that in this case the file contents
 are sent as is, not interpreted for escapes.
+
+
+--bracketed-paste
+choices=disable,auto,enable
+default=disable
+When sending text to a window, wrap the text in bracketed paste escape codes. The default is to not do this.
+A value of :code:`auto` means, bracketed paste will be used only if the program running in the window has turned
+on bracketed paste mode.
 '''
     args = RemoteCommand.Args(spec='[TEXT TO SEND]', json_field='data', special_parse='+session_id:parse_send_text(io_data, args)')
 
     def message_to_kitty(self, global_opts: RCOptions, opts: 'CLIOptions', args: ArgsType) -> PayloadType:
         limit = 1024
-        ret = {'match': opts.match, 'data': '', 'match_tab': opts.match_tab, 'all': opts.all, 'exclude_active': opts.exclude_active}
+        ret = {
+            'match': opts.match, 'data': '', 'match_tab': opts.match_tab, 'all': opts.all, 'exclude_active': opts.exclude_active,
+            'bracketed_paste': opts.bracketed_paste,
+        }
 
         def pipe() -> CmdGenerator:
             if sys.stdin.isatty():
@@ -177,7 +194,7 @@ are sent as is, not interpreted for escapes.
 
     def response_from_kitty(self, boss: Boss, window: Optional[Window], payload_get: PayloadGetType) -> ResponseType:
         sid = payload_get('session_id', '')
-        windows = self.windows_for_payload(boss, None, payload_get)
+        windows = self.windows_for_payload(boss, None, payload_get, window_match_name='match')
         pdata: str = payload_get('data')
         encoding, _, q = pdata.partition(':')
         session = ''
@@ -204,7 +221,7 @@ are sent as is, not interpreted for escapes.
         if session == 'end':
             s = create_or_update_session()
             for w in actual_windows:
-                w.screen.render_unfocused_cursor = 0
+                w.screen.render_unfocused_cursor = False
                 s.window_ids.discard(w.id)
             ClearSession(sid)()
         elif session == 'start':
@@ -219,20 +236,23 @@ are sent as is, not interpreted for escapes.
                 window.actions_on_removal.append(ClearSession(sid))
                 window.actions_on_focus_change.append(FocusChangedSession(sid))
             for w in actual_windows:
-                w.screen.render_unfocused_cursor = 1
+                w.screen.render_unfocused_cursor = True
                 s.window_ids.add(w.id)
         else:
+            bp = payload_get('bracketed_paste')
             if sid:
                 s = create_or_update_session()
             for w in actual_windows:
                 if sid:
-                    w.screen.render_unfocused_cursor = 1
+                    w.screen.render_unfocused_cursor = True
                     s.window_ids.add(w.id)
                 if isinstance(data, WindowSystemKeyEvent):
                     kdata = w.encoded_key(data)
                     if kdata:
                         w.write_to_child(kdata)
                 else:
+                    if bp == 'enable' or (bp == 'auto' and w.screen.in_bracketed_paste_mode):
+                        data = b'\x1b[200~' + sanitize_for_bracketed_paste(data) + b'\x1b[201~'
                     w.write_to_child(data)
         return None
 

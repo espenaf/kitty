@@ -28,7 +28,7 @@ issues in that proposal, listed at the :ref:`bottom of this document
 
 You can see this protocol with all enhancements in action by running::
 
-    kitten show_key -m kitty
+    kitten show-key -m kitty
 
 inside the kitty terminal to report key events.
 
@@ -42,6 +42,7 @@ In addition to kitty, this protocol is also implemented in:
   <https://github.com/dankamongmen/notcurses/issues/2131>`__
 * The `crossterm library
   <https://github.com/crossterm-rs/crossterm/pull/688>`__
+* The `textual library <https://github.com/Textualize/textual/pull/4631>`__
 * The `Vim text editor <https://github.com/vim/vim/commit/63a2e360cca2c70ab0a85d14771d3259d4b3aafa>`__
 * The `Emacs text editor via the kkp package <https://github.com/benjaminor/kkp>`__
 * The `Neovim text editor <https://github.com/neovim/neovim/pull/18181>`__
@@ -49,8 +50,10 @@ In addition to kitty, this protocol is also implemented in:
 * The `dte text editor <https://gitlab.com/craigbarnes/dte/-/issues/138>`__
 * The `Helix text editor <https://github.com/helix-editor/helix/pull/4939>`__
 * The `far2l file manager <https://github.com/elfmz/far2l/commit/e1f2ee0ef2b8332e5fa3ad7f2e4afefe7c96fc3b>`__
+* The `Yazi file manager <https://github.com/sxyazi/yazi>`__
 * The `awrit web browser <https://github.com/chase/awrit>`__
 * The `nushell shell <https://github.com/nushell/nushell/pull/10540>`__
+* The `fish shell <https://github.com/fish-shell/fish-shell/commit/8bf8b10f685d964101f491b9cc3da04117a308b4>`__
 
 .. versionadded:: 0.20.0
 
@@ -83,7 +86,7 @@ text (``CSI`` is the bytes ``0x1b 0x5b``)::
 The ``number`` in the first form above will be either the Unicode codepoint for a
 key, such as ``97`` for the :kbd:`a` key, or one of the numbers from the
 :ref:`functional` table below. The ``modifiers`` optional parameter encodes any
-modifiers pressed for the key event. The encoding is described in the
+modifiers active for the key event. The encoding is described in the
 :ref:`modifiers` section.
 
 The second form is used for a few functional keys, such as the :kbd:`Home`,
@@ -105,9 +108,7 @@ do not. When a key event produces text, the text is sent directly as UTF-8
 encoded bytes. This is safe as UTF-8 contains no C0 control codes.
 When the key event does not have text, the key event is encoded as an escape code. In
 legacy compatibility mode (the default) this uses legacy escape codes, so old terminal
-applications continue to work. Key events that could not be represented in
-legacy mode are encoded using a ``CSI u`` escape code, that most terminal
-programs should just ignore. For more advanced features, such as release/repeat
+applications continue to work. For more advanced features, such as release/repeat
 reporting etc., applications can tell the terminal they want this information by
 sending an escape code to :ref:`progressively enhance <progressive_enhancement>` the data reported for
 key events.
@@ -181,10 +182,12 @@ bit field with::
     num_lock  0b10000000  (128)
 
 In the escape code, the modifier value is encoded as a decimal number which is
-``1 + actual modifiers``. So to represent :kbd:`shift` only, the value would be ``1 +
-1 = 2``, to represent :kbd:`ctrl+shift` the value would be ``1 + 0b101 = 6``
-and so on. If the modifier field is not present in the escape code, its default
-value is ``1`` which means no modifiers.
+``1 + actual modifiers``. So to represent :kbd:`shift` only, the value would be
+``1 + 1 = 2``, to represent :kbd:`ctrl+shift` the value would be ``1 + 0b101 =
+6`` and so on. If the modifier field is not present in the escape code, its
+default value is ``1`` which means no modifiers. If a modifier is *active* when
+the key event occurs, i.e. if the key is pressed or the lock (for caps lock/num
+lock) is enabled, the key event must have the bit for that modifier set.
 
 When the key event is related to an actual modifier key, the corresponding
 modifier's bit must be set to the modifier state including the effect for the
@@ -229,8 +232,10 @@ enhancement <progressive_enhancement>` mechanism described below. Some examples:
     shift+a -> CSI 97 ; 2 ; 65 u  # The text 'A' is reported as 65
     option+a -> CSI 97 ; ; 229 u  # The text 'å' is reported as 229
 
-If multiple code points are present, they must be separated by colons.
-If no known key is associated with the text the key number ``0`` must be used.
+If multiple code points are present, they must be separated by colons.  If no
+known key is associated with the text the key number ``0`` must be used. The
+associated text must not contain control codes (control codes are code points
+below U+0020 and codepoints in the C0 and C1 blocks).
 
 
 Non-Unicode keys
@@ -336,7 +341,9 @@ much easier to integrate into the application event loop. The only exceptions
 are the :kbd:`Enter`, :kbd:`Tab` and :kbd:`Backspace` keys which still generate the same
 bytes as in legacy mode this is to allow the user to type and execute commands
 in the shell such as ``reset`` after a program that sets this mode crashes
-without clearing it.
+without clearing it. Note that the Lock modifiers are not reported for text
+producing keys, to keep them useable in legacy programs. To get lock modifiers
+for all keys use the :ref:`report_all_keys` enhancement.
 
 .. _report_events:
 
@@ -347,6 +354,13 @@ This progressive enhancement (``0b10``) causes the terminal to report key repeat
 and key release events. Normally only key press events are reported and key
 repeat events are treated as key press events. See :ref:`event_types` for
 details on how these are reported.
+
+.. note::
+
+   The :kbd:`Enter`, :kbd:`Tab` and :kbd:`Backspace` keys will not have release
+   events unless :ref:`report_all_keys` is also set, so that the user can still
+   type reset at a shell prompt when a program that sets this mode ends without
+   resetting it.
 
 .. _report_alternates:
 
@@ -481,6 +495,12 @@ must correspond to the :kbd:`Backspace` key.
 
 All keypad keys are reported as their equivalent non-keypad keys. To
 distinguish these, use the :ref:`disambiguate <disambiguate>` flag.
+
+Terminals may choose what they want to do about functional keys that have no
+legacy encoding. kitty chooses to encode these using ``CSI u`` encoding even in
+legacy mode, so that they become usable even in programs that do not
+understand the full kitty keyboard protocol. However, terminals may instead choose to
+ignore such keys in legacy mode instead, or have an option to control this behavior.
 
 .. _legacy_text:
 

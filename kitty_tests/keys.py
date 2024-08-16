@@ -5,6 +5,7 @@ from functools import partial
 
 import kitty.fast_data_types as defines
 from kitty.key_encoding import EventType, KeyEvent, decode_key_event, encode_key_event
+from kitty.keys import Mappings
 
 from . import BaseTest
 
@@ -437,6 +438,9 @@ class TestKeys(BaseTest):
         ae(tq(ord('a'), action=defines.GLFW_REPEAT), csi(num='a', action=2))
         ae(tq(ord('a'), action=defines.GLFW_RELEASE), csi(num='a', action=3))
         ae(tq(ord('a'), action=defines.GLFW_RELEASE, mods=shift), csi(shift, num='a', action=3))
+        tq = partial(enc, key_encoding_flags=0b11)
+        ae(tq(defines.GLFW_FKEY_BACKSPACE), '\x7f')
+        ae(tq(defines.GLFW_FKEY_BACKSPACE, action=release), '')
 
         # test alternate key reporting
         aq = partial(enc, key_encoding_flags=0b100)
@@ -504,3 +508,145 @@ class TestKeys(BaseTest):
         self.ae(enc(mods=defines.GLFW_MOD_SHIFT), '<4;1;1M')
         self.ae(enc(mods=defines.GLFW_MOD_ALT), '<8;1;1M')
         self.ae(enc(mods=defines.GLFW_MOD_CONTROL), '<16;1;1M')
+
+    def test_mapping(self):
+        from kitty.config import load_config
+        from kitty.options.utils import parse_shortcut
+        af = self.assertFalse
+
+        class Window:
+            def __init__(self, id=1):
+                self.key_seqs = []
+                self.id = id
+
+            def send_key_sequence(self, *s):
+                self.key_seqs.extend(s)
+
+        class TM(Mappings):
+
+            def __init__(self, *lines, active_window = Window()):
+                self.active_window = active_window
+                self.windows = [active_window]
+                bad_lines = []
+                self.options = load_config(overrides=lines, accumulate_bad_lines=bad_lines)
+                af(bad_lines)
+                self.ignore_os_keyboard_processing = False
+                super().__init__()
+
+            def get_active_window(self):
+                return self.active_window
+
+            def match_windows(self, expr: str):
+                for w in self.windows:
+                    if str(w.id) == expr:
+                        yield w
+
+            def show_error(self, title: str, msg: str) -> None:
+                pass
+
+            def ring_bell(self) -> None:
+                pass
+
+            def debug_print(self, *args, end: str = '\n') -> None:
+                pass
+
+            def combine(self, action_definition: str) -> bool:
+                self.actions.append(action_definition)
+                if action_definition.startswith('push_keyboard_mode '):
+                    self.push_keyboard_mode(action_definition.partition(' ')[2])
+                elif action_definition == 'pop_keyboard_mode':
+                    self.pop_keyboard_mode()
+                return bool(action_definition)
+
+            def set_ignore_os_keyboard_processing(self, on: bool) -> None:
+                self.ignore_os_keyboard_processing = on
+
+            def set_cocoa_global_shortcuts(self, opts):
+                return {}
+
+            def get_options(self):
+                return self.options
+
+            def __call__(self, *keys: str):
+                self.actions = []
+                self.active_window.key_seqs = []
+                consumed = []
+                for key in keys:
+                    sk = parse_shortcut(key)
+                    ev = defines.KeyEvent(sk.key, 0, 0, sk.mods)
+                    consumed.append(self.dispatch_possible_special_key(ev))
+                return consumed
+
+        tm = TM('map ctrl+a new_window_with_cwd')
+        self.ae(tm('ctrl+a'), [True])
+        self.ae(tm.actions, ['new_window_with_cwd'])
+
+        tm = TM('map ctrl+f>2 set_font_size 20')
+        self.ae(tm('ctrl+f', '2'), [True, True])
+        self.ae(tm.actions, ['set_font_size 20'])
+        af(tm.active_window.key_seqs)
+        # unmatched multi key mapping should send all keys to child
+        self.ae(tm('ctrl+f', '1'), [True, False])
+        af(tm.actions)
+        self.ae(len(tm.active_window.key_seqs), 1)  # ctrl+f should have been sent to the window
+        # multi-key mapping that is unmapped should send all keys to child
+        tm = TM('map kitty_mod+p>f')
+        self.ae(tm('ctrl+shift+p', 'f'), [True, False])
+        self.ae(len(tm.active_window.key_seqs), 1)
+
+        # unmap
+        tm = TM('map kitty_mod+enter')
+        self.ae(tm('ctrl+shift+enter'), [False])
+
+        # single key mapping overrides previous all multi-key mappings with same prefix
+        tm = TM('map kitty_mod+p new_window')
+        self.ae(tm('ctrl+shift+p', 'f'), [True, False])
+        self.ae(tm.actions, ['new_window'])
+        # multi-key mapping overrides previous single key mapping with same prefix
+        tm = TM('map kitty_mod+s>p new_window')
+        self.ae(tm('ctrl+shift+s', 'p'), [True, True])
+        self.ae(tm.actions, ['new_window'])
+        # mix of single and multi-key mappings with same prefix
+        tm = TM('map alt+p>1 multi1', 'map alt+p single1', 'map alt+p>2 multi2')
+        self.ae(tm('alt+p', '2'), [True, True])
+        self.ae(tm.actions, ['multi2'])
+        self.ae(tm('alt+p', '1'), [True, False])
+        af(tm.actions)
+        self.ae(len(tm.active_window.key_seqs), 1)
+
+        # a single multi-key mapping should not prematurely match
+        tm = TM('map alt+1>2>3 new_window')
+        self.ae(tm('alt+1', '2'), [True, True])
+        af(tm.actions)
+        tm = TM('map alt+1>2>3 new_window')
+        self.ae(tm('alt+1', '2', '3'), [True, True, True])
+        self.ae(tm.actions, ['new_window'])
+
+        # changing a multi key mapping
+        tm = TM('map kitty_mod+p>f new_window')
+        self.ae(tm('ctrl+shift+p', 'f'), [True, True])
+        self.ae(tm.actions, ['new_window'])
+
+        # different behavior with focus selection
+        tm = TM('map --when-focus-on 2 kitty_mod+t')
+        tm.windows.append(Window(2))
+        self.ae(tm('ctrl+shift+t'), [True])
+        tm.active_window = tm.windows[1]
+        self.ae(tm('ctrl+shift+t'), [False])
+
+        # modal mappings
+        tm = TM('map --new-mode mw --on-unknown end kitty_mod+f7', 'map --mode mw left neighboring_window left', 'map --mode mw right neighboring_window right')
+        self.ae(tm('ctrl+shift+f7'), [True])
+        self.ae(tm.actions, ['push_keyboard_mode mw'])
+        self.ae(tm('right'), [True])
+        self.ae(tm.actions, ['neighboring_window right'])
+        self.ae(tm('left'), [True])
+        self.ae(tm.actions, ['neighboring_window left'])
+        self.ae(tm('x'), [True])
+        af(tm.keyboard_mode_stack)
+
+        # modal mapping with --on-action=end must restore OS keyboard processing
+        tm = TM('map --new-mode mw --on-action end m', 'map --mode mw a new_window')
+        self.ae(tm('m', 'a'), [True, True])
+        self.ae(tm.actions, ['push_keyboard_mode mw', 'new_window'])
+        af(tm.ignore_os_keyboard_processing)

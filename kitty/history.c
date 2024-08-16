@@ -9,7 +9,7 @@
 #include "lineops.h"
 #include "charsets.h"
 #include <structmember.h>
-#include "ringbuf.h"
+#include "../3rdparty/ringbuf/ringbuf.h"
 
 extern PyTypeObject Line_Type;
 #define SEGMENT_SIZE 2048
@@ -133,7 +133,7 @@ create_historybuf(PyTypeObject *type, unsigned int xnum, unsigned int ynum, unsi
 }
 
 static PyObject *
-new(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
+new_history_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
     unsigned int xnum = 1, ynum = 1, pagerhist_sz = 0;
     if (!PyArg_ParseTuple(args, "II|I", &ynum, &xnum, &pagerhist_sz)) return NULL;
     HistoryBuf *ans = create_historybuf(type, xnum, ynum, pagerhist_sz);
@@ -392,7 +392,7 @@ static void
 pagerhist_rewrap_to(HistoryBuf *self, index_type cells_in_line) {
     PagerHistoryBuf *ph = self->pagerhist;
     if (!ph->ringbuf || !ringbuf_bytes_used(ph->ringbuf)) return;
-    PagerHistoryBuf *nph = calloc(sizeof(PagerHistoryBuf), 1);
+    PagerHistoryBuf *nph = calloc(1, sizeof(PagerHistoryBuf));
     if (!nph) return;
     nph->maximum_size = ph->maximum_size;
     nph->ringbuf = ringbuf_new(MIN(ph->maximum_size, ringbuf_capacity(ph->ringbuf) + 4096));
@@ -569,7 +569,7 @@ PyTypeObject HistoryBuf_Type = {
     .tp_methods = methods,
     .tp_members = members,
     .tp_str = (reprfunc)__str__,
-    .tp_new = new
+    .tp_new = new_history_object
 };
 
 INIT_TYPE(HistoryBuf)
