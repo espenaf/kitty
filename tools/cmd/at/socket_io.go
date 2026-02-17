@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"time"
 
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -170,12 +170,14 @@ func do_socket_io(io_data *rc_io_data) (serialized_response []byte, err error) {
 		f := os.NewFile(uintptr(fd), "fd:"+global_options.to_address)
 		conn, err = net.FileConn(f)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Failed to open a socket for the remote control file descriptor: %d with error: %w", fd, err)
 		}
 		defer f.Close()
 	} else {
-		conn, err = net.Dial(global_options.to_network, global_options.to_address)
+		network := utils.IfElse(global_options.to_network == "ip", "tcp", global_options.to_network)
+		conn, err = net.Dial(network, global_options.to_address)
 		if err != nil {
+			err = fmt.Errorf("Failed to connect to %s:%s with error: %w", network, global_options.to_address, err)
 			return
 		}
 	}

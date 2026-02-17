@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
+import os
 import re
 from binascii import hexlify, unhexlify
 from collections.abc import Generator
-from typing import Optional, cast
+from typing import Literal, cast
 
 from kitty.options.types import Options
 
@@ -34,6 +35,11 @@ termcap_aliases = {
 bool_capabilities = {
     # auto_right_margin (terminal has automatic margins)
     'am',
+    # auto_left_margin (cursor wraps on CUB1 from 0 to last column on prev line). This prevents ncurses
+    # from using BS (backspace) to position the cursor. See https://github.com/kovidgoyal/kitty/issues/8841
+    # It also allows using backspace with multi-line edits in cooked mode. Foot
+    # is the only other modern terminal I know of that implements this.
+    'bw',
     # can_change (terminal can redefine existing colors)
     'ccc',
     # has_meta key (i.e. sets the eight bit)
@@ -69,6 +75,7 @@ bool_capabilities = {
 
 termcap_aliases.update({
     'am': 'am',
+    'bw': 'bw',
     'cc': 'ccc',
     'km': 'km',
     '5i': 'mc5i',
@@ -105,6 +112,7 @@ string_capabilities = {
     'bel': r'^G',
     # Escape code for bold
     'bold': r'\E[1m',
+    'blink': r'\E[5m',
     # Back tab
     'cbt': r'\E[Z',
     'kcbt': r'\E[Z',
@@ -225,7 +233,7 @@ string_capabilities = {
     # Set foreground color
     'setaf': r'\E[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m',
     # Set attributes
-    'sgr': r'%?%p9%t\E(0%e\E(B%;\E[0%?%p6%t;1%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;%?%p7%t;8%;m',
+    'sgr': r'%?%p9%t\E(0%e\E(B%;\E[0%?%p6%t;1%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;%?%p7%t;8%;%?%p5%t;2%;m',
     # Clear all attributes
     'sgr0': r'\E(B\E[m',
     # Reset color pair to its original value
@@ -264,12 +272,12 @@ string_capabilities = {
     'smacs': r'\E(0',
     'rmacs': r'\E(B',
     # Special keys
-    'khlp': r'',
-    'kund': r'',
-    'ka1': r'',
-    'ka3': r'',
-    'kc1': r'',
-    'kc3': r'',
+    # 'khlp': r'',
+    # 'kund': r'',
+    # 'ka1': r'',
+    # 'ka3': r'',
+    # 'kc1': r'',
+    # 'kc3': r'',
     # Set RGB foreground color (non-standard used by neovim)
     'setrgbf': r'\E[38:2:%p1%d:%p2%d:%p3%dm',
     # Set RGB background color (non-standard used by neovim)
@@ -360,6 +368,7 @@ termcap_aliases.update({
     'ac': 'acsc',
     'bl': 'bel',
     'md': 'bold',
+    'mb': 'blink',
     'bt': 'cbt',
     'kB': 'kcbt',
     'cl': 'clear',
@@ -521,10 +530,11 @@ def key_as_bytes(name: str) -> bytes:
 def get_capabilities(query_string: str, opts: 'Options', window_id: int = 0, os_window_id: int = 0) -> Generator[str, None, None]:
     from .fast_data_types import ERROR_PREFIX
 
-    def result(encoded_query_name: str, x: Optional[str] = None) -> str:
-        if not x:
-            valid = 0 if x is None else 1
-            return f'{valid}+r{encoded_query_name}'
+    def result(encoded_query_name: str, x: str | Literal[True] | None = None) -> str:
+        if x is None:
+            return f'0+r{encoded_query_name}'
+        if x is True:
+            return f'1+r{encoded_query_name}'
         return f'1+r{encoded_query_name}={hexlify(str(x).encode("utf-8")).decode("ascii")}'
 
     for encoded_query_name in query_string.split(';'):
@@ -541,9 +551,12 @@ def get_capabilities(query_string: str, opts: 'Options', window_id: int = 0, os_
                 yield result(encoded_query_name)
             else:
                 yield result(encoded_query_name, rval)
+        elif name in ('query-os-name', 'query-os_name'):
+            # https://github.com/kovidgoyal/kitty/issues/9217
+            yield result(encoded_query_name, os.uname().sysname)
         else:
             if name in bool_capabilities:
-                yield result(encoded_query_name, '')
+                yield result(encoded_query_name, True)
                 continue
             try:
                 val = queryable_capabilities[name]

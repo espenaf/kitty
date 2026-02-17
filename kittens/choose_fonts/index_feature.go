@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/readline"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/readline"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -81,8 +81,7 @@ func (self *if_panel) on_click(id string) (err error) {
 	if scheme != "fval" {
 		return
 	}
-	v, _ := strconv.ParseUint(val, 10, 64)
-
+	v, _ := strconv.ParseUint(val, 10, 0)
 	if err = self.handler.face_pane.change_feature_value(self.feat_tag, uint(v), false); err != nil {
 		return err
 	}
@@ -143,7 +142,7 @@ func (self *if_panel) on_enter(family, which string, settings faces_settings, fe
 	self.current_val = current_val
 	self.rl.ResetText()
 	if self.current_val > 0 {
-		self.rl.SetText(strconv.Itoa(int(self.current_val)))
+		self.rl.SetText(strconv.FormatUint(uint64(self.current_val), 10))
 	}
 	return self.handler.draw_screen()
 }

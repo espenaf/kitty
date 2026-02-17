@@ -71,6 +71,45 @@ convert_from_opts_modify_font(PyObject *py_opts, Options *opts) {
 }
 
 static void
+convert_from_python_box_drawing_scale(PyObject *val, Options *opts) {
+    box_drawing_scale(val, opts);
+}
+
+static void
+convert_from_opts_box_drawing_scale(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "box_drawing_scale");
+    if (ret == NULL) return;
+    convert_from_python_box_drawing_scale(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_undercurl_style(PyObject *val, Options *opts) {
+    opts->undercurl_style = undercurl_style(val);
+}
+
+static void
+convert_from_opts_undercurl_style(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "undercurl_style");
+    if (ret == NULL) return;
+    convert_from_python_undercurl_style(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_underline_exclusion(PyObject *val, Options *opts) {
+    underline_exclusion(val, opts);
+}
+
+static void
+convert_from_opts_underline_exclusion(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "underline_exclusion");
+    if (ret == NULL) return;
+    convert_from_python_underline_exclusion(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
 convert_from_python_text_composition_strategy(PyObject *val, Options *opts) {
     text_composition_strategy(val, opts);
 }
@@ -162,15 +201,236 @@ convert_from_opts_cursor_stop_blinking_after(PyObject *py_opts, Options *opts) {
 }
 
 static void
-convert_from_python_scrollback_indicator_opacity(PyObject *val, Options *opts) {
-    opts->scrollback_indicator_opacity = PyFloat_AsFloat(val);
+convert_from_python_cursor_trail(PyObject *val, Options *opts) {
+    opts->cursor_trail = parse_ms_long_to_monotonic_t(val);
 }
 
 static void
-convert_from_opts_scrollback_indicator_opacity(PyObject *py_opts, Options *opts) {
-    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollback_indicator_opacity");
+convert_from_opts_cursor_trail(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "cursor_trail");
     if (ret == NULL) return;
-    convert_from_python_scrollback_indicator_opacity(ret, opts);
+    convert_from_python_cursor_trail(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_cursor_trail_decay(PyObject *val, Options *opts) {
+    cursor_trail_decay(val, opts);
+}
+
+static void
+convert_from_opts_cursor_trail_decay(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "cursor_trail_decay");
+    if (ret == NULL) return;
+    convert_from_python_cursor_trail_decay(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_cursor_trail_start_threshold(PyObject *val, Options *opts) {
+    opts->cursor_trail_start_threshold = PyLong_AsLong(val);
+}
+
+static void
+convert_from_opts_cursor_trail_start_threshold(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "cursor_trail_start_threshold");
+    if (ret == NULL) return;
+    convert_from_python_cursor_trail_start_threshold(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_cursor_trail_color(PyObject *val, Options *opts) {
+    cursor_trail_color(val, opts);
+}
+
+static void
+convert_from_opts_cursor_trail_color(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "cursor_trail_color");
+    if (ret == NULL) return;
+    convert_from_python_cursor_trail_color(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar(PyObject *val, Options *opts) {
+    opts->scrollbar = scrollbar(val);
+}
+
+static void
+convert_from_opts_scrollbar(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_interactive(PyObject *val, Options *opts) {
+    opts->scrollbar_interactive = PyObject_IsTrue(val);
+}
+
+static void
+convert_from_opts_scrollbar_interactive(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_interactive");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_interactive(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_jump_on_click(PyObject *val, Options *opts) {
+    opts->scrollbar_jump_on_click = PyObject_IsTrue(val);
+}
+
+static void
+convert_from_opts_scrollbar_jump_on_click(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_jump_on_click");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_jump_on_click(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_width(PyObject *val, Options *opts) {
+    opts->scrollbar_width = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_width(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_width");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_width(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_hover_width(PyObject *val, Options *opts) {
+    opts->scrollbar_hover_width = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_hover_width(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_hover_width");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_hover_width(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_handle_opacity(PyObject *val, Options *opts) {
+    opts->scrollbar_handle_opacity = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_handle_opacity(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_handle_opacity");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_handle_opacity(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_radius(PyObject *val, Options *opts) {
+    opts->scrollbar_radius = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_radius(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_radius");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_radius(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_gap(PyObject *val, Options *opts) {
+    opts->scrollbar_gap = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_gap(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_gap");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_gap(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_min_handle_height(PyObject *val, Options *opts) {
+    opts->scrollbar_min_handle_height = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_min_handle_height(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_min_handle_height");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_min_handle_height(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_hitbox_expansion(PyObject *val, Options *opts) {
+    opts->scrollbar_hitbox_expansion = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_hitbox_expansion(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_hitbox_expansion");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_hitbox_expansion(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_track_opacity(PyObject *val, Options *opts) {
+    opts->scrollbar_track_opacity = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_track_opacity(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_track_opacity");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_track_opacity(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_track_hover_opacity(PyObject *val, Options *opts) {
+    opts->scrollbar_track_hover_opacity = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_scrollbar_track_hover_opacity(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_track_hover_opacity");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_track_hover_opacity(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_handle_color(PyObject *val, Options *opts) {
+    opts->scrollbar_handle_color = PyLong_AsUnsignedLong(val);
+}
+
+static void
+convert_from_opts_scrollbar_handle_color(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_handle_color");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_handle_color(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_scrollbar_track_color(PyObject *val, Options *opts) {
+    opts->scrollbar_track_color = PyLong_AsUnsignedLong(val);
+}
+
+static void
+convert_from_opts_scrollbar_track_color(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "scrollbar_track_color");
+    if (ret == NULL) return;
+    convert_from_python_scrollbar_track_color(ret, opts);
     Py_DECREF(ret);
 }
 
@@ -240,8 +500,34 @@ convert_from_opts_touch_scroll_multiplier(PyObject *py_opts, Options *opts) {
 }
 
 static void
+convert_from_python_pixel_scroll(PyObject *val, Options *opts) {
+    opts->pixel_scroll = PyObject_IsTrue(val);
+}
+
+static void
+convert_from_opts_pixel_scroll(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "pixel_scroll");
+    if (ret == NULL) return;
+    convert_from_python_pixel_scroll(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_momentum_scroll(PyObject *val, Options *opts) {
+    opts->momentum_scroll = PyFloat_AsFloat(val);
+}
+
+static void
+convert_from_opts_momentum_scroll(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "momentum_scroll");
+    if (ret == NULL) return;
+    convert_from_python_momentum_scroll(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
 convert_from_python_mouse_hide_wait(PyObject *val, Options *opts) {
-    opts->mouse_hide_wait = parse_s_double_to_monotonic_t(val);
+    mouse_hide_wait(val, opts);
 }
 
 static void
@@ -423,7 +709,7 @@ convert_from_opts_default_pointer_shape(PyObject *py_opts, Options *opts) {
 
 static void
 convert_from_python_pointer_shape_when_dragging(PyObject *val, Options *opts) {
-    opts->pointer_shape_when_dragging = pointer_shape(val);
+    dragging_pointer_shape(val, opts);
 }
 
 static void
@@ -721,19 +1007,6 @@ convert_from_opts_tab_bar_style(PyObject *py_opts, Options *opts) {
 }
 
 static void
-convert_from_python_tab_bar_min_tabs(PyObject *val, Options *opts) {
-    opts->tab_bar_min_tabs = PyLong_AsUnsignedLong(val);
-}
-
-static void
-convert_from_opts_tab_bar_min_tabs(PyObject *py_opts, Options *opts) {
-    PyObject *ret = PyObject_GetAttrString(py_opts, "tab_bar_min_tabs");
-    if (ret == NULL) return;
-    convert_from_python_tab_bar_min_tabs(ret, opts);
-    Py_DECREF(ret);
-}
-
-static void
 convert_from_python_tab_bar_background(PyObject *val, Options *opts) {
     opts->tab_bar_background = color_or_none_as_int(val);
 }
@@ -812,6 +1085,19 @@ convert_from_opts_background_blur(PyObject *py_opts, Options *opts) {
 }
 
 static void
+convert_from_python_dynamic_background_opacity(PyObject *val, Options *opts) {
+    opts->dynamic_background_opacity = PyObject_IsTrue(val);
+}
+
+static void
+convert_from_opts_dynamic_background_opacity(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "dynamic_background_opacity");
+    if (ret == NULL) return;
+    convert_from_python_dynamic_background_opacity(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
 convert_from_python_background_image(PyObject *val, Options *opts) {
     background_image(val, opts);
 }
@@ -847,19 +1133,6 @@ convert_from_opts_background_image_linear(PyObject *py_opts, Options *opts) {
     PyObject *ret = PyObject_GetAttrString(py_opts, "background_image_linear");
     if (ret == NULL) return;
     convert_from_python_background_image_linear(ret, opts);
-    Py_DECREF(ret);
-}
-
-static void
-convert_from_python_dynamic_background_opacity(PyObject *val, Options *opts) {
-    opts->dynamic_background_opacity = PyObject_IsTrue(val);
-}
-
-static void
-convert_from_opts_dynamic_background_opacity(PyObject *py_opts, Options *opts) {
-    PyObject *ret = PyObject_GetAttrString(py_opts, "dynamic_background_opacity");
-    if (ret == NULL) return;
-    convert_from_python_dynamic_background_opacity(ret, opts);
     Py_DECREF(ret);
 }
 
@@ -1109,6 +1382,12 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     if (PyErr_Occurred()) return false;
     convert_from_opts_modify_font(py_opts, opts);
     if (PyErr_Occurred()) return false;
+    convert_from_opts_box_drawing_scale(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_undercurl_style(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_underline_exclusion(py_opts, opts);
+    if (PyErr_Occurred()) return false;
     convert_from_opts_text_composition_strategy(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_cursor_shape(py_opts, opts);
@@ -1123,7 +1402,41 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     if (PyErr_Occurred()) return false;
     convert_from_opts_cursor_stop_blinking_after(py_opts, opts);
     if (PyErr_Occurred()) return false;
-    convert_from_opts_scrollback_indicator_opacity(py_opts, opts);
+    convert_from_opts_cursor_trail(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_cursor_trail_decay(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_cursor_trail_start_threshold(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_cursor_trail_color(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_interactive(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_jump_on_click(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_width(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_hover_width(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_handle_opacity(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_radius(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_gap(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_min_handle_height(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_hitbox_expansion(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_track_opacity(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_track_hover_opacity(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_handle_color(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_scrollbar_track_color(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_scrollback_pager_history_size(py_opts, opts);
     if (PyErr_Occurred()) return false;
@@ -1134,6 +1447,10 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     convert_from_opts_wheel_scroll_min_lines(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_touch_scroll_multiplier(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_pixel_scroll(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_momentum_scroll(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_mouse_hide_wait(py_opts, opts);
     if (PyErr_Occurred()) return false;
@@ -1209,8 +1526,6 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     if (PyErr_Occurred()) return false;
     convert_from_opts_tab_bar_style(py_opts, opts);
     if (PyErr_Occurred()) return false;
-    convert_from_opts_tab_bar_min_tabs(py_opts, opts);
-    if (PyErr_Occurred()) return false;
     convert_from_opts_tab_bar_background(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_tab_bar_margin_color(py_opts, opts);
@@ -1223,13 +1538,13 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     if (PyErr_Occurred()) return false;
     convert_from_opts_background_blur(py_opts, opts);
     if (PyErr_Occurred()) return false;
+    convert_from_opts_dynamic_background_opacity(py_opts, opts);
+    if (PyErr_Occurred()) return false;
     convert_from_opts_background_image(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_background_image_layout(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_background_image_linear(py_opts, opts);
-    if (PyErr_Occurred()) return false;
-    convert_from_opts_dynamic_background_opacity(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_background_tint(py_opts, opts);
     if (PyErr_Occurred()) return false;

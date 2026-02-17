@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/utils/humanize"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/humanize"
 )
 
 var _ = fmt.Print
@@ -101,6 +101,7 @@ func DownloadFileWithProgress(destpath, url string, kill_if_signaled bool) (err 
 	}
 
 	do_download := func() {
+		lp.RecoverFromPanicInGoRoutine()
 		dl_data.mutex.Lock()
 		dl_data.download_started = true
 		dl_data.mutex.Unlock()

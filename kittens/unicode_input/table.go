@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"kitty/tools/unicode_names"
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/unicode_names"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -31,8 +31,8 @@ func resolved_char(ch rune, emoji_variation string) string {
 }
 
 func decode_hint(text string) int {
-	x, err := strconv.ParseUint(text, INDEX_BASE, 32)
-	if err != nil {
+	x, err := strconv.ParseInt(text, INDEX_BASE, 0)
+	if err != nil || x < 0 {
 		return -1
 	}
 	return int(x)

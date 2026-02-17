@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"kitty/tools/utils"
-	"kitty/tools/utils/base85"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/base85"
 )
 
 func curve25519_key_pair() (private_key []byte, public_key []byte, err error) {
@@ -131,8 +131,8 @@ func Encrypt_cmd(cmd *utils.RemoteControlCmd, password string, other_pubkey []by
 }
 
 func Encrypt_data(data []byte, other_pubkey []byte, encryption_protocol string) (ans []byte, err error) {
-	d := make([]byte, 0, len(data)+32)
-	d = append(d, []byte(fmt.Sprintf("%s:", strconv.FormatInt(time.Now().UnixNano(), 10)))...)
+	d := make([]byte, 0, uint64(len(data))+32)
+	d = fmt.Appendf(d, "%s:", strconv.FormatInt(time.Now().UnixNano(), 10))
 	d = append(d, data...)
 	iv, tag, ciphertext, pubkey, err := encrypt(d, other_pubkey, encryption_protocol)
 	if err != nil {

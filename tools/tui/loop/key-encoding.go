@@ -4,10 +4,11 @@ package loop
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
-	"kitty"
+	"github.com/kovidgoyal/kitty"
 )
 
 // key encoding mappings {{{
@@ -138,31 +139,31 @@ func KeyEventFromCSI(csi string) *KeyEvent {
 	}
 	orig_csi := csi
 	last_char := csi[len(csi)-1:]
-	if !strings.Contains("u~ABCDEHFPQRS", last_char) || (last_char == "~" && (csi == "200~" || csi == "201~")) {
+	if !strings.Contains("u~ABCDEHFPQS", last_char) || (last_char == "~" && (csi == "200~" || csi == "201~")) {
 		return nil
 	}
 	csi = csi[:len(csi)-1]
 	sections := strings.Split(csi, ";")
 
-	get_sub_sections := func(section string, missing int) []int {
+	get_sub_sections := func(section string, missing int32) []int32 {
 		p := strings.Split(section, ":")
-		ans := make([]int, len(p))
+		ans := make([]int32, len(p))
 		for i, x := range p {
 			if x == "" {
 				ans[i] = missing
 			} else {
-				q, err := strconv.Atoi(x)
-				if err != nil {
+				q, err := strconv.ParseUint(x, 10, 32)
+				if err != nil || q > math.MaxInt32 {
 					return nil
 				}
-				ans[i] = q
+				ans[i] = int32(q)
 			}
 		}
 		return ans
 	}
 	first_section := get_sub_sections(sections[0], 0)
-	second_section := []int{}
-	third_section := []int{}
+	second_section := []int32{}
+	third_section := []int32{}
 	if len(sections) > 1 {
 		second_section = get_sub_sections(sections[1], 1)
 	}
@@ -170,9 +171,9 @@ func KeyEventFromCSI(csi string) *KeyEvent {
 		third_section = get_sub_sections(sections[2], 0)
 	}
 	var ans = KeyEvent{Type: PRESS, CSI: orig_csi}
-	var keynum int
+	var keynum int32
 	if val, ok := letter_trailer_to_csi_number_map[last_char]; ok {
-		keynum = val
+		keynum = int32(val)
 	} else {
 		if len(first_section) == 0 {
 			return nil
@@ -180,7 +181,7 @@ func KeyEventFromCSI(csi string) *KeyEvent {
 		keynum = first_section[0]
 	}
 
-	key_name := func(keynum int) string {
+	key_name := func(keynum int32) string {
 		switch keynum {
 		case 0:
 			return ""
@@ -190,11 +191,11 @@ func KeyEventFromCSI(csi string) *KeyEvent {
 			}
 			return "F3"
 		default:
-			if val, ok := csi_number_to_functional_number_map[keynum]; ok {
-				keynum = val
+			if val, ok := csi_number_to_functional_number_map[int(keynum)]; ok {
+				keynum = int32(val)
 			}
 			ans := ""
-			if val, ok := functional_key_number_to_name_map[keynum]; ok {
+			if val, ok := functional_key_number_to_name_map[int(keynum)]; ok {
 				ans = val
 			} else {
 				ans = string(rune(keynum))
@@ -304,6 +305,20 @@ func (self *KeyEvent) Matches(spec string, event_type KeyEventType) bool {
 
 func (self *KeyEvent) MatchesPressOrRepeat(spec string) bool {
 	return self.MatchesParsedShortcut(ParseShortcut(spec), PRESS|REPEAT)
+}
+
+func (self *KeyEvent) MatchesCaseSensitiveTextOrKey(spec string) bool {
+	if self.MatchesParsedShortcut(ParseShortcut(spec), PRESS|REPEAT) {
+		return true
+	}
+	return self.Text == spec
+}
+
+func (self *KeyEvent) MatchesCaseInsensitiveTextOrKey(spec string) bool {
+	if self.MatchesParsedShortcut(ParseShortcut(spec), PRESS|REPEAT) {
+		return true
+	}
+	return strings.EqualFold(self.Text, spec)
 }
 
 func (self *KeyEvent) MatchesRelease(spec string) bool {

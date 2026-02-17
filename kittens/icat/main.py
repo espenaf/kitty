@@ -22,9 +22,16 @@ be positioned at the top left corner of the image, instead of on the line after 
 
 --scale-up
 type=bool-set
-When used in combination with :option:`--place` it will cause images that are
-smaller than the specified area to be scaled up to use as much of the specified
-area as possible.
+Cause images that are smaller than the specified area to be scaled up to use as much
+of the specified area as possible. The specified area depends on either the :option:`--place`
+or the :option:`--fit` options.
+
+
+--fit
+choices=width,height,both,none
+default=width
+When not using :option:`--place`, control how the image is scaled relative to the screen.
+You can have it fit in the screen width or height or both or neither.
 
 
 --background
@@ -42,7 +49,15 @@ Mirror the image about a horizontal or vertical axis or both.
 
 --clear
 type=bool-set
-Remove all images currently displayed on the screen.
+Remove all images currently displayed on the screen. Note that
+this cannot work with terminal multiplexers such as tmux since
+only the multiplexer can know the position of the screen.
+
+
+--clear-all
+type=bool-set
+Remove all images from screen and scrollback. Note that with terminal
+multiplexers like tmux, this will move images from all panes.
 
 
 --transfer-mode
@@ -133,7 +148,7 @@ Use the Unicode placeholder method to display the images. Useful to display
 images from within full screen terminal programs that do not understand the
 kitty graphics protocol such as multiplexers or editors. See
 :ref:`graphics_unicode_placeholders` for details. Note that when using this
-method, placed (with :option:`--place`) images that do not fit on the screen,
+method, images placed (with :option:`--place`) that do not fit on the screen,
 will get wrapped at the screen edge instead of getting truncated. This
 wrapping is per line and therefore the image will look like it is interleaved
 with blank lines.
@@ -179,7 +194,7 @@ if __name__ == '__main__':
 elif __name__ == '__doc__':
     import sys
 
-    from kitty.cli import CompletionSpec
+    from kitty.simple_cli_definitions import CompletionSpec
     cd = sys.cli_docs  # type: ignore
     cd['usage'] = usage
     cd['options'] = lambda: OPTIONS.format()

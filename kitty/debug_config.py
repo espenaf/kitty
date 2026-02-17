@@ -7,23 +7,25 @@ import socket
 import sys
 import termios
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from functools import partial
 from pprint import pformat
-from typing import IO, Callable, Optional, TypeVar
+from typing import IO, TypeVar
 
 from kittens.tui.operations import colored, styled
 
 from .child import cmdline_of_pid
 from .cli import version
+from .colors import theme_colors
 from .constants import extensions_dir, is_macos, is_wayland, kitty_base_dir, kitty_exe, shell_path
-from .fast_data_types import Color, SingleKey, current_fonts, num_users, opengl_version_string, wayland_compositor_data
+from .fast_data_types import Color, SingleKey, current_fonts, glfw_get_system_color_theme, gpu_driver_version_string, num_users, wayland_compositor_data
 from .options.types import Options as KittyOpts
-from .options.types import defaults
+from .options.types import defaults, secret_options
 from .options.utils import KeyboardMode, KeyDefinition
 from .rgb import color_as_sharp, color_from_int
 from .types import MouseEvent, Shortcut, mod_to_names
+from .utils import shlex_split
 
 AnyEvent = TypeVar('AnyEvent', MouseEvent, Shortcut)
 Print = Callable[..., None]
@@ -70,7 +72,7 @@ def compare_maps(
 
 
 
-def compare_opts(opts: KittyOpts, print: Print) -> None:
+def compare_opts(opts: KittyOpts, global_shortcuts: dict[str, SingleKey] | None, print: Print) -> None:
     from .config import load_config
     print()
     print('Config options different from defaults:')
@@ -84,15 +86,21 @@ def compare_opts(opts: KittyOpts, print: Print) -> None:
     fmt = f'{{:{field_len:d}s}}'
     colors = []
     for f in changed_opts:
+        if f in secret_options:
+            print(title(f'{f}:'), 'REDACTED FOR SECURITY')
+            continue
         val = getattr(opts, f)
         if isinstance(val, dict):
-            print(title(f'{f}:'))
+            print(f'{f}:')
             if f == 'symbol_map':
                 for k in sorted(val):
                     print(f'\tU+{k[0]:04x} - U+{k[1]:04x} → {val[k]}')
             elif f == 'modify_font':
                 for k in sorted(val):
                     print('   ', val[k])
+            elif f == 'exe_search_path':
+                for k in val:
+                    print('   ', k)
             else:
                 print(pformat(val))
         else:
@@ -134,6 +142,11 @@ def compare_opts(opts: KittyOpts, print: Print) -> None:
         initial = {as_sc(k, v[0]): as_str(v) for k, v in initial_.keymap.items()}
         final_ = opts.keyboard_modes.get(kmn, KeyboardMode(kmn))
         final = {as_sc(k, v[0]): as_str(v) for k, v in final_.keymap.items()}
+        if not kmn and global_shortcuts:
+            for action, sk in global_shortcuts.items():
+                sc = Shortcut((sk,))
+                if sc not in final:
+                    final[sc] = action
         compare_maps(final, opts.kitty_mod, initial, default_opts.kitty_mod, print, mode_name=kmn)
     new_keyboard_modes = set(opts.keyboard_modes) - set(default_opts.keyboard_modes)
     for kmn in new_keyboard_modes:
@@ -175,6 +188,16 @@ class IssueData:
             self.num_users = -1
         self.u = str(self.num_users)
         self.U = self.u + ' user' + ('' if self.num_users == 1 else 's')
+        self.vars = {}
+        with suppress(Exception), open('/etc/os-release') as osf:
+            for line in osf:
+                k, _, v = line.strip().partition('=')
+                self.vars[k] = ' '.join(shlex_split(v))
+        if not self.vars:
+            with suppress(Exception), open('/usr/lib/os-release') as osf:
+                for line in osf:
+                    k, _, v = line.strip().partition('=')
+                    self.vars[k] = ' '.join(shlex_split(v))
 
     def translate_issue_char(self, char: str) -> str:
         try:
@@ -183,21 +206,39 @@ class IssueData:
             return char
 
     def parse_issue_file(self, issue_file: IO[str]) -> Iterator[str]:
-        last_char: Optional[str] = None
-        while True:
-            this_char = issue_file.read(1)
-            if not this_char:
-                break
-            if last_char == '\\':
-                yield self.translate_issue_char(this_char)
-            elif last_char is not None:
-                yield last_char
-            # `\\\a` should not match the last two slashes,
-            # so make it look like it was `\?\a` where `?`
-            # is some character other than `\`.
-            last_char = None if last_char == '\\' else this_char
-        if last_char is not None:
-            yield last_char
+        state = 'normal'
+        varname = ''
+        for ch in issue_file.read():
+            match state:
+                case 'normal':
+                    if ch == '\\':
+                        state = 'escape'
+                    else:
+                        yield ch
+                case 'escape':
+                    match ch:
+                        case 'S':
+                            state = 'sub_start'
+                        case '\\':
+                            yield '\\'
+                            state = 'normal'
+                        case _:
+                            yield self.translate_issue_char(ch)
+                            state = 'normal'
+                case 'sub_start':
+                    if ch == '{':  # }
+                        state = 'sub'
+                        varname = ''
+                    else:
+                        yield ch
+                        state = 'normal'
+                case 'sub':
+                    if ch == '}':
+                        if val := self.vars.get(varname):
+                            yield val
+                        state = 'normal'
+                    else:
+                        varname += ch
 
 
 def format_tty_name(raw: str) -> str:
@@ -229,7 +270,18 @@ def compositor_name() -> str:
     return ans
 
 
-def debug_config(opts: KittyOpts) -> str:
+def issue_data() -> str:
+    with suppress(Exception):
+        idata = IssueData()
+        with open('/etc/issue', encoding='utf-8', errors='replace') as f:
+            return ''.join(idata.parse_issue_file(f)).strip()
+    return ''
+
+
+def debug_config(opts: KittyOpts | None = None, global_shortcuts: dict[str, SingleKey] | None = None) -> str:
+    if opts is None:
+        from kitty.cli import create_default_opts
+        opts = create_default_opts()
     from io import StringIO
     out = StringIO()
     p = partial(print, file=out)
@@ -237,43 +289,36 @@ def debug_config(opts: KittyOpts) -> str:
     p(' '.join(os.uname()))
     if is_macos:
         import subprocess
-        p(' '.join(subprocess.check_output(['sw_vers']).decode('utf-8').splitlines()).strip())
-    if os.path.exists('/etc/issue'):
-        try:
-            idata = IssueData()
-        except Exception:
-            pass
-        else:
-            with open('/etc/issue', encoding='utf-8', errors='replace') as f:
-                try:
-                    datums = idata.parse_issue_file(f)
-                except Exception:
-                    pass
-                else:
-                    p(end=''.join(datums))
-    if os.path.exists('/etc/lsb-release'):
-        with open('/etc/lsb-release', encoding='utf-8', errors='replace') as f:
-            p(f.read().strip())
+        with suppress(Exception):
+            p(' '.join(subprocess.check_output(['sw_vers']).decode('utf-8').splitlines()).strip())
+    if (idata := issue_data()):
+        p(idata)
+    with suppress(Exception), open('/etc/lsb-release', encoding='utf-8', errors='replace') as f:
+        p(f.read().strip())
     if not is_macos:
         p('Running under:', green(compositor_name()))
-    p(green('OpenGL:'), opengl_version_string())
+    p(green('OpenGL:'), gpu_driver_version_string())
     p(green('Frozen:'), 'True' if getattr(sys, 'frozen', False) else 'False')
     p(green('Fonts:'))
     for k, font in current_fonts().items():
         if hasattr(font, 'identify_for_debug'):
-            p(yellow(f'  {k}:'), font.identify_for_debug())
+            flines = font.identify_for_debug().splitlines()
+            p(yellow(f'{k.rjust(8)}:'), flines[0])
+            for fl in flines[1:]:
+                p(' ' * 9, fl)
     p(green('Paths:'))
     p(yellow('  kitty:'), os.path.realpath(kitty_exe()))
     p(yellow('  base dir:'), kitty_base_dir)
     p(yellow('  extensions dir:'), extensions_dir)
     p(yellow('  system shell:'), shell_path)
+    p(f'System color scheme: {green(glfw_get_system_color_theme())}. Applied color theme type: {yellow(theme_colors.applied_theme or "none")}')
     if opts.config_paths:
         p(green('Loaded config files:'))
         p(' ', '\n  '.join(opts.config_paths))
     if opts.config_overrides:
         p(green('Loaded config overrides:'))
         p(' ', '\n  '.join(opts.config_overrides))
-    compare_opts(opts, p)
+    compare_opts(opts, global_shortcuts, p)
     p()
     p(green('Important environment variables seen by the kitty process:'))
 

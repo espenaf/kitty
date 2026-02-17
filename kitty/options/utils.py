@@ -6,26 +6,17 @@ import enum
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import (
     Any,
-    Callable,
-    Container,
-    Dict,
-    FrozenSet,
     Generic,
-    Iterable,
-    Iterator,
-    List,
     Literal,
     NamedTuple,
-    Optional,
-    Sequence,
-    Tuple,
     TypeVar,
-    Union,
+    cast,
     get_args,
 )
 
@@ -35,6 +26,7 @@ from kitty.conf.utils import (
     KeyAction,
     KeyFuncWrapper,
     currently_parsing,
+    number_with_unit,
     percent,
     positive_float,
     positive_int,
@@ -46,27 +38,27 @@ from kitty.conf.utils import (
     unit_float,
 )
 from kitty.constants import is_macos
-from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_UNDERLINE, NO_CURSOR_SHAPE, Color, Shlex, SingleKey
+from kitty.fast_data_types import CURSOR_BEAM, CURSOR_BLOCK, CURSOR_HOLLOW, CURSOR_UNDERLINE, NO_CURSOR_SHAPE, Color, Shlex, SingleKey
 from kitty.fonts import FontModification, FontSpec, ModificationType, ModificationUnit, ModificationValue
 from kitty.key_names import character_key_name_aliases, functional_key_name_aliases, get_key_name_lookup
 from kitty.rgb import color_as_int
 from kitty.types import FloatEdges, MouseEvent
 from kitty.utils import expandvars, log_error, resolve_abs_or_config_path, shlex_split
 
-KeyMap = Dict[SingleKey, List['KeyDefinition']]
-MouseMap = Dict[MouseEvent, str]
-KeySequence = Tuple[SingleKey, ...]
+KeyMap = dict[SingleKey, list['KeyDefinition']]
+MouseMap = dict[MouseEvent, str]
+KeySequence = tuple[SingleKey, ...]
 MINIMUM_FONT_SIZE = 4
 default_tab_separator = ' ┇'
 mod_map = {'⌃': 'CONTROL', 'CTRL': 'CONTROL', '⇧': 'SHIFT', '⌥': 'ALT', 'OPTION': 'ALT', 'OPT': 'ALT',
            '⌘': 'SUPER', 'COMMAND': 'SUPER', 'CMD': 'SUPER', 'KITTY_MOD': 'KITTY'}
-character_key_name_aliases_with_ascii_lowercase: Dict[str, str] = character_key_name_aliases.copy()
+character_key_name_aliases_with_ascii_lowercase: dict[str, str] = character_key_name_aliases.copy()
 for x in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
     character_key_name_aliases_with_ascii_lowercase[x] = x.lower()
 sequence_sep = '>'
 mouse_button_map = {'left': 'b1', 'middle': 'b3', 'right': 'b2'}
 mouse_trigger_count_map = {'doubleclick': -3, 'click': -2, 'release': -1, 'press': 1, 'doublepress': 2, 'triplepress': 3}
-FuncArgsType = Tuple[str, Sequence[Any]]
+FuncArgsType = tuple[str, Sequence[Any]]
 func_with_args = KeyFuncWrapper[FuncArgsType]()
 DELETE_ENV_VAR = '_delete_this_env_var_'
 
@@ -85,7 +77,8 @@ class InvalidMods(ValueError):
 @func_with_args(
     'pass_selection_to_program', 'new_window', 'new_tab', 'new_os_window',
     'new_window_with_cwd', 'new_tab_with_cwd', 'new_os_window_with_cwd',
-    'launch', 'mouse_handle_click', 'show_error',
+    'launch', 'mouse_handle_click', 'show_error', 'goto_session', 'save_as_session',
+    'close_session',
     )
 def shlex_parse(func: str, rest: str) -> FuncArgsType:
     return func, to_cmdline(rest)
@@ -121,12 +114,10 @@ def send_key(func: str, rest: str) -> FuncArgsType:
 
 @func_with_args('run_kitten', 'run_simple_kitten', 'kitten')
 def kitten_parse(func: str, rest: str) -> FuncArgsType:
+    parts = to_cmdline(rest)
     if func == 'kitten':
-        args = rest.split(maxsplit=1)
-    else:
-        args = rest.split(maxsplit=2)[1:]
-        func = 'kitten'
-    return func, [args[0]] + (to_cmdline(args[1]) if len(args) > 1 else [])
+        return func, parts
+    return 'kitten', parts[1:]
 
 
 @func_with_args('open_url')
@@ -145,8 +136,10 @@ def open_url_parse(func: str, rest: str) -> FuncArgsType:
 
 @func_with_args('goto_tab')
 def goto_tab_parse(func: str, rest: str) -> FuncArgsType:
-    args = (max(0, int(rest)), )
-    return func, args
+    n = int(rest)
+    if n < 0:
+        n += 1  # goto_tab subtracts 1 from its argument, this maps both zero and -1 to previous tab for backwards compat.
+    return func, (n,)
 
 
 @func_with_args('detach_window')
@@ -171,9 +164,12 @@ def detach_tab_parse(func: str, rest: str) -> FuncArgsType:
     return func, (rest,)
 
 
-@func_with_args('set_background_opacity', 'goto_layout', 'toggle_layout', 'toggle_tab', 'kitty_shell', 'show_kitty_doc', 'set_tab_title', 'push_keyboard_mode')
+@func_with_args(
+    'set_background_opacity', 'goto_layout', 'toggle_layout', 'toggle_tab', 'kitty_shell', 'show_kitty_doc',
+    'set_tab_title', 'push_keyboard_mode', 'dump_lines_with_attrs', 'set_window_title', 'simulate_color_scheme_preference_change',
+)
 def simple_parse(func: str, rest: str) -> FuncArgsType:
-    return func, [rest]
+    return func, (rest,)
 
 
 @func_with_args('set_font_size')
@@ -196,15 +192,15 @@ def signal_child_parse(func: str, rest: str) -> FuncArgsType:
 
 
 @func_with_args('change_font_size')
-def parse_change_font_size(func: str, rest: str) -> Tuple[str, Tuple[bool, Optional[str], float]]:
+def parse_change_font_size(func: str, rest: str) -> tuple[str, tuple[bool, str | None, float]]:
     vals = rest.strip().split(maxsplit=1)
     if len(vals) != 2:
         log_error(f'Invalid change_font_size specification: {rest}, treating it as default')
         return func, (True, None, 0)
     c_all = vals[0].lower() == 'all'
-    sign: Optional[str] = None
+    sign: str | None = None
     amt = vals[1]
-    if amt[0] in '+-':
+    if amt[0] in '+-*/':
         sign = amt[0]
         amt = amt[1:]
     return func, (c_all, sign, float(amt.strip()))
@@ -218,7 +214,7 @@ def clear_terminal(func: str, rest: str) -> FuncArgsType:
         args = ['reset', True]
     else:
         action = vals[0].lower()
-        if action not in ('reset', 'scroll', 'scrollback', 'clear', 'to_cursor', 'to_cursor_scroll'):
+        if action not in ('reset', 'scroll', 'scrollback', 'clear', 'to_cursor', 'to_cursor_scroll', 'last_command'):
             log_error(f'{action} is unknown for clear_terminal, using reset')
             action = 'reset'
         args = [action, vals[1].lower() == 'active']
@@ -280,7 +276,7 @@ def resize_window(func: str, rest: str) -> FuncArgsType:
 def move_window(func: str, rest: str) -> FuncArgsType:
     rest = rest.lower()
     rest = {'up': 'top', 'down': 'bottom'}.get(rest, rest)
-    prest: Union[int, str] = rest
+    prest: int | str = rest
     try:
         prest = int(prest)
     except Exception:
@@ -323,15 +319,34 @@ def remote_control_script(func: str, rest: str) -> FuncArgsType:
     return func, args
 
 
-@func_with_args('nth_os_window', 'nth_window', 'scroll_to_prompt', 'visual_window_select_action_trigger', 'next_layout')
+@func_with_args('nth_os_window', 'nth_window', 'visual_window_select_action_trigger', 'next_layout')
 def single_integer_arg(func: str, rest: str) -> FuncArgsType:
     try:
         num = int(rest)
     except Exception:
         if rest:
             log_error(f'Invalid number for {func}: {rest}')
-        num = -1 if func == 'scroll_to_prompt' else 1
+        num = 1
     return func, [num]
+
+
+@func_with_args('scroll_to_prompt')
+def scroll_to_prompt(func: str, rest: str) -> FuncArgsType:
+    vals = rest.strip().split()
+    args = [-1, 0]
+    if len(vals) > 2:
+        log_error('scroll_to_prompt needs one or two arguments, using defaults')
+    else:
+        try:
+            args[0] = int(vals[0])
+        except Exception:
+            log_error(f'{vals[0]} is not a valid number of prompts to jump for scroll_to_prompt')
+        if len(vals) == 2:
+            try:
+                args[1] = int(vals[1])
+            except Exception:
+                log_error(f'{vals[1]} is not a valid scroll offset for scroll_to_prompt')
+    return func, args
 
 
 @func_with_args('sleep')
@@ -366,7 +381,7 @@ def layout_action(func: str, rest: str) -> FuncArgsType:
     return func, [parts[0], tuple(parts[1:])]
 
 
-def parse_marker_spec(ftype: str, parts: Sequence[str]) -> Tuple[str, Union[str, Tuple[Tuple[int, str], ...]], int]:
+def parse_marker_spec(ftype: str, parts: Sequence[str]) -> tuple[str, str | tuple[tuple[int, str], ...], int]:
     flags = re.UNICODE
     if ftype in ('text', 'itext', 'regex', 'iregex'):
         if ftype.startswith('i'):
@@ -384,7 +399,7 @@ def parse_marker_spec(ftype: str, parts: Sequence[str]) -> Tuple[str, Union[str,
                 sspec = re.escape(sspec)
             ans.append((color, sspec))
         ftype = 'regex'
-        spec: Union[str, Tuple[Tuple[int, str], ...]] = tuple(ans)
+        spec: str | tuple[tuple[int, str], ...] = tuple(ans)
     elif ftype == 'function':
         spec = ' '.join(parts)
     else:
@@ -431,6 +446,7 @@ def mouse_selection(func: str, rest: str) -> FuncArgsType:
             'line': defines.MOUSE_SELECTION_LINE,
             'line_from_point': defines.MOUSE_SELECTION_LINE_FROM_POINT,
             'word_and_line_from_point': defines.MOUSE_SELECTION_WORD_AND_LINE_FROM_POINT,
+            'upto_surrounding_whitespace': defines.MOUSE_SELECTION_UPTO_SURROUNDING_WHITESPACE,
         }
         setattr(mouse_selection, 'code_map', cmap)
     return func, [cmap[rest]]
@@ -442,7 +458,7 @@ def load_config_file(func: str, rest: str) -> FuncArgsType:
 # }}}
 
 
-def parse_mods(parts: Iterable[str], sc: str) -> Optional[int]:
+def parse_mods(parts: Iterable[str], sc: str) -> int | None:
 
     def map_mod(m: str) -> str:
         return mod_map.get(m, m)
@@ -488,7 +504,7 @@ def parse_shortcut(sc: str) -> SingleKey:
         except Exception:
             uq = q.upper()
             uq = functional_key_name_aliases.get(uq, uq)
-            x: Optional[int] = getattr(defines, f'GLFW_FKEY_{uq}', None)
+            x: int | None = getattr(defines, f'GLFW_FKEY_{uq}', None)
             if x is None:
                 lf = get_key_name_lookup()
                 key = lf(q, False) or 0
@@ -508,14 +524,14 @@ def disable_ligatures(x: str) -> int:
     return cmap.get(x.lower(), 0)
 
 
-def box_drawing_scale(x: str) -> Tuple[float, float, float, float]:
+def box_drawing_scale(x: str) -> tuple[float, float, float, float]:
     ans = tuple(float(q.strip()) for q in x.split(','))
     if len(ans) != 4:
         raise ValueError('Invalid box_drawing scale, must have four entries')
     return ans[0], ans[1], ans[2], ans[3]
 
 
-def cursor_text_color(x: str) -> Optional[Color]:
+def cursor_text_color(x: str) -> Color | None:
     if x.lower() == 'background':
         return None
     return to_color(x)
@@ -530,7 +546,8 @@ cshapes_unfocused = {
     'block': CURSOR_BLOCK,
     'beam': CURSOR_BEAM,
     'underline': CURSOR_UNDERLINE,
-    'hollow': NO_CURSOR_SHAPE
+    'hollow': CURSOR_HOLLOW,
+    'unchanged': NO_CURSOR_SHAPE,
 }
 
 
@@ -555,6 +572,10 @@ def to_cursor_unfocused_shape(x: str) -> int:
             )
         )
 
+def cursor_trail_decay(x: str) -> tuple[float, float]:
+    fast, slow = map(positive_float, x.split())
+    slow = max(slow, fast)
+    return fast, slow
 
 def scrollback_lines(x: str) -> int:
     ans = int(x)
@@ -576,7 +597,7 @@ def url_style(x: str) -> int:
     return url_style_map.get(x, url_style_map['curly'])
 
 
-def url_prefixes(x: str) -> Tuple[str, ...]:
+def url_prefixes(x: str) -> tuple[str, ...]:
     return tuple(a.lower() for a in x.replace(',', ' ').split())
 
 
@@ -590,13 +611,13 @@ def copy_on_select(raw: str) -> str:
     return raw
 
 
-def window_size(val: str) -> Tuple[int, str]:
+def window_size(val: str) -> tuple[int, str]:
     val = val.lower()
     unit = 'cells' if val.endswith('c') else 'px'
     return positive_int(val.rstrip('c')), unit
 
 
-def parse_layout_names(parts: Iterable[str]) -> List[str]:
+def parse_layout_names(parts: Iterable[str]) -> list[str]:
     from kitty.layout.interface import all_layouts
     ans = []
     for p in parts:
@@ -611,11 +632,11 @@ def parse_layout_names(parts: Iterable[str]) -> List[str]:
     return uniq(ans)
 
 
-def to_layout_names(raw: str) -> List[str]:
+def to_layout_names(raw: str) -> list[str]:
     return parse_layout_names(x.strip() for x in raw.split(','))
 
 
-def window_border_width(x: Union[str, int, float]) -> Tuple[float, str]:
+def window_border_width(x: str | int | float) -> tuple[float, str]:
     unit = 'pt'
     if isinstance(x, str):
         trailer = x[-2:]
@@ -665,14 +686,14 @@ def resize_draw_strategy(x: str) -> int:
     return cmap.get(x.lower(), 0)
 
 
-def window_logo_scale(x: str) -> Tuple[float, float]:
+def window_logo_scale(x: str) -> tuple[float, float]:
     parts = x.split(maxsplit=1)
     if len(parts) == 1:
         return positive_float(parts[0]), -1.0
     return positive_float(parts[0]), positive_float(parts[1])
 
 
-def resize_debounce_time(x: str) -> Tuple[float, float]:
+def resize_debounce_time(x: str) -> tuple[float, float]:
     parts = x.split(maxsplit=1)
     if len(parts) == 1:
         return positive_float(parts[0]), 0.5
@@ -704,10 +725,10 @@ def tab_separator(x: str) -> str:
 
 
 def tab_bar_edge(x: str) -> int:
-    return {'top': 1, 'bottom': 3}.get(x.lower(), 3)
+    return {'top': defines.TOP_EDGE, 'bottom': defines.BOTTOM_EDGE}.get(x.lower(), defines.BOTTOM_EDGE)
 
 
-def tab_font_style(x: str) -> Tuple[bool, bool]:
+def tab_font_style(x: str) -> tuple[bool, bool]:
     return {
         'bold-italic': (True, True),
         'bold': (True, False),
@@ -719,7 +740,7 @@ def tab_bar_min_tabs(x: str) -> int:
     return max(1, positive_int(x))
 
 
-def tab_fade(x: str) -> Tuple[float, ...]:
+def tab_fade(x: str) -> tuple[float, ...]:
     return tuple(map(unit_float, x.split()))
 
 
@@ -747,16 +768,27 @@ def tab_title_template(x: str) -> str:
     return x
 
 
-def active_tab_title_template(x: str) -> Optional[str]:
+def active_tab_title_template(x: str) -> str | None:
     x = tab_title_template(x)
     return None if x == 'none' else x
 
 
+def text_fg_override_threshold(x: str) -> tuple[float, Literal['%', 'ratio']]:
+    val, unit = number_with_unit(x, '%', 'ratio')
+    return val, cast(Literal['%', 'ratio'], unit)
+
+
+ClearOn = Literal['next', 'focus']
+default_clear_on: tuple[ClearOn, ...] = 'focus', 'next'
+all_clear_on = get_args(ClearOn)
+
+
 class NotifyOnCmdFinish(NamedTuple):
-    when: str
-    duration: float
-    action: str
-    cmdline: Tuple[str, ...]
+    when: str = 'never'
+    duration: float = 5.0
+    action: str = 'notify'
+    cmdline: tuple[str, ...] = ()
+    clear_on: tuple[ClearOn, ...] = default_clear_on
 
 
 def notify_on_cmd_finish(x: str) -> NotifyOnCmdFinish:
@@ -768,30 +800,40 @@ def notify_on_cmd_finish(x: str) -> NotifyOnCmdFinish:
     if len(parts) > 1:
         duration = float(parts[1])
     action = 'notify'
-    cmdline: Tuple[str, ...] = ()
+    cmdline: tuple[str, ...] = ()
+    clear_on = default_clear_on
     if len(parts) > 2:
-        if parts[2] not in ('notify', 'bell', 'command'):
+        if parts[2] not in ('notify', 'bell', 'notify-bell', 'command'):
             raise ValueError(f'Unknown notify_on_cmd_finish action: {parts[2]}')
         action = parts[2]
-        if action == 'command':
+        if action.startswith('notify'):
+            if len(parts) > 3:
+                con: list[ClearOn] = []
+                for x in parts[3].split():
+                    if x not in all_clear_on:
+                        raise ValueError(
+                            f'notify_on_cmd_finish: notify clear_on value "{x}" is invalid. Valid values are: {", ".join(all_clear_on)}')
+                    con.append(cast(ClearOn, x))
+                clear_on = tuple(con)
+        elif action == 'command':
             if len(parts) > 3:
                 cmdline = tuple(to_cmdline(parts[3]))
             else:
                 raise ValueError('notify_on_cmd_finish `command` action needs a command line')
-    return NotifyOnCmdFinish(when, duration, action, cmdline)
+    return NotifyOnCmdFinish(when, duration, action, cmdline, clear_on)
 
 
-def config_or_absolute_path(x: str, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+def config_or_absolute_path(x: str, env: dict[str, str] | None = None) -> str | None:
     if not x or x.lower() == 'none':
         return None
     return resolve_abs_or_config_path(x, env)
 
 
-def filter_notification(val: str, current_val: Dict[str, str]) -> Iterable[Tuple[str, str]]:
+def filter_notification(val: str, current_val: dict[str, str]) -> Iterable[tuple[str, str]]:
     yield val, ''
 
 
-def remote_control_password(val: str, current_val: Dict[str, str]) -> Iterable[Tuple[str, Sequence[str]]]:
+def remote_control_password(val: str, current_val: dict[str, str]) -> Iterable[tuple[str, Sequence[str]]]:
     val = val.strip()
     if val:
         parts = to_cmdline(val, expand=False)
@@ -800,12 +842,12 @@ def remote_control_password(val: str, current_val: Dict[str, str]) -> Iterable[T
             # line of remote_control_password
             raise ValueError('Passwords are not allowed to start with hyphens, ignoring this password')
         if len(parts) == 1:
-            yield "", (parts[0],)
+            yield parts[0], ()
         else:
             yield parts[0], tuple(parts[1:])
 
 
-def clipboard_control(x: str) -> Tuple[str, ...]:
+def clipboard_control(x: str) -> tuple[str, ...]:
     return tuple(x.lower().split())
 
 
@@ -815,17 +857,31 @@ def allow_hyperlinks(x: str) -> int:
     return 1 if to_bool(x) else 0
 
 
-def titlebar_color(x: str) -> int:
+def color_with_special_values(x: str, special_values: dict[str, int], error_msg: str) -> int:
     x = x.strip('"')
-    if x == 'system':
-        return 0
-    if x == 'background':
-        return 1
+    if (ans := special_values.get(x)) is not None:
+        return ans & 0xff
     try:
-        return (color_as_int(to_color(x)) << 8) | 2
-    except ValueError:
-        log_error(f'Ignoring invalid title bar color: {x}')
+        return (color_as_int(to_color(x)) << 8) | len(special_values)
+    except Exception:
+        log_error(error_msg.format(x=x))
     return 0
+
+
+def titlebar_color(x: str) -> int:
+    return color_with_special_values(
+        x,
+        {'system': 0, 'background': 1},
+        'Ignoring invalid title bar color: {x}'
+    )
+
+
+def scrollbar_color(x: str) -> int:
+    return color_with_special_values(
+        x,
+        {'foreground': 0, 'selection_background': 1},
+        'Ignoring invalid scroll bar color: {x}'
+    )
 
 
 def macos_titlebar_color(x: str) -> int:
@@ -867,25 +923,25 @@ def tab_bar_margin_height(x: str) -> TabBarMarginHeight:
     return TabBarMarginHeight(next(ans), next(ans))
 
 
-def clone_source_strategies(x: str) -> FrozenSet[str]:
+def clone_source_strategies(x: str) -> frozenset[str]:
     return frozenset({'venv', 'conda', 'path', 'env_var'} & set(x.lower().split(',')))
 
 
-def clear_all_mouse_actions(val: str, dict_with_parse_results: Optional[Dict[str, Any]] = None) -> bool:
+def clear_all_mouse_actions(val: str, dict_with_parse_results: dict[str, Any] | None = None) -> bool:
     ans = to_bool(val)
     if ans and dict_with_parse_results is not None:
         dict_with_parse_results['mouse_map'] = [None]
     return ans
 
 
-def clear_all_shortcuts(val: str, dict_with_parse_results: Optional[Dict[str, Any]] = None) -> bool:
+def clear_all_shortcuts(val: str, dict_with_parse_results: dict[str, Any] | None = None) -> bool:
     ans = to_bool(val)
     if ans and dict_with_parse_results is not None:
         dict_with_parse_results['map'] = [None]
     return ans
 
 
-def font_features(val: str) -> Iterable[Tuple[str, Tuple[defines.ParsedFontFeature, ...]]]:
+def font_features(val: str) -> Iterable[tuple[str, tuple[defines.ParsedFontFeature, ...]]]:
     if val == 'none':
         return
     parts = val.split()
@@ -902,13 +958,13 @@ def font_features(val: str) -> Iterable[Tuple[str, Tuple[defines.ParsedFontFeatu
         yield parts[0], tuple(features)
 
 
-def modify_font(val: str) -> Iterable[Tuple[str, FontModification]]:
+def modify_font(val: str) -> Iterable[tuple[str, FontModification]]:
     parts = val.split()
     pos, plen = 0, len(parts)
     if plen < 2:
         log_error(f"Ignoring invalid modify_font: {val}")
         return
-    mtype: Optional[ModificationType] = getattr(ModificationType, parts[pos], None)
+    mtype: ModificationType | None = getattr(ModificationType, parts[pos], None)
     if mtype is None:
         log_error(f"Ignoring invalid modify_font with unknown modification type: {parts[pos]}")
         return
@@ -940,7 +996,7 @@ def modify_font(val: str) -> Iterable[Tuple[str, FontModification]]:
     yield key, FontModification(mtype, ModificationValue(mvalue, munit), font_name)
 
 
-def env(val: str, current_val: Dict[str, str]) -> Iterable[Tuple[str, str]]:
+def env(val: str, current_val: dict[str, str]) -> Iterable[tuple[str, str]]:
     val = val.strip()
     if val:
         if '=' in val:
@@ -954,13 +1010,13 @@ def env(val: str, current_val: Dict[str, str]) -> Iterable[Tuple[str, str]]:
             yield val, DELETE_ENV_VAR
 
 
-def store_multiple(val: str, current_val: Container[str]) -> Iterable[Tuple[str, str]]:
+def store_multiple(val: str, current_val: Container[str]) -> Iterable[tuple[str, str]]:
     val = val.strip()
     if val not in current_val:
         yield val, val
 
 
-def menu_map(val: str, current_val: Container[str]) -> Iterable[Tuple[Tuple[str, ...], str]]:
+def menu_map(val: str, current_val: Container[str]) -> Iterable[tuple[tuple[str, ...], str]]:
     parts = val.split(maxsplit=1)
     if len(parts) != 2:
         raise ValueError(f'Ignoring invalid menu action: {val}')
@@ -983,7 +1039,7 @@ def menu_map(val: str, current_val: Container[str]) -> Iterable[Tuple[Tuple[str,
 allowed_shell_integration_values = frozenset({'enabled', 'disabled', 'no-rc', 'no-cursor', 'no-title', 'no-prompt-mark', 'no-complete', 'no-cwd', 'no-sudo'})
 
 
-def shell_integration(x: str) -> FrozenSet[str]:
+def shell_integration(x: str) -> frozenset[str]:
     q = frozenset(x.lower().split())
     if not q.issubset(allowed_shell_integration_values):
         log_error(f'Invalid shell integration options: {q - allowed_shell_integration_values}, ignoring')
@@ -991,7 +1047,28 @@ def shell_integration(x: str) -> FrozenSet[str]:
     return q
 
 
-def paste_actions(x: str) -> FrozenSet[str]:
+def confirm_close(x: str) -> tuple[int, bool]:
+    parts = x.split(maxsplit=1)
+    num = int(parts[0])
+    allow_background = len(parts) > 1 and parts[1] == 'count-background'
+    return num, allow_background
+
+
+def underline_exclusion(x: str) -> tuple[float, Literal['', 'px', 'pt']]:
+    try:
+        return float(x), ''
+    except Exception:
+        unit: Literal['pt', 'px'] = x[-2:]  # type: ignore
+        if unit not in ('px', 'pt'):
+            raise ValueError(f'Invalid underline_exclusion with unrecognized unit: {x}')
+        try:
+            val = float(x[:-2])
+        except Exception:
+            raise ValueError(f'Invalid underline_exclusion with non numeric value: {x}')
+        return val, unit
+
+
+def paste_actions(x: str) -> frozenset[str]:
     s = frozenset({'quote-urls-at-prompt', 'confirm', 'filter', 'confirm-if-large', 'replace-dangerous-control-codes', 'replace-newline', 'no-op'})
     q = frozenset(x.lower().split(','))
     if not q.issubset(s):
@@ -999,7 +1076,7 @@ def paste_actions(x: str) -> FrozenSet[str]:
     return q
 
 
-def action_alias(val: str) -> Iterable[Tuple[str, str]]:
+def action_alias(val: str) -> Iterable[tuple[str, str]]:
     parts = val.split(maxsplit=1)
     if len(parts) > 1:
         alias_name, rest = parts
@@ -1009,7 +1086,7 @@ def action_alias(val: str) -> Iterable[Tuple[str, str]]:
 kitten_alias = action_alias
 
 
-def symbol_map_parser(val: str, min_size: int = 2) -> Iterable[Tuple[Tuple[int, int], str]]:
+def symbol_map_parser(val: str, min_size: int = 2) -> Iterable[tuple[tuple[int, int], str]]:
     parts = val.split()
 
     if len(parts) < min_size:
@@ -1030,11 +1107,11 @@ def symbol_map_parser(val: str, min_size: int = 2) -> Iterable[Tuple[Tuple[int, 
         yield (a, b), family
 
 
-def symbol_map(val: str) -> Iterable[Tuple[Tuple[int, int], str]]:
+def symbol_map(val: str) -> Iterable[tuple[tuple[int, int], str]]:
     yield from symbol_map_parser(val)
 
 
-def narrow_symbols(val: str) -> Iterable[Tuple[Tuple[int, int], int]]:
+def narrow_symbols(val: str) -> Iterable[tuple[tuple[int, int], int]]:
     for x, y in symbol_map_parser(val, min_size=1):
         yield x, int(y or 1)
 
@@ -1061,7 +1138,7 @@ class ActionAlias(NamedTuple):
 class AliasMap:
 
     def __init__(self) -> None:
-        self.aliases: Dict[str, List[ActionAlias]] = {}
+        self.aliases: dict[str, list[ActionAlias]] = {}
 
     def append(self, name: str, aa: ActionAlias) -> None:
         self.aliases.setdefault(name, []).append(aa)
@@ -1070,11 +1147,11 @@ class AliasMap:
         self.aliases.update(aa.aliases)
 
     @lru_cache(maxsize=256)
-    def resolve_aliases(self, definition: str, map_type: MapType = MapType.MAP) -> Tuple[KeyAction, ...]:
+    def resolve_aliases(self, definition: str, map_type: MapType = MapType.MAP) -> tuple[KeyAction, ...]:
         return tuple(resolve_aliases_and_parse_actions(definition, self.aliases, map_type))
 
 
-def build_action_aliases(raw: Dict[str, str], first_arg_replacement: str = '') -> AliasMap:
+def build_action_aliases(raw: dict[str, str], first_arg_replacement: str = '') -> AliasMap:
     ans = AliasMap()
     if first_arg_replacement:
         for alias_name, rest in raw.items():
@@ -1086,8 +1163,10 @@ def build_action_aliases(raw: Dict[str, str], first_arg_replacement: str = '') -
 
 
 def resolve_aliases_and_parse_actions(
-    defn: str, aliases: Dict[str, List[ActionAlias]], map_type: MapType
+    defn: str, aliases: dict[str, list[ActionAlias]], map_type: MapType
 ) -> Iterator[KeyAction]:
+    if not defn:
+        return
     parts = defn.split(maxsplit=1)
     if len(parts) == 1:
         possible_alias = defn
@@ -1183,13 +1262,13 @@ T = TypeVar('T')
 
 
 class LiteralField(Generic[T]):
-    def __init__(self, vals: Tuple[T, ...]):
+    def __init__(self, vals: tuple[T, ...]):
         self._vals = vals
 
     def __set_name__(self, owner: object, name: str) -> None:
         self._name = "_" + name
 
-    def __get__(self, obj: object, type: Optional[type] = None) -> T:
+    def __get__(self, obj: object, type: type | None = None) -> T:
         if obj is None:
             return self._vals[0]
         return getattr(obj, self._name, self._vals[0])
@@ -1221,7 +1300,7 @@ class KeyDefinition(BaseDefinition):
 
     def __init__(
         self, is_sequence: bool = False, trigger: SingleKey = SingleKey(),
-        rest: Tuple[SingleKey, ...] = (), definition: str = '',
+        rest: tuple[SingleKey, ...] = (), definition: str = '',
         options: KeyMapOptions = default_key_map_options
     ):
         super().__init__(definition)
@@ -1235,11 +1314,11 @@ class KeyDefinition(BaseDefinition):
         return not self.options.when_focus_on and not self.options.mode and not self.options.new_mode and not self.is_sequence
 
     @property
-    def full_key_sequence_to_trigger(self) -> Tuple[SingleKey, ...]:
+    def full_key_sequence_to_trigger(self) -> tuple[SingleKey, ...]:
         return (self.trigger,) + self.rest
 
     @property
-    def unique_identity_within_keymap(self) -> Tuple[Tuple[SingleKey, ...], str]:
+    def unique_identity_within_keymap(self) -> tuple[tuple[SingleKey, ...], str]:
         return self.full_key_sequence_to_trigger, self.options.when_focus_on
 
     def __repr__(self) -> str:
@@ -1269,17 +1348,17 @@ class KeyboardMode:
 
     on_unknown: OnUnknown = get_args(OnUnknown)[0]
     on_action : OnAction = get_args(OnAction)[0]
-    sequence_keys: Optional[List[defines.KeyEvent]] = None
+    sequence_keys: list[defines.KeyEvent] | None = None
 
     def __init__(self, name: str = '') -> None:
         self.name = name
         self.keymap: KeyMap = defaultdict(list)
 
 
-KeyboardModeMap = Dict[str, KeyboardMode]
+KeyboardModeMap = dict[str, KeyboardMode]
 
 
-def parse_options_for_map(val: str) -> Tuple[KeyMapOptions, str]:
+def parse_options_for_map(val: str) -> tuple[KeyMapOptions, str]:
     expecting_arg = ''
     ans = KeyMapOptions()
     s = Shlex(val)
@@ -1323,8 +1402,8 @@ def parse_map(val: str) -> Iterable[KeyDefinition]:
         return
     is_sequence = sequence_sep in sc
     if is_sequence:
-        trigger: Optional[SingleKey] = None
-        restl: List[SingleKey] = []
+        trigger: SingleKey | None = None
+        restl: list[SingleKey] = []
         for part in sc.split(sequence_sep):
             try:
                 mods, is_native, key = parse_shortcut(part)
@@ -1407,10 +1486,10 @@ class EasingFunction(NamedTuple):
     num_steps: int = 0
     jump_type: JumpTypes = 'end'
 
-    linear_x: Tuple[float, ...] = ()
-    linear_y: Tuple[float, ...] = ()
+    linear_x: tuple[float, ...] = ()
+    linear_y: tuple[float, ...] = ()
 
-    cubic_bezier_points: Tuple[float, ...] = ()
+    cubic_bezier_points: tuple[float, ...] = ()
 
     def __repr__(self) -> str:
         fields = ', '.join(f'{f}={getattr(self, f)!r}' for f in self._fields if getattr(self, f) != self._field_defaults[f])
@@ -1432,8 +1511,8 @@ class EasingFunction(NamedTuple):
         parts = params.split(',')
         if len(parts) < 2:
             raise ValueError('Must specify at least two points for the linear easing function')
-        xaxis: List[float] = []
-        yaxis: List[float] = []
+        xaxis: list[float] = []
+        yaxis: list[float] = []
 
         def balance(end: float) -> None:
             extra = len(yaxis) - len(xaxis)
@@ -1450,7 +1529,7 @@ class EasingFunction(NamedTuple):
                 for i in range(extra):
                     xaxis.append(i * delta)
 
-        def add_point(y: float, x: Optional[float] = None) -> None:
+        def add_point(y: float, x: float | None = None) -> None:
             if x is None:
                 yaxis.append(y)
             else:
@@ -1481,7 +1560,7 @@ class EasingFunction(NamedTuple):
         if len(parts) == 2:
             n = int(parts[0])
             jt = parts[1]
-            mapping: Dict[str, JumpTypes] = {
+            mapping: dict[str, JumpTypes] = {
                 'jump-start': 'start', 'start': 'start', 'end': 'end', 'jump-end': 'end', 'jump-none': 'none', 'jump-both': 'both'
             }
             try:
@@ -1497,7 +1576,7 @@ class EasingFunction(NamedTuple):
         return cls(type='steps', jump_type=jump_type, num_steps=n)
 
 
-def parse_animation(spec: str, interval: float = -1.) -> Tuple[float, EasingFunction, EasingFunction]:
+def parse_animation(spec: str, interval: float = -1.) -> tuple[float, EasingFunction, EasingFunction]:
     with suppress(Exception):
         interval = float(spec)
         return interval, EasingFunction(), EasingFunction()
@@ -1543,15 +1622,99 @@ def parse_animation(spec: str, interval: float = -1.) -> Tuple[float, EasingFunc
     return interval, m[0], m[1]
 
 
-def cursor_blink_interval(spec: str) -> Tuple[float, EasingFunction, EasingFunction]:
+def cursor_blink_interval(spec: str) -> tuple[float, EasingFunction, EasingFunction]:
     return parse_animation(spec)
 
 
-def visual_bell_duration(spec: str) -> Tuple[float, EasingFunction, EasingFunction]:
+class MouseHideWait(NamedTuple):
+    hide_wait: float
+    show_wait: float
+    show_threshold: int
+    scroll_show: bool
+
+
+def mouse_hide_wait(x: str) -> MouseHideWait:
+    parts = x.split(maxsplit=3)
+    if len(parts) != 1 and len(parts) != 4:
+        log_error(f'Invalid mouse_hide_wait: {x}, ignoring')
+        return MouseHideWait(3.0, 0.0, 40, True)
+    if len(parts) == 1:
+        return MouseHideWait(float(parts[0]), 0.0, 40, True)
+    else:
+        return MouseHideWait(float(parts[0]), float(parts[1]), int(parts[2]), to_bool(parts[3]))
+
+
+def visual_bell_duration(spec: str) -> tuple[float, EasingFunction, EasingFunction]:
     return parse_animation(spec, interval=0.)
 
 
-def deprecated_hide_window_decorations_aliases(key: str, val: str, ans: Dict[str, Any]) -> None:
+pointer_shape_names = (
+# start pointer shape names (auto generated by gen-key-constants.py do not edit)
+    'arrow',
+    'beam',
+    'text',
+    'pointer',
+    'hand',
+    'help',
+    'wait',
+    'progress',
+    'crosshair',
+    'cell',
+    'vertical-text',
+    'move',
+    'e-resize',
+    'ne-resize',
+    'nw-resize',
+    'n-resize',
+    'se-resize',
+    'sw-resize',
+    's-resize',
+    'w-resize',
+    'ew-resize',
+    'ns-resize',
+    'nesw-resize',
+    'nwse-resize',
+    'zoom-in',
+    'zoom-out',
+    'alias',
+    'copy',
+    'not-allowed',
+    'no-drop',
+    'grab',
+    'grabbing',
+# end pointer shape names
+)
+
+
+def pointer_shape_when_dragging(spec: str) -> tuple[str, str]:
+    parts = spec.split(maxsplit=1)
+    first = parts[0]
+    if first not in pointer_shape_names:
+        raise ValueError(f'{first} is not a valid pointer shape name')
+    second = parts[1] if len(parts) > 1 else first
+    if second not in pointer_shape_names:
+        raise ValueError(f'{second} is not a valid pointer shape name')
+    return first, second
+
+
+def transparent_background_colors(spec: str) -> tuple[tuple[Color, float], ...]:
+    if not spec:
+        return ()
+    ans: list[tuple[Color, float]] = []
+    seen: dict[Color, int] = {}
+    for part in spec.split():
+        col, sep, alpha = part.partition('@')
+        c = to_color(col)
+        o = max(-1, min(float(alpha) if alpha else -1, 1))
+        if (idx := seen.get(c)) is not None:
+            ans[idx] = c, o
+            continue
+        seen[c] = len(ans)
+        ans.append((c, o))
+    return tuple(ans[:7])
+
+
+def deprecated_hide_window_decorations_aliases(key: str, val: str, ans: dict[str, Any]) -> None:
     if not hasattr(deprecated_hide_window_decorations_aliases, key):
         setattr(deprecated_hide_window_decorations_aliases, key, True)
         log_error(f'The option {key} is deprecated. Use hide_window_decorations instead.')
@@ -1560,7 +1723,7 @@ def deprecated_hide_window_decorations_aliases(key: str, val: str, ans: Dict[str
             ans['hide_window_decorations'] = True
 
 
-def deprecated_macos_show_window_title_in_menubar_alias(key: str, val: str, ans: Dict[str, Any]) -> None:
+def deprecated_macos_show_window_title_in_menubar_alias(key: str, val: str, ans: dict[str, Any]) -> None:
     if not hasattr(deprecated_macos_show_window_title_in_menubar_alias, key):
         setattr(deprecated_macos_show_window_title_in_menubar_alias, 'key', True)
         log_error(f'The option {key} is deprecated. Use macos_show_window_title_in menubar instead.')
@@ -1578,7 +1741,7 @@ def deprecated_macos_show_window_title_in_menubar_alias(key: str, val: str, ans:
     ans['macos_show_window_title_in'] = macos_show_window_title_in
 
 
-def deprecated_send_text(key: str, val: str, ans: Dict[str, Any]) -> None:
+def deprecated_send_text(key: str, val: str, ans: dict[str, Any]) -> None:
     parts = val.split(' ')
 
     def abort(msg: str) -> None:
@@ -1593,7 +1756,7 @@ def deprecated_send_text(key: str, val: str, ans: Dict[str, Any]) -> None:
         ans['map'].append(k)
 
 
-def deprecated_adjust_line_height(key: str, x: str, opts_dict: Dict[str, Any]) -> None:
+def deprecated_adjust_line_height(key: str, x: str, opts_dict: dict[str, Any]) -> None:
     fm = {'adjust_line_height': 'cell_height', 'adjust_baseline': 'baseline', 'adjust_column_width': 'cell_width'}[key]
     mtype = getattr(ModificationType, fm)
     if x.endswith('%'):
@@ -1604,3 +1767,14 @@ def deprecated_adjust_line_height(key: str, x: str, opts_dict: Dict[str, Any]) -
         opts_dict['modify_font'][fm] = FontModification(mtype, ModificationValue(ans, ModificationUnit.percent))
     else:
         opts_dict['modify_font'][fm] = FontModification(mtype, ModificationValue(int(x), ModificationUnit.pixel))
+
+
+def deprecated_scrollback_indicator_opacity(key: str, val: str, ans: dict[str, Any]) -> None:
+    if not hasattr(deprecated_scrollback_indicator_opacity, key):
+        setattr(deprecated_scrollback_indicator_opacity, key, True)
+        log_error(f'The option {key} is deprecated. Use scrollbar instead.')
+    op = unit_float(val)
+    if op <= 0.001:
+        ans['scrollbar'] = 'never'
+    else:
+        ans['scrollbar_handle_opacity'] = op

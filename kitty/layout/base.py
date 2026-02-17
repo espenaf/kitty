@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from functools import partial
 from itertools import repeat
-from typing import Any, Dict, Generator, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, NamedTuple
 
 from kitty.borders import BorderColor
-from kitty.fast_data_types import Region, set_active_window, viewport_for_window
+from kitty.fast_data_types import Region, get_options, set_active_window, viewport_for_window
 from kitty.options.types import Options
-from kitty.types import Edges, WindowGeometry
-from kitty.typing import TypedDict, WindowType
+from kitty.types import Edges, NeighborsMap, WindowGeometry, WindowMapper
+from kitty.typing_compat import WindowType
 from kitty.window_list import WindowGroup, WindowList
 
 
@@ -20,10 +21,10 @@ class BorderLine(NamedTuple):
 
 class LayoutOpts:
 
-    def __init__(self, data: Dict[str, str]):
+    def __init__(self, data: dict[str, str]):
         pass
 
-    def serialized(self) -> Dict[str, Any]:
+    def serialized(self) -> dict[str, Any]:
         return {}
 
 
@@ -35,16 +36,9 @@ class LayoutData(NamedTuple):
     content_size: int = 0
 
 
-DecorationPairs = Sequence[Tuple[int, int]]
+DecorationPairs = Sequence[tuple[int, int]]
 LayoutDimension = Generator[LayoutData, None, None]
-ListOfWindows = List[WindowType]
-
-
-class NeighborsMap(TypedDict):
-    left: List[int]
-    top: List[int]
-    right: List[int]
-    bottom: List[int]
+ListOfWindows = list[WindowType]
 
 
 class LayoutGlobalData:
@@ -61,21 +55,28 @@ class LayoutGlobalData:
 lgd = LayoutGlobalData()
 
 
-def idx_for_id(win_id: int, windows: Iterable[WindowType]) -> Optional[int]:
+def idx_for_id(win_id: int, windows: Iterable[WindowType]) -> int | None:
     for i, w in enumerate(windows):
         if w.id == win_id:
             return i
     return None
 
 
+def effective_draw_minimal_borders(opts: Options, has_more_than_one_visible_group: bool = True) -> bool:
+    ans = opts.draw_minimal_borders and sum(opts.window_margin_width) == 0
+    if not has_more_than_one_visible_group and opts.draw_window_borders_for_single_window:
+        ans = False
+    return ans
+
+
 def set_layout_options(opts: Options) -> None:
-    lgd.draw_minimal_borders = opts.draw_minimal_borders and sum(opts.window_margin_width) == 0
+    lgd.draw_minimal_borders = effective_draw_minimal_borders(opts)
     lgd.draw_active_borders = opts.active_border_color is not None
     lgd.alignment_x = -1 if opts.placement_strategy.endswith('left') else 1 if opts.placement_strategy.endswith('right') else 0
     lgd.alignment_y = -1 if opts.placement_strategy.startswith('top') else 1 if opts.placement_strategy.startswith('bottom') else 0
 
 
-def convert_bias_map(bias: Dict[int, float], number_of_windows: int, number_of_cells: int) -> Sequence[float]:
+def convert_bias_map(bias: dict[int, float], number_of_windows: int, number_of_cells: int) -> Sequence[float]:
     cells_per_window, extra = divmod(number_of_cells, number_of_windows)
     cell_map = list(repeat(cells_per_window, number_of_windows))
     cell_map[-1] += extra
@@ -84,9 +85,9 @@ def convert_bias_map(bias: Dict[int, float], number_of_windows: int, number_of_c
 
 
 def calculate_cells_map(
-    bias: Union[None, Sequence[float], Dict[int, float]],
+    bias: None | Sequence[float] | dict[int, float],
     number_of_windows: int, number_of_cells: int
-) -> List[int]:
+) -> list[int]:
     if isinstance(bias, dict):
         bias = convert_bias_map(bias, number_of_windows, number_of_cells)
     cells_per_window = number_of_cells // number_of_windows
@@ -110,7 +111,7 @@ def layout_dimension(
     start_at: int, length: int, cell_length: int,
     decoration_pairs: DecorationPairs,
     alignment: int = 0,
-    bias: Union[None, Sequence[float], Dict[int, float]] = None
+    bias: None | Sequence[float] | dict[int, float] = None
 ) -> LayoutDimension:
     number_of_windows = len(decoration_pairs)
     number_of_cells = length // cell_length
@@ -194,14 +195,14 @@ def safe_increment_bias(old_val: float, increment: float = 0) -> float:
     return max(0.1, min(old_val + increment, 0.9))
 
 
-def normalize_biases(biases: List[float]) -> List[float]:
+def normalize_biases(biases: list[float]) -> list[float]:
     s = sum(biases)
     if s == 1.0:
         return biases
     return [x/s for x in biases]
 
 
-def distribute_indexed_bias(base_bias: Sequence[float], index_bias_map: Dict[int, float]) -> Sequence[float]:
+def distribute_indexed_bias(base_bias: Sequence[float], index_bias_map: dict[int, float]) -> Sequence[float]:
     if not index_bias_map:
         return base_bias
     ans = list(base_bias)
@@ -214,6 +215,14 @@ def distribute_indexed_bias(base_bias: Sequence[float], index_bias_map: Dict[int
     return normalize_biases(ans)
 
 
+def create_window_id_map_for_unserialize(all_windows: WindowList) -> dict[int, int]:
+    window_id_map = {}
+    for w in all_windows:
+        if w.serialized_id:
+            window_id_map[w.serialized_id] = w.id
+    return window_id_map
+
+
 class Layout:
 
     name: str = ''
@@ -223,19 +232,23 @@ class Layout:
     only_active_window_visible = False
 
     def __init__(self, os_window_id: int, tab_id: int, layout_opts: str = '') -> None:
-        self.os_window_id = os_window_id
-        self.tab_id = tab_id
-        self.set_active_window_in_os_window = partial(set_active_window, os_window_id, tab_id)
+        self.set_owner(os_window_id, tab_id)
         # A set of rectangles corresponding to the blank spaces at the edges of
         # this layout, i.e. spaces that are not covered by any window
-        self.blank_rects: List[Rect] = []
+        self.blank_rects: list[Rect] = []
         self.layout_opts = self.parse_layout_opts(layout_opts)
         assert self.name is not None
         self.full_name = f'{self.name}:{layout_opts}' if layout_opts else self.name
         self.remove_all_biases()
 
+    def set_owner(self, os_window_id: int, tab_id: int) -> None:
+        # Useful when moving a layout from one tab to another typically a detached tab being re-attached
+        self.os_window_id = os_window_id
+        self.tab_id = tab_id
+        self.set_active_window_in_os_window = partial(set_active_window, os_window_id, tab_id)
+
     def bias_increment_for_cell(self, all_windows: WindowList, is_horizontal: bool) -> float:
-        self._set_dimensions()
+        self._set_dimensions(all_windows)
         return self.calculate_bias_increment_for_a_single_cell(all_windows, is_horizontal)
 
     def calculate_bias_increment_for_a_single_cell(self, all_windows: WindowList, is_horizontal: bool) -> float:
@@ -255,8 +268,8 @@ class Layout:
             return False
         return self.apply_bias(idx, increment, all_windows, is_horizontal)
 
-    def parse_layout_opts(self, layout_opts: Optional[str] = None) -> LayoutOpts:
-        data: Dict[str, str] = {}
+    def parse_layout_opts(self, layout_opts: str | None = None) -> LayoutOpts:
+        data: dict[str, str] = {}
         if layout_opts:
             for x in layout_opts.split(';'):
                 k, v = x.partition('=')[::2]
@@ -264,7 +277,7 @@ class Layout:
                     data[k] = v
         return type(self.layout_opts)(data)
 
-    def nth_window(self, all_windows: WindowList, num: int) -> Optional[WindowType]:
+    def nth_window(self, all_windows: WindowList, num: int) -> WindowType | None:
         return all_windows.active_window_in_nth_group(num, clamp=True)
 
     def activate_nth_window(self, all_windows: WindowList, num: int) -> None:
@@ -288,23 +301,26 @@ class Layout:
         return all_windows.move_window_group(to_group=group)
 
     def add_window(
-        self, all_windows: WindowList, window: WindowType, location: Optional[str] = None,
-        overlay_for: Optional[int] = None, put_overlay_behind: bool = False, bias: Optional[float] = None,
-    ) -> None:
+        self, all_windows: WindowList, window: WindowType, location: str | None = None,
+        overlay_for: int | None = None, put_overlay_behind: bool = False, bias: float | None = None,
+        next_to: WindowType | None = None,
+    ) -> WindowType | None:
         if overlay_for is not None:
             underlay = all_windows.id_map.get(overlay_for)
             if underlay is not None:
                 window.margin, window.padding = underlay.margin.copy(), underlay.padding.copy()
                 all_windows.add_window(window, group_of=overlay_for, head_of_group=put_overlay_behind)
-                return
+                return underlay
         if location == 'neighbor':
             location = 'after'
-        self.add_non_overlay_window(all_windows, window, location, bias)
+        self.add_non_overlay_window(all_windows, window, location, bias, next_to)
+        return None
 
-    def add_non_overlay_window(self, all_windows: WindowList, window: WindowType, location: Optional[str], bias: Optional[float] = None) -> None:
-        next_to: Optional[WindowType] = None
+    def add_non_overlay_window(
+        self, all_windows: WindowList, window: WindowType, location: str | None, bias: float | None = None, next_to: WindowType | None = None
+    ) -> None:
         before = False
-        next_to = all_windows.active_window
+        next_to = next_to or all_windows.active_window
         if location is not None:
             if location in ('after', 'vsplit', 'hsplit'):
                 pass
@@ -319,7 +335,7 @@ class Layout:
         if bias is not None:
             idx = all_windows.group_idx_for_window(window)
             if idx is not None:
-                self._set_dimensions()
+                self._set_dimensions(all_windows)
                 self._bias_slot(all_windows, idx, bias)
 
     def _bias_slot(self, all_windows: WindowList, idx: int, bias: float) -> bool:
@@ -338,11 +354,15 @@ class Layout:
             is_visible = window is active_window or (is_group_leader and not self.only_active_window_visible)
             window.set_visible_in_layout(is_visible)
 
-    def _set_dimensions(self) -> None:
+    def _set_dimensions(self, all_windows: WindowList) -> None:
         lgd.central, tab_bar, vw, vh, lgd.cell_width, lgd.cell_height = viewport_for_window(self.os_window_id)
+        # Update lgd.draw_minimal_borders based on the current number of visible windows
+        # and the draw_window_borders_for_single_window option
+        opts = get_options()
+        lgd.draw_minimal_borders = effective_draw_minimal_borders(opts, all_windows.has_more_than_one_visible_group)
 
     def __call__(self, all_windows: WindowList) -> None:
-        self._set_dimensions()
+        self._set_dimensions(all_windows)
         self.update_visibility(all_windows)
         self.blank_rects = []
         self.do_layout(all_windows)
@@ -359,15 +379,15 @@ class Layout:
         ),)
         geom = layout_single_window(xdecoration_pairs, ydecoration_pairs, xalignment=lgd.alignment_x, yalignment=lgd.alignment_y)
         wg.set_geometry(geom)
-        if add_blank_rects and wg:
+        if add_blank_rects:
             self.blank_rects.extend(blank_rects_for_window(geom))
 
     def xlayout(
         self,
         groups: Iterator[WindowGroup],
-        bias: Union[None, Sequence[float], Dict[int, float]] = None,
-        start: Optional[int] = None,
-        size: Optional[int] = None,
+        bias: None | Sequence[float] | dict[int, float] = None,
+        start: int | None = None,
+        size: int | None = None,
         offset: int = 0,
         border_mult: int = 1
     ) -> LayoutDimension:
@@ -384,9 +404,9 @@ class Layout:
     def ylayout(
         self,
         groups: Iterator[WindowGroup],
-        bias: Union[None, Sequence[float], Dict[int, float]] = None,
-        start: Optional[int] = None,
-        size: Optional[int] = None,
+        bias: None | Sequence[float] | dict[int, float] = None,
+        start: int | None = None,
+        size: int | None = None,
         offset: int = 0,
         border_mult: int = 1
     ) -> LayoutDimension:
@@ -410,21 +430,43 @@ class Layout:
         raise NotImplementedError()
 
     def neighbors_for_window(self, window: WindowType, windows: WindowList) -> NeighborsMap:
-        return {'left': [], 'right': [], 'top': [], 'bottom': []}
+        return {}
 
-    def compute_needs_borders_map(self, all_windows: WindowList) -> Dict[int, bool]:
+    def compute_needs_borders_map(self, all_windows: WindowList) -> dict[int, bool]:
         return all_windows.compute_needs_borders_map(lgd.draw_active_borders)
 
     def get_minimal_borders(self, windows: WindowList) -> Generator[BorderLine, None, None]:
-        self._set_dimensions()
+        self._set_dimensions(windows)
         yield from self.minimal_borders(windows)
 
     def minimal_borders(self, windows: WindowList) -> Generator[BorderLine, None, None]:
         return
         yield BorderLine()  # type: ignore
 
-    def layout_action(self, action_name: str, args: Sequence[str], all_windows: WindowList) -> Optional[bool]:
+    def layout_action(self, action_name: str, args: Sequence[str], all_windows: WindowList) -> bool | None:
         pass
 
-    def layout_state(self) -> Dict[str, Any]:
+    def layout_state(self) -> dict[str, Any]:
         return {}
+
+    def set_layout_state(self, layout_state: dict[str, Any], map_group_id: WindowMapper) -> bool:
+        return True
+
+    def serialize(self, all_windows: WindowList) -> dict[str, Any]:
+        ans = self.layout_state()
+        ans['opts'] = self.layout_opts.serialized()
+        ans['class'] = self.__class__.__name__
+        ans['all_windows'] = all_windows.serialize_layout_state()
+        return ans
+
+    def unserialize(
+        self, s: dict[str, Any], all_windows: WindowList,
+        window_id_mapper: Callable[[WindowList], dict[int, int]] = create_window_id_map_for_unserialize,
+    ) -> bool:
+        if s.get('class') != self.__class__.__name__:
+            return False
+        window_id_map = create_window_id_map_for_unserialize(all_windows)
+        m = all_windows.unserialize_layout_state(s['all_windows'], window_id_map)
+        if m is None:
+            return False
+        return self.set_layout_state(s, m.get)

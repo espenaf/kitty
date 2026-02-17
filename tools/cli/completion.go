@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -105,7 +105,7 @@ type Delegate struct {
 
 type Completions struct {
 	Groups   []*MatchGroup `json:"groups,omitempty"`
-	Delegate Delegate      `json:"delegate,omitempty"`
+	Delegate Delegate      `json:"delegate"`
 
 	CurrentCmd             *Command `json:"-"`
 	AllWords               []string `json:"-"` // all words passed to parse_args()

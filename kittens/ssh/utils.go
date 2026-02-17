@@ -3,18 +3,17 @@
 package ssh
 
 import (
+	"bytes"
 	"fmt"
-	"io"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 
-	"kitty"
-	"kitty/tools/config"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -38,19 +37,13 @@ var SSHOptions = sync.OnceValue(func() (ssh_options map[string]string) {
 		}
 	}()
 	cmd := exec.Command(SSHExe())
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return
-	}
-	if err = cmd.Start(); err != nil {
-		return
-	}
-	raw, err := io.ReadAll(stderr)
-	if err != nil {
-		return
-	}
-	text := utils.UnsafeBytesToString(raw)
-	if strings.Contains(text, "OpenSSL version mismatch.") {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	text := stderr.String()
+	if text == "" || strings.Contains(text, "OpenSSL version mismatch.") {
 		// https://bugzilla.mindrot.org/show_bug.cgi?id=3548
 		return
 	}
@@ -225,7 +218,7 @@ type KittyOpts struct {
 	Term, Shell_integration string
 }
 
-func read_relevant_kitty_opts(path string) KittyOpts {
+func read_relevant_kitty_opts(override_conf_path ...string) KittyOpts {
 	ans := KittyOpts{Term: kitty.KittyConfigDefaults.Term, Shell_integration: kitty.KittyConfigDefaults.Shell_integration}
 	handle_line := func(key, val string) error {
 		switch key {
@@ -236,11 +229,10 @@ func read_relevant_kitty_opts(path string) KittyOpts {
 		}
 		return nil
 	}
-	cp := config.ConfigParser{LineHandler: handle_line}
-	cp.ParseFiles(path)
+	config.ReadKittyConfig(handle_line, override_conf_path...)
 	return ans
 }
 
 var RelevantKittyOpts = sync.OnceValue(func() KittyOpts {
-	return read_relevant_kitty_opts(filepath.Join(utils.ConfigDir(), "kitty.conf"))
+	return read_relevant_kitty_opts()
 })

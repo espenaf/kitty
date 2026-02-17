@@ -8,16 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
 
-	"kitty"
-	"kitty/tools/cli/markup"
-	"kitty/tools/tty"
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/cli/markup"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
 )
 
 var _ = fmt.Print
@@ -77,12 +78,10 @@ func (self *Option) FormatOptionForMan(output io.Writer) {
 	fmt.Fprint(output, "\" ")
 	defval := self.Default
 	switch self.OptionType {
-	case StringOption:
-		if self.IsList {
-			defval = ""
-		}
-	case BoolOption, CountOption:
+	case CountOption:
 		defval = ""
+	case BoolOption:
+		defval = utils.IfElse(self.Default == "true", "yes", "no")
 	}
 
 	if defval != "" {
@@ -106,11 +105,11 @@ func (self *Option) FormatOption(output io.Writer, formatter *markup.Context, sc
 	}
 	defval := self.Default
 	switch self.OptionType {
-	case StringOption:
-		if self.IsList {
-			defval = ""
-		}
-	case BoolOption, CountOption:
+	case CountOption:
+		defval = ""
+	case BoolOption:
+		yn := utils.IfElse(self.Default == "true", "yes", "no")
+		fmt.Fprintf(output, " %s", formatter.Italic("[="+yn+"]"))
 		defval = ""
 	}
 	if defval != "" {
@@ -135,6 +134,13 @@ func ShowHelpInPager(text string) {
 	_ = pager.Run()
 }
 
+func getDeterministicTimestamp() time.Time {
+	if epoch, err := strconv.ParseInt(os.Getenv("SOURCE_DATE_EPOCH"), 10, 64); err == nil {
+		return time.Unix(epoch, 0).UTC()
+	}
+	return time.Now()
+}
+
 func (self *Command) GenerateManPages(level int, recurse bool) (err error) {
 	var names []string
 	p := self
@@ -149,7 +155,7 @@ func (self *Command) GenerateManPages(level int, recurse bool) (err error) {
 		return err
 	}
 	defer outf.Close()
-	fmt.Fprintf(outf, `.TH "%s" "1" "%s" "%s" "%s"`, name, time.Now().Format("Jan 02, 2006"), kitty.VersionString, "kitten Manual")
+	fmt.Fprintf(outf, `.TH "%s" "1" "%s" "%s" "%s"`, name, getDeterministicTimestamp().Format("Jan 02, 2006"), kitty.VersionString, "kitten Manual")
 	fmt.Fprintln(outf)
 	fmt.Fprintln(outf, ".SH Name")
 	fmt.Fprintln(outf, name, "\\-", escape_text_for_man(self.ShortDescription))

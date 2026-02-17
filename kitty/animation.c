@@ -20,6 +20,7 @@ typedef struct StepsParameters {
 
 static const double bezier_epsilon = 1e-7;
 static const unsigned max_newton_iterations = 4;
+static const unsigned max_bisection_iterations = 16;
 
 typedef struct BezierParameters {
     double ax, bx, cx, ay, by, cy, start_gradient, end_gradient, spline_samples[11];
@@ -134,8 +135,10 @@ solve_curve_x(const BezierParameters *p, double x, double epsilon) {
     }
     if (fabs(x2) < epsilon) return t2;
 
+    t0 = 0.0, t1 = 0.0, t2 = x, x2 = 0.0;
     // Fall back to the bisection method for reliability.
-    while (t0 < t1) {
+    unsigned iteration = 0;
+    while (t0 < t1 && iteration++ < max_bisection_iterations) {
         x2 = sample_curve_x(p, t2);
         if (fabs(x2 - x) < epsilon) return t2;
         if (x > x2) t0 = t2;
@@ -181,7 +184,7 @@ apply_easing_curve(const Animation *a, double val, monotonic_t duration) {
     animation_function *f = a->functions + idx;
     double interval_size = 1. / a->count, interval_start = idx * interval_size;
     double scaled_val = (val - interval_start) / interval_size;
-    double ans = f->curve(&f->params, scaled_val, duration);
+    double ans = f->curve(f->params, scaled_val, duration);
     return f->y_at_start + unit_value(ans) * f->y_size;
 }
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"kitty"
+	"github.com/kovidgoyal/kitty"
 )
 
 type KeyboardStateBits uint8
@@ -31,6 +31,8 @@ const (
 	RESTORE_COLORS                = "\033[#Q"
 	DECSACE_DEFAULT_REGION_SELECT = "\033[*x"
 	CLEAR_SCREEN                  = "\033[H\033[2J"
+	POP_KEY_FLAGS                 = "\033[<u"
+	PUSH_KEY_FLAGS                = "\033[>u"
 )
 
 type CursorShapes uint
@@ -46,27 +48,28 @@ type Mode uint32
 const private Mode = 1 << 31
 
 const (
-	LNM                        Mode = 20
-	IRM                        Mode = 4
-	DECKM                      Mode = 1 | private
-	DECSCNM                    Mode = 5 | private
-	DECOM                      Mode = 6 | private
-	DECAWM                     Mode = 7 | private
-	DECARM                     Mode = 8 | private
-	DECTCEM                    Mode = 25 | private
-	MOUSE_BUTTON_TRACKING      Mode = 1000 | private
-	MOUSE_MOTION_TRACKING      Mode = 1002 | private
-	MOUSE_MOVE_TRACKING        Mode = 1003 | private
-	FOCUS_TRACKING             Mode = 1004 | private
-	MOUSE_UTF8_MODE            Mode = 1005 | private
-	MOUSE_SGR_MODE             Mode = 1006 | private
-	MOUSE_URXVT_MODE           Mode = 1015 | private
-	MOUSE_SGR_PIXEL_MODE       Mode = 1016 | private
-	ALTERNATE_SCREEN           Mode = 1049 | private
-	BRACKETED_PASTE            Mode = 2004 | private
-	PENDING_UPDATE             Mode = 2026 | private
-	INBAND_RESIZE_NOTIFICATION Mode = 2048 | private
-	HANDLE_TERMIOS_SIGNALS     Mode = kitty.HandleTermiosSignals | private
+	LNM                              Mode = 20
+	IRM                              Mode = 4
+	DECKM                            Mode = 1 | private
+	DECSCNM                          Mode = 5 | private
+	DECOM                            Mode = 6 | private
+	DECAWM                           Mode = 7 | private
+	DECARM                           Mode = 8 | private
+	DECTCEM                          Mode = 25 | private
+	MOUSE_BUTTON_TRACKING            Mode = 1000 | private
+	MOUSE_MOTION_TRACKING            Mode = 1002 | private
+	MOUSE_MOVE_TRACKING              Mode = 1003 | private
+	FOCUS_TRACKING                   Mode = 1004 | private
+	MOUSE_UTF8_MODE                  Mode = 1005 | private
+	MOUSE_SGR_MODE                   Mode = 1006 | private
+	MOUSE_URXVT_MODE                 Mode = 1015 | private
+	MOUSE_SGR_PIXEL_MODE             Mode = 1016 | private
+	ALTERNATE_SCREEN                 Mode = 1049 | private
+	BRACKETED_PASTE                  Mode = 2004 | private
+	PENDING_UPDATE                   Mode = 2026 | private
+	COLOR_SCHEME_CHANGE_NOTIFICATION Mode = 2031 | private
+	INBAND_RESIZE_NOTIFICATION       Mode = 2048 | private
+	HANDLE_TERMIOS_SIGNALS           Mode = kitty.HandleTermiosSignals | private
 )
 
 func (self Mode) escape_code(which string) string {
@@ -100,6 +103,9 @@ type TerminalStateOptions struct {
 	Alternate_screen, restore_colors bool
 	mouse_tracking                   MouseTracking
 	kitty_keyboard_mode              KeyboardStateBits
+	in_band_resize_notification      bool
+	focus_tracking                   bool
+	color_scheme_change_notification bool
 }
 
 func set_modes(sb *strings.Builder, modes ...Mode) {
@@ -126,9 +132,18 @@ func (self *TerminalStateOptions) SetStateEscapeCodes() string {
 	}
 	sb.WriteString(DECSACE_DEFAULT_REGION_SELECT)
 	reset_modes(&sb,
-		IRM, DECKM, DECSCNM, BRACKETED_PASTE, FOCUS_TRACKING,
+		IRM, DECKM, DECSCNM, BRACKETED_PASTE,
 		MOUSE_BUTTON_TRACKING, MOUSE_MOTION_TRACKING, MOUSE_MOVE_TRACKING, MOUSE_UTF8_MODE, MOUSE_SGR_MODE)
-	set_modes(&sb, DECARM, DECAWM, DECTCEM, INBAND_RESIZE_NOTIFICATION)
+	set_modes(&sb, DECARM, DECAWM, DECTCEM)
+	if self.focus_tracking {
+		set_modes(&sb, FOCUS_TRACKING)
+	}
+	if self.in_band_resize_notification {
+		set_modes(&sb, INBAND_RESIZE_NOTIFICATION)
+	}
+	if self.color_scheme_change_notification {
+		set_modes(&sb, COLOR_SCHEME_CHANGE_NOTIFICATION)
+	}
 	if self.Alternate_screen {
 		set_modes(&sb, ALTERNATE_SCREEN)
 		sb.WriteString(CLEAR_SCREEN)
@@ -164,6 +179,13 @@ func (self *TerminalStateOptions) ResetStateEscapeCodes() string {
 		sb.WriteString(ALTERNATE_SCREEN.EscapeCodeToReset())
 	} else {
 		sb.WriteString(SAVE_CURSOR)
+	}
+	// Explictly turn off this mode as there are some terminals that dont
+	// support restoring all modes and people tend to use the show-key kitten
+	// in other terminals. Since I do want to encourage adoption of the kitty
+	// keyboard protocol, the extra bytes are worth it in this case.
+	if self.in_band_resize_notification {
+		reset_modes(&sb, INBAND_RESIZE_NOTIFICATION)
 	}
 	sb.WriteString(RESTORE_PRIVATE_MODE_VALUES)
 	if self.restore_colors {

@@ -187,11 +187,7 @@ void _glfwInputWindowMonitor(_GLFWwindow* window, _GLFWmonitor* monitor)
 //////                        GLFW public API                       //////
 //////////////////////////////////////////////////////////////////////////
 
-GLFWAPI GLFWwindow* glfwCreateWindow(int width, int height,
-                                     const char* title,
-                                     GLFWmonitor* monitor,
-                                     GLFWwindow* share)
-{
+GLFWAPI GLFWwindow* glfwCreateWindow(int width, int height, const char* title, GLFWmonitor* monitor, GLFWwindow* share, const GLFWLayerShellConfig *lsc) {
     _GLFWfbconfig fbconfig;
     _GLFWctxconfig ctxconfig;
     _GLFWwndconfig wndconfig;
@@ -256,7 +252,7 @@ GLFWAPI GLFWwindow* glfwCreateWindow(int width, int height,
     window->heightincr  = GLFW_DONT_CARE;
 
     // Open the actual window and create its context
-    if (!_glfwPlatformCreateWindow(window, &wndconfig, &ctxconfig, &fbconfig))
+    if (!_glfwPlatformCreateWindow(window, &wndconfig, &ctxconfig, &fbconfig, lsc))
     {
         glfwDestroyWindow((GLFWwindow*) window);
         return NULL;
@@ -283,7 +279,7 @@ GLFWAPI GLFWwindow* glfwCreateWindow(int width, int height,
     {
         if (wndconfig.visible)
         {
-            _glfwPlatformShowWindow(window);
+            _glfwPlatformShowWindow(window, false);
 #ifndef _GLFW_WAYLAND
             if (wndconfig.focused)
                 _glfwPlatformFocusWindow(window);
@@ -499,6 +495,10 @@ GLFWAPI void glfwWindowHintString(int hint, const char* value)
             strncpy(_glfw.hints.window.wl.appId, value,
                     sizeof(_glfw.hints.window.wl.appId) - 1);
             return;
+        case GLFW_WAYLAND_WINDOW_TAG:
+            strncpy(_glfw.hints.window.wl.windowTag, value,
+                    sizeof(_glfw.hints.window.wl.windowTag) - 1);
+            return;
     }
 
     _glfwInputError(GLFW_INVALID_ENUM, "Invalid window hint string 0x%08X", hint);
@@ -553,6 +553,23 @@ GLFWAPI void glfwSetWindowShouldClose(GLFWwindow* handle, int value)
 
     _GLFW_REQUIRE_INIT();
     window->shouldClose = value;
+}
+
+GLFWAPI const GLFWLayerShellConfig* glfwGetLayerShellConfig(GLFWwindow* handle) {
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(false);
+    return _glfwPlatformGetLayerShellConfig(window);
+}
+
+
+GLFWAPI bool glfwSetLayerShellConfig(GLFWwindow* handle, const GLFWLayerShellConfig *value) {
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(false);
+    return _glfwPlatformSetLayerShellConfig(window, value);
 }
 
 GLFWAPI void glfwSetWindowTitle(GLFWwindow* handle, const char* title)
@@ -838,7 +855,7 @@ GLFWAPI void glfwMaximizeWindow(GLFWwindow* handle)
     _glfwPlatformMaximizeWindow(window);
 }
 
-GLFWAPI void glfwShowWindow(GLFWwindow* handle)
+GLFWAPI void glfwShowWindow(GLFWwindow* handle, bool move_to_active_screen)
 {
     _GLFWwindow* window = (_GLFWwindow*) handle;
     assert(window != NULL);
@@ -848,7 +865,7 @@ GLFWAPI void glfwShowWindow(GLFWwindow* handle)
     if (window->monitor)
         return;
 
-    _glfwPlatformShowWindow(window);
+    _glfwPlatformShowWindow(window, move_to_active_screen);
 
 #ifndef _GLFW_WAYLAND
     if (window->focusOnShow)

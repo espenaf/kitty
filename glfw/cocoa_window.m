@@ -33,10 +33,35 @@
 #include <Availability.h>
 #import <CoreServices/CoreServices.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <errno.h>
 #include <float.h>
 #include <string.h>
+#include <assert.h>
 
 #define debug debug_rendering
+
+// Macro and forward declaration needed before draggingEntered: (uti_to_mime is defined in Clipboard section)
+#define UTI_ROUNDTRIP_PREFIX @"uti-is-typical-apple-nih."
+static NSString*
+mime_to_uti(const char *mime) {
+    if (strcmp(mime, "text/plain") == 0) return NSPasteboardTypeString;
+    if (@available(macOS 11.0, *)) {
+        UTType *t = [UTType typeWithMIMEType:@(mime)];  // auto-released
+        if (t != nil && !t.dynamic) return t.identifier;
+    }
+    return [NSString stringWithFormat:@"%@%s", UTI_ROUNDTRIP_PREFIX, mime];  // auto-released
+}
+
+static const char*
+uti_to_mime(NSString *uti) {
+    if ([uti isEqualToString:NSPasteboardTypeString]) return "text/plain";
+    if ([uti hasPrefix:UTI_ROUNDTRIP_PREFIX]) return [[uti substringFromIndex:[UTI_ROUNDTRIP_PREFIX length]] UTF8String];
+    if (@available(macOS 11.0, *)) {
+        UTType *t = [UTType typeWithIdentifier:uti];  // auto-released
+        if (t.preferredMIMEType != nil) return [t.preferredMIMEType UTF8String];
+    }
+    return "";
+}
 
 static const char*
 polymorphic_string_as_utf8(id string) {
@@ -306,28 +331,6 @@ static NSUInteger getStyleMask(_GLFWwindow* window)
 }
 
 
-CGDirectDisplayID displayIDForWindow(_GLFWwindow *w) {
-    NSWindow *nw = w->ns.object;
-    NSDictionary *dict = [nw.screen deviceDescription];
-    NSNumber *displayIDns = dict[@"NSScreenNumber"];
-    if (displayIDns) return [displayIDns unsignedIntValue];
-    return (CGDirectDisplayID)-1;
-}
-
-static unsigned long long display_link_shutdown_timer = 0;
-#define DISPLAY_LINK_SHUTDOWN_CHECK_INTERVAL s_to_monotonic_t(30ll)
-
-void
-_glfwShutdownCVDisplayLink(unsigned long long timer_id UNUSED, void *user_data UNUSED) {
-    display_link_shutdown_timer = 0;
-    for (size_t i = 0; i < _glfw.ns.displayLinks.count; i++) {
-        _GLFWDisplayLinkNS *dl = &_glfw.ns.displayLinks.entries[i];
-        if (dl->displayLink) CVDisplayLinkStop(dl->displayLink);
-        dl->lastRenderFrameRequestedAt = 0;
-        dl->first_unserviced_render_frame_request_at = 0;
-    }
-}
-
 static void
 requestRenderFrame(_GLFWwindow *w, GLFWcocoarenderframefun callback) {
     if (!callback) {
@@ -337,46 +340,7 @@ requestRenderFrame(_GLFWwindow *w, GLFWcocoarenderframefun callback) {
     }
     w->ns.renderFrameCallback = callback;
     w->ns.renderFrameRequested = true;
-    CGDirectDisplayID displayID = displayIDForWindow(w);
-    if (display_link_shutdown_timer) {
-        _glfwPlatformUpdateTimer(display_link_shutdown_timer, DISPLAY_LINK_SHUTDOWN_CHECK_INTERVAL, true);
-    } else {
-        display_link_shutdown_timer = _glfwPlatformAddTimer(DISPLAY_LINK_SHUTDOWN_CHECK_INTERVAL, false, _glfwShutdownCVDisplayLink, NULL, NULL);
-    }
-    monotonic_t now = glfwGetTime();
-    bool found_display_link = false;
-    _GLFWDisplayLinkNS *dl = NULL;
-    for (size_t i = 0; i < _glfw.ns.displayLinks.count; i++) {
-        dl = &_glfw.ns.displayLinks.entries[i];
-        if (dl->displayID == displayID) {
-            found_display_link = true;
-            dl->lastRenderFrameRequestedAt = now;
-            if (!dl->first_unserviced_render_frame_request_at) dl->first_unserviced_render_frame_request_at = now;
-            if (!CVDisplayLinkIsRunning(dl->displayLink)) CVDisplayLinkStart(dl->displayLink);
-            else if (now - dl->first_unserviced_render_frame_request_at > s_to_monotonic_t(1ll)) {
-                // display link is stuck need to recreate it because Apple can't even
-                // get a simple timer right
-                CVDisplayLinkRelease(dl->displayLink); dl->displayLink = nil;
-                dl->first_unserviced_render_frame_request_at = now;
-                _glfw_create_cv_display_link(dl);
-                _glfwInputError(GLFW_PLATFORM_ERROR,
-                    "CVDisplayLink stuck possibly because of sleep/screensaver + Apple's incompetence, recreating.");
-                if (!CVDisplayLinkIsRunning(dl->displayLink)) CVDisplayLinkStart(dl->displayLink);
-            }
-        } else if (dl->displayLink && dl->lastRenderFrameRequestedAt && now - dl->lastRenderFrameRequestedAt >= DISPLAY_LINK_SHUTDOWN_CHECK_INTERVAL) {
-            CVDisplayLinkStop(dl->displayLink);
-            dl->lastRenderFrameRequestedAt = 0;
-            dl->first_unserviced_render_frame_request_at = 0;
-        }
-    }
-    if (!found_display_link) {
-        dl = _glfw_create_display_link(displayID);
-        if (dl) {
-            dl->lastRenderFrameRequestedAt = now;
-            dl->first_unserviced_render_frame_request_at = now;
-            if (!CVDisplayLinkIsRunning(dl->displayLink)) CVDisplayLinkStart(dl->displayLink);
-        }
-    }
+    _glfwRequestRenderFrame(w);
 }
 
 void
@@ -581,6 +545,7 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 @interface GLFWWindowDelegate : NSObject
 {
     _GLFWwindow* window;
+    NSArray<NSDictionary *> *_lastScreenStates;
 }
 
 - (instancetype)initWithGlfwWindow:(_GLFWwindow *)initWindow;
@@ -593,15 +558,31 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 - (instancetype)initWithGlfwWindow:(_GLFWwindow *)initWindow
 {
     self = [super init];
-    if (self != nil)
+    if (self != nil) {
         window = initWindow;
-
+        _lastScreenStates = [self captureScreenStates];
+        window->ns.live_resize_in_progress = false;
+    }
     return self;
+}
+
+- (NSArray<NSDictionary *> *)captureScreenStates {
+    NSMutableArray *states = [NSMutableArray array];
+    for (NSScreen *screen in [NSScreen screens]) {
+        // Use the screen's deviceDescription, which contains a stable ID.
+        [states addObject:screen.deviceDescription];
+    }
+    return [states copy];
+}
+
+- (void)cleanup {
+    [_lastScreenStates release]; _lastScreenStates = nil;
 }
 
 - (BOOL)windowShouldClose:(id)sender
 {
     (void)sender;
+    if (window == nil) return YES;
     _glfwInputWindowCloseRequest(window);
     return NO;
 }
@@ -609,6 +590,21 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 - (void)windowDidResize:(NSNotification *)notification
 {
     (void)notification;
+    NSArray<NSDictionary *> *currentScreenStates = [self captureScreenStates];
+    const bool is_screen_change = ![_lastScreenStates isEqualToArray:currentScreenStates];
+    NSWindowStyleMask sm = [window->ns.object styleMask];
+    const bool is_fullscreen = (sm & NSWindowStyleMaskFullScreen) != 0;
+    NSRect frame = [window->ns.object frame];
+    debug_rendering(
+            "windowDidResize() called, is_screen_change: %d is_fullscreen: %d live_resize_in_progress: %d frame: %.1fx%.1f@(%.1f, %.1f)\n",
+            is_screen_change, is_fullscreen, window->ns.live_resize_in_progress, frame.size.width, frame.size.height, frame.origin.x, frame.origin.y);
+    if (is_screen_change) {
+        // This resize likely happened because a screen was added, removed, or changed resolution.
+        [_lastScreenStates release];
+        _lastScreenStates = [currentScreenStates retain];
+    }
+    [currentScreenStates release];
+
     if (window->context.client != GLFW_NO_API)
         [window->context.nsgl.object update];
 
@@ -640,7 +636,11 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
         window->ns.height = (int)contentRect.size.height;
         _glfwInputWindowSize(window, (int)contentRect.size.width, (int)contentRect.size.height);
     }
-    if (window->ns.resizeCallback) window->ns.resizeCallback((GLFWwindow*)window);
+    // Because of a bug in macOS Tahoe we cannot redraw the window in response
+    // to a resize event that was caused by a screen change as the OpenGL
+    // context is not ready yet. See: https://github.com/kovidgoyal/kitty/issues/8983
+    if (window->ns.resizeCallback && !is_screen_change && !is_fullscreen && window->ns.live_resize_in_progress)
+        window->ns.resizeCallback((GLFWwindow*)window);
 }
 
 - (void)windowDidMove:(NSNotification *)notification
@@ -778,9 +778,214 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 }
 @end // }}}
 
+// File Promise Provider Delegate for async drag data {{{
+
+// Structure to hold async drag state
+typedef struct {
+    void (^completionHandler)(NSError*); // Completion block to call
+    NSFileHandle* fileHandle;           // File handle for writing
+    bool finished;                       // Whether writing is complete
+    int errorCode;                       // Error code if any
+} GLFWFilePromiseState;
+
+// Helper function to clean up a single drag source data
+static void
+cleanup_ns_drag_source_data(GLFWDragSourceData* data) {
+    if (!data) return;
+    if (data->platform_data) {
+        GLFWFilePromiseState* state = (GLFWFilePromiseState*)data->platform_data;
+        // If the data wasn't finished, call completion with error
+        if (!data->finished && state->completionHandler) {
+            NSError* error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ECANCELED userInfo:nil];
+            state->completionHandler(error);
+            Block_release(state->completionHandler);
+            state->completionHandler = nil;
+        }
+        if (state->fileHandle) {
+            @try {
+                [state->fileHandle closeFile];
+            } @catch (NSException* e) {
+                (void)e;
+            }
+            [state->fileHandle release];
+            state->fileHandle = nil;
+        }
+        free(state);
+    }
+    free(data->mime_type);
+    free(data);
+}
+
+// Add a drag source data to the pending array for tracking
+static bool
+add_ns_pending_drag_source_data(_GLFWwindow* window, GLFWDragSourceData* data) {
+    if (!window || !data) return false;
+
+    // Grow array if needed
+    if (window->ns.pendingDragSourceDataCount >= window->ns.pendingDragSourceDataCapacity) {
+        // Cap maximum capacity to prevent excessive memory use
+        if (window->ns.pendingDragSourceDataCapacity >= 512) {
+            return false;
+        }
+        int new_capacity = window->ns.pendingDragSourceDataCapacity ? window->ns.pendingDragSourceDataCapacity * 2 : 4;
+        GLFWDragSourceData** new_array = realloc(window->ns.pendingDragSourceData,
+                                                  new_capacity * sizeof(GLFWDragSourceData*));
+        if (!new_array) return false;
+        window->ns.pendingDragSourceData = new_array;
+        window->ns.pendingDragSourceDataCapacity = new_capacity;
+    }
+
+    window->ns.pendingDragSourceData[window->ns.pendingDragSourceDataCount++] = data;
+    return true;
+}
+
+// Remove a specific drag source data from the pending array
+static void
+remove_ns_pending_drag_source_data(_GLFWwindow* window, GLFWDragSourceData* data) {
+    if (!window || !data) return;
+
+    for (int i = 0; i < window->ns.pendingDragSourceDataCount; i++) {
+        if (window->ns.pendingDragSourceData[i] == data) {
+            // Shift remaining elements
+            for (int j = i; j < window->ns.pendingDragSourceDataCount - 1; j++) {
+                window->ns.pendingDragSourceData[j] = window->ns.pendingDragSourceData[j + 1];
+            }
+            window->ns.pendingDragSourceDataCount--;
+            return;
+        }
+    }
+}
+
+// Clean up all pending drag source data for a window
+static void
+cleanup_all_ns_pending_drag_source_data(_GLFWwindow* window) {
+    if (!window) return;
+
+    for (int i = 0; i < window->ns.pendingDragSourceDataCount; i++) {
+        cleanup_ns_drag_source_data(window->ns.pendingDragSourceData[i]);
+    }
+    free(window->ns.pendingDragSourceData);
+    window->ns.pendingDragSourceData = NULL;
+    window->ns.pendingDragSourceDataCount = 0;
+    window->ns.pendingDragSourceDataCapacity = 0;
+}
+
+@interface GLFWFilePromiseProviderDelegate : NSObject <NSFilePromiseProviderDelegate>
+{
+    GLFWid windowId;
+    char* mimeType;  // MIME type for this provider
+}
+- (instancetype)initWithWindow:(_GLFWwindow*)initWindow mimeType:(const char*)mime;
+@end
+
+@implementation GLFWFilePromiseProviderDelegate
+
+- (instancetype)initWithWindow:(_GLFWwindow*)initWindow mimeType:(const char*)mime {
+    self = [super init];
+    if (self) {
+        windowId = initWindow ? initWindow->id : 0;
+        mimeType = _glfw_strdup(mime);
+    }
+    return self;
+}
+
+- (void)dealloc {
+    free(mimeType);
+    [super dealloc];
+}
+
+- (NSString*)filePromiseProvider:(NSFilePromiseProvider*)filePromiseProvider fileNameForType:(NSString*)fileType {
+    (void)filePromiseProvider;
+    (void)fileType;
+    // Generate a unique filename based on the MIME type
+    NSString* extension = @"data";
+    if (mimeType) {
+        UTType *type = [UTType typeWithMIMEType:@(mimeType)];
+        extension = type.preferredFilenameExtension;
+    }
+    return [NSString stringWithFormat:@"kitty-drag-%@.%@", [[NSUUID UUID] UUIDString], extension];
+}
+
+- (void)filePromiseProvider:(NSFilePromiseProvider*)filePromiseProvider
+          writePromiseToURL:(NSURL*)url
+          completionHandler:(void (^)(NSError*))completionHandler {
+    (void)filePromiseProvider;
+
+    // Get the window from the ID
+    _GLFWwindow* window = _glfwWindowForId(windowId);
+    if (!window) {
+        completionHandler([NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+        return;
+    }
+
+    // Create the file
+    NSError* error = nil;
+    if (![[NSFileManager defaultManager] createFileAtPath:url.path contents:nil attributes:nil]) {
+        error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+        completionHandler(error);
+        return;
+    }
+
+    NSFileHandle* fileHandle = [NSFileHandle fileHandleForWritingToURL:url error:&error];
+    if (!fileHandle) {
+        completionHandler(error);
+        return;
+    }
+
+    // Create the drag source data with file promise state
+    GLFWDragSourceData* source_data = calloc(1, sizeof(GLFWDragSourceData));
+    if (!source_data) {
+        [fileHandle closeFile];
+        completionHandler([NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil]);
+        return;
+    }
+
+    // Create the file promise state
+    char *mt = _glfw_strdup(mimeType);
+    GLFWFilePromiseState* state = calloc(1, sizeof(GLFWFilePromiseState));
+    if (!state || !mt) {
+        free(source_data); free(mt); free(state);
+        [fileHandle closeFile];
+        completionHandler([NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil]);
+        return;
+    }
+
+    state->completionHandler = [completionHandler copy];
+    state->fileHandle = [fileHandle retain];
+    state->finished = false;
+    state->errorCode = 0;
+
+    source_data->window_id = windowId;
+    source_data->mime_type = mt;
+    source_data->write_fd = -1;
+    source_data->finished = false;
+    source_data->error_code = 0;
+    source_data->platform_data = state;
+
+    // Track this source data for cleanup on cancellation
+    if (!add_ns_pending_drag_source_data(window, source_data)) {
+        // Call completion handler with memory error before cleanup
+        completionHandler([NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil]);
+        // Mark as finished to prevent cleanup_ns_drag_source_data from calling completionHandler again
+        source_data->finished = true;
+        cleanup_ns_drag_source_data(source_data);
+        return;
+    }
+
+    // Notify the application via callback - this will trigger glfwSendDragData calls
+    _glfwInputDragSourceRequest(window, mimeType, source_data);
+
+    // Note: The completion handler will be called from glfwSendDragData when finished
+    // If the application didn't finish (sync callback didn't complete), we need to handle it
+    // The platform_data still holds the state for async completion
+}
+
+@end
+// }}}
+
 // Content view class for the GLFW window {{{
 
-@interface GLFWContentView : NSView <NSTextInputClient>
+@interface GLFWContentView : NSView <NSTextInputClient, NSDraggingSource>
 {
     _GLFWwindow* window;
     NSTrackingArea* trackingArea;
@@ -811,9 +1016,21 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
         markedRect = NSMakeRect(0.0, 0.0, 0.0, 0.0);
         input_source_at_last_key_event = nil;
         in_key_handler = 0;
+        self.identifier = @"kitty-content-view";
 
         [self updateTrackingAreas];
-        [self registerForDraggedTypes:@[NSPasteboardTypeFileURL, NSPasteboardTypeString]];
+        // Register for file promises in addition to regular files (macOS 10.12+)
+        if (@available(macOS 10.12, *)) {
+            NSMutableArray *types = [NSMutableArray arrayWithObjects:
+                NSPasteboardTypeFileURL,
+                NSPasteboardTypeString,
+                nil];
+            // Add file promise types
+            [types addObjectsFromArray:[NSFilePromiseReceiver readableDraggedTypes]];
+            [self registerForDraggedTypes:types];
+        } else {
+            [self registerForDraggedTypes:@[NSPasteboardTypeFileURL, NSPasteboardTypeString]];
+        }
     }
 
     return self;
@@ -855,12 +1072,14 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 - (void) viewWillStartLiveResize
 {
     if (!window) return;
+    window->ns.live_resize_in_progress = true;
     _glfwInputLiveResize(window, true);
 }
 
 - (void)viewDidEndLiveResize
 {
     if (!window) return;
+    window->ns.live_resize_in_progress = false;
     _glfwInputLiveResize(window, false);
 }
 
@@ -1001,6 +1220,7 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
     (void)event;
     if (!window) return;
     _glfwInputCursorEnter(window, false);
+    [[NSCursor arrowCursor] set];
 }
 
 - (void)mouseEntered:(NSEvent *)event
@@ -1008,16 +1228,7 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
     (void)event;
     if (!window) return;
     _glfwInputCursorEnter(window, true);
-}
-
-- (void)viewDidChangeEffectiveAppearance
-{
-    static GLFWColorScheme appearance = GLFW_COLOR_SCHEME_NO_PREFERENCE;
-    GLFWColorScheme new_appearance = glfwGetCurrentSystemColorTheme();
-    if (new_appearance != appearance) {
-        appearance = new_appearance;
-        _glfwInputColorScheme(appearance);
-    }
+    updateCursorImage(window);
 }
 
 - (void)viewDidChangeBackingProperties
@@ -1332,82 +1543,369 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
 
 - (void)scrollWheel:(NSEvent *)event
 {
-    double deltaX = [event scrollingDeltaX];
-    double deltaY = [event scrollingDeltaY];
-
-    int flags = [event hasPreciseScrollingDeltas] ? 1 : 0;
-    if (flags) {
+    GLFWScrollEvent ev = {
+        .keyboard_modifiers=translateFlags([event modifierFlags]), .unscaled.x = [event scrollingDeltaX], .unscaled.y = [event scrollingDeltaY]};
+    ev.x_offset = ev.unscaled.x;
+    ev.y_offset = ev.unscaled.y;
+    if ([event hasPreciseScrollingDeltas]) {
+        ev.offset_type = GLFW_SCROLL_OFFEST_HIGHRES;
         float xscale = 1, yscale = 1;
         _glfwPlatformGetWindowContentScale(window, &xscale, &yscale);
-        if (xscale > 0) deltaX *= xscale;
-        if (yscale > 0) deltaY *= yscale;
+        if (xscale > 0) ev.x_offset *= xscale;
+        if (yscale > 0) ev.y_offset *= yscale;
     }
 
     switch([event momentumPhase]) {
-        case NSEventPhaseBegan:
-            flags |= (1 << 1); break;
-        case NSEventPhaseStationary:
-            flags |= (2 << 1); break;
-        case NSEventPhaseChanged:
-            flags |= (3 << 1); break;
-        case NSEventPhaseEnded:
-            flags |= (4 << 1); break;
-        case NSEventPhaseCancelled:
-            flags |= (5 << 1); break;
-        case NSEventPhaseMayBegin:
-            flags |= (6 << 1); break;
-        case NSEventPhaseNone:
-        default:
-            break;
+        case NSEventPhaseBegan: ev.momentum_type = GLFW_MOMENTUM_PHASE_BEGAN; break;
+        case NSEventPhaseStationary: ev.momentum_type = GLFW_MOMENTUM_PHASE_STATIONARY; break;
+        case NSEventPhaseChanged: ev.momentum_type = GLFW_MOMENTUM_PHASE_ACTIVE; break;
+        case NSEventPhaseEnded: ev.momentum_type = GLFW_MOMENTUM_PHASE_ENDED; break;
+        case NSEventPhaseCancelled: ev.momentum_type = GLFW_MOMENTUM_PHASE_CANCELED; break;
+        case NSEventPhaseMayBegin: ev.momentum_type = GLFW_MOMENTUM_PHASE_MAY_BEGIN; break;
+        case NSEventPhaseNone: break;
     }
 
-    _glfwInputScroll(window, deltaX, deltaY, flags, translateFlags([event modifierFlags]));
+    _glfwInputScroll(window, &ev);
+}
+
+// Drop implementation for drag and drop {{{
+// Return YES to receive periodic dragging updates even when the mouse hasn't moved.
+// This allows the application to update acceptance status asynchronously.
+- (BOOL)wantsPeriodicDraggingUpdates
+{
+    return YES;
+}
+
+static void
+free_drop_data(_GLFWwindow *window) {
+    if (window->ns.drop_data.mimes) {
+        for (size_t i = 0; i < window->ns.drop_data.mimes_count; i++) free(window->ns.drop_data.mimes + i);
+    }
+    if (window->ns.drop_data.pasteboard) [window->ns.drop_data.pasteboard release];
+    if (window->ns.drop_data.data_mapping) [window->ns.drop_data.data_mapping release];
+    if (window->ns.drop_data.file_promise_mapping) {
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        NSError *error = nil;
+        for (NSString *key in window->ns.drop_data.file_promise_mapping) {
+            NSArray *pair = [window->ns.drop_data.file_promise_mapping objectForKey:key];
+            error = nil; if (pair[1] != [NSNull null]) [pair[1] closeAndReturnError:&error];
+            error = nil; [fileManager removeItemAtURL:pair[0] error:&error];
+        }
+        [window->ns.drop_data.file_promise_mapping release];
+    }
+    memset(&window->ns.drop_data, 0, sizeof(_GLFWDropData));
+}
+
+static void
+update_drop_state(_GLFWwindow *window, size_t mime_count) {
+    _GLFWDropData *d = &window->ns.drop_data;
+    for (size_t i = mime_count; i < d->mimes_count; i++) {
+        if (d->mimes[i]) { free((void*)d->mimes[i]); d->mimes[i] = NULL; }
+    }
+    d->mimes_count = mime_count;
 }
 
 - (NSDragOperation)draggingEntered:(id <NSDraggingInfo>)sender
 {
-    (void)sender;
-    // HACK: We don't know what to say here because we don't know what the
-    //       application wants to do with the paths
-    return NSDragOperationGeneric;
+    const NSRect contentRect = [window->ns.view frame];
+    const NSPoint pos = [sender draggingLocation];
+    double xpos = pos.x;
+    double ypos = contentRect.size.height - pos.y;
+    free_drop_data(window);
+
+    // Get MIME types from the dragging pasteboard
+    NSPasteboard* pasteboard = [sender draggingPasteboard];
+
+    // Count total types across all pasteboard items plus 2 for uri-list and text/plain
+    size_t max_types = 2;
+    for (NSPasteboardItem* item in pasteboard.pasteboardItems) max_types += [item.types count];
+    NSArray *classes = @[[NSFilePromiseReceiver class]];
+    NSArray *receivers = [pasteboard readObjectsForClasses:classes options:@{}];
+    for (NSFilePromiseReceiver *receiver in receivers) max_types += [receiver.fileTypes count];
+
+    // Pre-allocate C array for MIME types
+    const char** mime_array = (const char**)calloc(max_types, sizeof(const char*));
+    if (!mime_array) {
+        int accepted = _glfwInputDragEvent(window, GLFW_DRAG_ENTER, xpos, ypos, NULL, NULL);
+        return accepted ? NSDragOperationGeneric : NSDragOperationNone;
+    }
+
+    size_t mime_count = 0;
+
+    // Check for common types first (use _glfw_strdup since we need to own the strings)
+    NSDictionary* options = @{NSPasteboardURLReadingFileURLsOnlyKey:@YES};
+    if ([pasteboard canReadObjectForClasses:@[[NSURL class]] options:options]) {
+        mime_array[mime_count++] = _glfw_strdup("text/uri-list");
+    }
+    if ([pasteboard canReadObjectForClasses:@[[NSString class]] options:nil]) {
+        mime_array[mime_count++] = _glfw_strdup("text/plain");
+    }
+#define add_mime(uti) { \
+            const char* mime = uti_to_mime(uti); \
+            if (mime && mime[0]) { \
+                bool duplicate = false; \
+                for (size_t i = 0; i < mime_count; i++) { \
+                    if (strcmp(mime_array[i], mime) == 0) { \
+                        duplicate = true; \
+                        break; \
+                    } \
+                } \
+                if (!duplicate) mime_array[mime_count++] = _glfw_strdup(mime); \
+            } \
+}
+    // Get file promise based types
+    for (NSFilePromiseReceiver *receiver in receivers) {
+        for (NSString *uti in receiver.fileTypes) {
+            add_mime(uti);
+        }
+    }
+
+    // Get additional types from pasteboard items
+    for (NSPasteboardItem* item in pasteboard.pasteboardItems) {
+        for (NSPasteboardType uti in item.types) {
+            add_mime(uti);
+        }
+    }
+
+    window->ns.drop_data.mimes = mime_array;
+    window->ns.drop_data.mimes_count = mime_count;
+    bool from_self = ([sender draggingSource] != nil);
+    mime_count = _glfwInputDropEvent(window, GLFW_DROP_ENTER, xpos, ypos, mime_array, mime_count, from_self);
+    update_drop_state(window, mime_count);
+    return mime_count ? NSDragOperationGeneric :NSDragOperationNone;
+}
+
+- (NSDragOperation)draggingUpdated:(id <NSDraggingInfo>)sender
+{
+    if (!window->ns.drop_data.mimes_count) return NSDragOperationNone;
+    const NSRect contentRect = [window->ns.view frame];
+    const NSPoint pos = [sender draggingLocation];
+    double xpos = pos.x;
+    double ypos = contentRect.size.height - pos.y;
+
+    bool from_self = ([sender draggingSource] != nil);
+    _GLFWDropData *d = &window->ns.drop_data;
+    size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_MOVE, xpos, ypos, d->mimes, d->mimes_count, from_self);
+    update_drop_state(window, mime_count);
+    return mime_count ? NSDragOperationGeneric :NSDragOperationNone;
+}
+
+- (void)draggingExited:(id <NSDraggingInfo>)sender
+{
+    bool from_self = ([sender draggingSource] != nil);
+    _GLFWDropData *d = &window->ns.drop_data;
+    size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_LEAVE, 0, 0, d->mimes, d->mimes_count, from_self);
+    update_drop_state(window, mime_count);
+    free_drop_data(window);
 }
 
 - (BOOL)performDragOperation:(id <NSDraggingInfo>)sender
 {
+    if (!window->ns.drop_data.mimes_count) return NO;
     const NSRect contentRect = [window->ns.view frame];
-    // NOTE: The returned location uses base 0,1 not 0,0
     const NSPoint pos = [sender draggingLocation];
-    _glfwInputCursorPos(window, pos.x, contentRect.size.height - pos.y);
+    double xpos = pos.x;
+    double ypos = contentRect.size.height - pos.y;
+    bool from_self = ([sender draggingSource] != nil);
+    _GLFWDropData *d = &window->ns.drop_data;
+    size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_DROP, xpos, ypos, d->mimes, d->mimes_count, from_self);
+    if (d->mimes) {
+        update_drop_state(window, mime_count);
+        window->ns.drop_data.pasteboard = [[sender draggingPasteboard] retain];
+        for (size_t i = 0; i < d->mimes_count; i++)
+            _glfwPlatformRequestDropData(window, d->mimes[i]);
+    }
+    return YES;
+}
 
-    NSPasteboard* pasteboard = [sender draggingPasteboard];
-    NSDictionary* options = @{NSPasteboardURLReadingFileURLsOnlyKey:@YES};
-    NSArray* objs = [pasteboard readObjectsForClasses:@[[NSURL class], [NSString class]]
-                                              options:options];
-    if (!objs) return NO;
-    const NSUInteger count = [objs count];
-    NSMutableString *uri_list = [NSMutableString stringWithCapacity:4096];  // auto-released
-    if (count)
-    {
-        for (NSUInteger i = 0;  i < count;  i++)
-        {
-            id obj = objs[i];
-            if ([obj isKindOfClass:[NSURL class]]) {
-                NSURL *url = (NSURL*)obj;
-                if ([uri_list length] > 0) [uri_list appendString:@("\n")];
+void
+_glfwPlatformRequestDropUpdate(_GLFWwindow* window UNUSED) {
+    // No-op since macOS is calling the drop move callback periodically anyway
+    // thanks to wantsPeriodicDraggingUpdates and we have no way to inform
+    // macOS of any changes except in the cocoa callbacks.
+}
+
+static void
+send_data_available_event_on_next_event_loop_tick(GLFWid wid, const char *mime) {
+    char *mt = _glfw_strdup(mime);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        _GLFWwindow *window = _glfwWindowForId(wid);
+        if (window) {
+            const char *mimes[1] = {mt};
+            _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, 0, 0, mimes, 1, false);
+        }
+        free(mt);
+    });
+}
+
+int
+_glfwPlatformRequestDropData(_GLFWwindow *window UNUSED, const char *mime) {
+    NSPasteboard* pasteboard = window->ns.drop_data.pasteboard;
+    if (!pasteboard) return EINVAL;
+    GLFWid wid = window->id;
+    if (window->ns.drop_data.data_mapping == nil) window->ns.drop_data.data_mapping = [[NSMutableDictionary alloc] init];
+    NSArray *pair;
+    if ((pair = window->ns.drop_data.data_mapping[@(mime)])) {
+        window->ns.drop_data.data_mapping[@(mime)] = @[pair[0], @0];
+        send_data_available_event_on_next_event_loop_tick(wid, mime);
+        return 0;
+    }
+    if (window->ns.drop_data.file_promise_mapping == nil) window->ns.drop_data.file_promise_mapping = [[NSMutableDictionary alloc] init];
+    if ((pair = window->ns.drop_data.file_promise_mapping[@(mime)])) {
+        if (pair[0] == [NSNull null]) return 0;  // waiting for promise
+        if (pair[1] != [NSNull null]) {
+            NSFileHandle *h = pair[1]; NSError *error = nil;
+            [h seekToOffset:0 error:&error];
+        }
+        send_data_available_event_on_next_event_loop_tick(wid, mime);
+        return 0;
+    }
+    NSData* data = nil; NSFilePromiseReceiver *file_promise = nil;
+    // Handle special MIME types
+    if (strcmp(mime, "text/uri-list") == 0) {
+        NSDictionary* options = @{NSPasteboardURLReadingFileURLsOnlyKey:@YES};
+        NSArray* urls = [pasteboard readObjectsForClasses:@[[NSURL class]] options:options];
+        if (urls && [urls count] > 0) {
+            NSMutableString *uri_list = [NSMutableString stringWithCapacity:4096];
+            for (NSURL* url in urls) {
+                if ([uri_list length] > 0) [uri_list appendString:@"\n"];
                 if (url.fileURL) [uri_list appendString:url.filePathURL.absoluteString];
                 else [uri_list appendString:url.absoluteString];
-            } else if ([obj isKindOfClass:[NSString class]]) {
-                const char *text = [obj UTF8String];
-                _glfwInputDrop(window, "text/plain;charset=utf-8", text, strlen(text));
-            } else {
-                _glfwInputError(GLFW_PLATFORM_ERROR,
-                                "Cocoa: Object is neither a URL nor a string");
+            }
+            data = [uri_list dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    } else if (strcmp(mime, "text/plain") == 0 || strcmp(mime, "text/plain;charset=utf-8") == 0) {
+        NSArray* strings = [pasteboard readObjectsForClasses:@[[NSString class]] options:nil];
+        if (strings && [strings count] > 0) {
+            NSString* str = strings[0];
+            data = [str dataUsingEncoding:NSUTF8StringEncoding];
+        }
+    }
+    if (data == nil) {
+        // Try to read data for other MIME types using UTI
+        NSString* uti = mime_to_uti(mime);
+        if (uti) {
+            NSPasteboardType pbType = [pasteboard availableTypeFromArray:@[uti]];
+            if (pbType) data = [pasteboard dataForType:pbType];
+        }
+        if (data == nil) {
+            // look in the file promise providers
+            NSArray *receivers = [pasteboard readObjectsForClasses:@[[NSFilePromiseReceiver class]] options:@{}];
+            for (NSFilePromiseReceiver *receiver in receivers) {
+                for (NSString *uti in receiver.fileTypes) {
+                    const char *q = uti_to_mime(uti);
+                    if (q && strcmp(q, mime) == 0) {
+                        file_promise = receiver;
+                        break;
+                    }
+                }
+                if (file_promise) break;
             }
         }
     }
-    if ([uri_list length] > 0) _glfwInputDrop(window, "text/uri-list", uri_list.UTF8String, strlen(uri_list.UTF8String));
+    if (!data && !file_promise) return ENOENT;
+    if (file_promise != nil) {
+        window->ns.drop_data.file_promise_mapping[@(mime)] = @[[NSNull null], [NSNull null], [NSNull null]];
+        char *mt = _glfw_strdup(mime);
+        [file_promise receivePromisedFilesAtDestination:[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+            options:@{} operationQueue:[NSOperationQueue mainQueue] reader:^(NSURL *fileURL, NSError *errorOrNil) {
+            _GLFWwindow *window = _glfwWindowForId(wid);
+            if (!window || !window->ns.drop_data.file_promise_mapping) return;
+            id null = [NSNull null];
+            if (errorOrNil) {
+                NSLog(@"Error receiving file: %@: %@", fileURL, errorOrNil);
+                window->ns.drop_data.file_promise_mapping[@(mt)] = @[fileURL, null, errorOrNil];
+            } else {
+                NSError *err = nil;
+                NSFileHandle *file_handle = [NSFileHandle fileHandleForReadingFromURL:fileURL error:&err];
+                window->ns.drop_data.file_promise_mapping[@(mt)] = err ? @[fileURL, null, err] : @[fileURL, file_handle, null];
+            }
+            const char *mimes[1] = {mt};
+            _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, 0, 0, mimes, 1, false);
+            free(mt);
+        }];
+    } else {
+        window->ns.drop_data.data_mapping[@(mime)] = @[data, @0];
+        const char *mimes[1] = {mime};
+        _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, 0, 0, mimes, 1, false);
+    }
+    return 0;
+}
 
-    return YES;
+ssize_t
+_glfwPlatformReadAvailableDropData(GLFWwindow *w, GLFWDropEvent *ev, char *buffer, size_t capacity) {
+    _GLFWwindow *window = (_GLFWwindow*)w; const char *mime = ev->mimes[0];
+    NSArray *pair;
+    if ((pair = window->ns.drop_data.data_mapping[@(mime)])) {
+        NSData *data = pair[0];
+        size_t offset = [pair[1] unsignedIntegerValue];
+        NSUInteger dataLength = [data length];
+        if (offset >= dataLength) return 0;  // EOF
+        NSUInteger remaining = dataLength - offset;
+        NSUInteger to_read = (remaining < capacity) ? remaining : capacity;
+        [data getBytes:buffer range:NSMakeRange(offset, to_read)];
+        offset += to_read;
+        window->ns.drop_data.data_mapping[@(mime)] = @[data, @(offset)];
+        if (to_read) send_data_available_event_on_next_event_loop_tick(window->id, mime);
+        return (ssize_t)to_read;
+    }
+    if ((pair = window->ns.drop_data.file_promise_mapping[@(mime)])) {
+        id null = [NSNull null];
+        if (pair[0] == null) { return -ENOENT; }
+        if (pair[2] != null) {
+            NSError *err = pair[2];
+            if ([err.domain isEqualToString:NSPOSIXErrorDomain]) return -err.code;
+            NSError *underlyingError = err.userInfo[NSUnderlyingErrorKey];
+            if (underlyingError && [underlyingError.domain isEqualToString:NSPOSIXErrorDomain]) return -underlyingError.code;
+            return -EIO;
+        }
+        NSFileHandle *h = pair[1];
+        int fd = h.fileDescriptor;
+        ssize_t bytesRead; do {
+            bytesRead = read(fd, buffer, capacity);
+        } while (bytesRead == -1 && errno == EINTR);
+        bytesRead = bytesRead < 0 ? -errno : bytesRead;
+        if (bytesRead > 0) send_data_available_event_on_next_event_loop_tick(window->id, mime);
+        return bytesRead;
+    }
+    return -ENOENT;
+}
+
+void
+_glfwPlatformEndDrop(GLFWwindow *w UNUSED, GLFWDragOperationType op UNUSED) {
+    free_drop_data((_GLFWwindow*)w);
+}
+// }}}
+
+// NSDraggingSource protocol methods
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session
+    sourceOperationMaskForDraggingContext:(NSDraggingContext)context
+{
+    (void)session;
+    (void)context;
+    // Return the operation based on the stored drag operations bitfield
+    NSDragOperation ops = 0;
+    if (window->ns.dragOperations & GLFW_DRAG_OPERATION_COPY)
+        ops |= NSDragOperationCopy;
+    if (window->ns.dragOperations & GLFW_DRAG_OPERATION_MOVE)
+        ops |= NSDragOperationMove;
+    if (window->ns.dragOperations & GLFW_DRAG_OPERATION_GENERIC)
+        ops |= NSDragOperationGeneric;
+    return ops ? ops : NSDragOperationCopy;
+}
+
+- (void)draggingSession:(NSDraggingSession *)session
+           endedAtPoint:(NSPoint)screenPoint
+              operation:(NSDragOperation)operation
+{
+    (void)session;
+    (void)screenPoint;
+    if (operation == NSDragOperationNone) {  // drag was canceled
+        // Clean up all pending drag source data
+        cleanup_all_ns_pending_drag_source_data(window);
+        // Notify the application that the drag source is closed
+        _glfwInputDragSourceRequest(window, NULL, NULL);
+    }
 }
 
 - (BOOL)hasMarkedText
@@ -1425,7 +1923,11 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
 
 - (NSRange)selectedRange
 {
-    return kEmptyRange;
+    // Return position 0 with no selection to indicate text can be inserted.
+    // This is required for macOS dictation to work - returning kEmptyRange
+    // (NSNotFound, 0) causes dictation to fail because the system doesn't
+    // know where to insert text. See https://github.com/kovidgoyal/kitty/issues/3732
+    return NSMakeRange(0, 0);
 }
 
 - (void)setMarkedText:(id)string
@@ -1570,7 +2072,15 @@ void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
 
 - (BOOL)isAccessibilitySelectorAllowed:(SEL)selector
 {
-    if (selector == @selector(accessibilityRole) || selector == @selector(accessibilitySelectedText)) return YES;
+    // Allow accessibility selectors needed for dictation and other accessibility features
+    // See https://github.com/kovidgoyal/kitty/issues/3732
+    if (selector == @selector(accessibilityRole) ||
+        selector == @selector(accessibilitySelectedText) ||
+        selector == @selector(accessibilitySelectedTextRange) ||
+        selector == @selector(accessibilityNumberOfCharacters) ||
+        selector == @selector(accessibilityInsertionPointLineNumber) ||
+        selector == @selector(accessibilityValue) ||
+        selector == @selector(setAccessibilityValue:)) return YES;
     return NO;
 }
 
@@ -1594,6 +2104,44 @@ void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
         }
     }
     return text;
+}
+
+// Accessibility methods required for dictation support
+// See https://github.com/kovidgoyal/kitty/issues/3732
+
+- (NSRange)accessibilitySelectedTextRange
+{
+    // Return position 0 with no selection for dictation support
+    return NSMakeRange(0, 0);
+}
+
+- (NSInteger)accessibilityNumberOfCharacters
+{
+    // Terminal doesn't have a fixed text buffer, return 0
+    return 0;
+}
+
+- (NSInteger)accessibilityInsertionPointLineNumber
+{
+    // Return line 0 as the insertion point
+    return 0;
+}
+
+- (NSString *)accessibilityValue
+{
+    // Terminal doesn't expose its buffer as an accessibility value
+    return @"";
+}
+
+- (void)setAccessibilityValue:(NSString *)value
+{
+    // When dictation or other accessibility features set text, insert it as keyboard input
+    if (value && [value length] > 0 && window) {
+        const char *utf8 = [value UTF8String];
+        debug_key("Inserting text via setAccessibilityValue: %s\n", utf8);
+        GLFWkeyevent glfw_keyevent = {.text=utf8, .ime_state=GLFW_IME_COMMIT_TEXT};
+        _glfwInputKeyboard(window, &glfw_keyevent);
+    }
 }
 
 // <https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/SysServices/Articles/using.html>
@@ -1689,13 +2237,21 @@ void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
     if (self != nil) {
         glfw_window = initWindow;
         self.tabbingMode = NSWindowTabbingModeDisallowed;
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        [center addObserver:self selector:@selector(screenParametersDidChange:) name:NSApplicationDidChangeScreenParametersNotification object:nil];
     }
     return self;
+}
+
+- (void)screenParametersDidChange:(NSNotification *)notification {
+    if (!glfw_window || !glfw_window->ns.layer_shell.is_active) return;
+    _glfwPlatformSetLayerShellConfig(glfw_window, NULL);
 }
 
 - (void) removeGLFWWindow
 {
     glfw_window = NULL;
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
@@ -1711,14 +2267,26 @@ void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
 
 - (BOOL)canBecomeKeyWindow
 {
+    if (!glfw_window) return NO;
+    if (glfw_window->ns.layer_shell.is_active) {
+        if (glfw_window->ns.layer_shell.config.type == GLFW_LAYER_SHELL_BACKGROUND) return NO;
+        switch(glfw_window->ns.layer_shell.config.focus_policy) {
+            case GLFW_FOCUS_NOT_ALLOWED: return NO;
+            case GLFW_FOCUS_EXCLUSIVE: return YES;
+            case GLFW_FOCUS_ON_DEMAND: return YES;
+        }
+    }
     // Required for NSWindowStyleMaskBorderless windows
-    return YES;
+    // Also miniaturized windows should not become key
+    return !_glfwPlatformWindowIconified(glfw_window);
 }
 
 - (BOOL)canBecomeMainWindow
 {
-    return YES;
+    return !glfw_window->ns.layer_shell.is_active || glfw_window->ns.layer_shell.config.type != GLFW_LAYER_SHELL_BACKGROUND;
 }
+
+static void apply_titlebar_color_settings(_GLFWwindow *window);
 
 static void
 update_titlebar_button_visibility_after_fullscreen_transition(_GLFWwindow* w, bool traditional, bool made_fullscreen) {
@@ -1736,6 +2304,7 @@ update_titlebar_button_visibility_after_fullscreen_transition(_GLFWwindow* w, bo
         [[window standardWindowButton: NSWindowMiniaturizeButton] setHidden:button_hidden];
         [[window standardWindowButton: NSWindowZoomButton] setHidden:button_hidden];
     }
+    if (!made_fullscreen) apply_titlebar_color_settings(w);
 }
 
 - (void)toggleFullScreen:(nullable id)sender
@@ -1878,12 +2447,12 @@ static bool createNativeWindow(_GLFWwindow* window,
 //////                       GLFW platform API                      //////
 //////////////////////////////////////////////////////////////////////////
 
-int _glfwPlatformCreateWindow(_GLFWwindow* window,
-                              const _GLFWwndconfig* wndconfig,
-                              const _GLFWctxconfig* ctxconfig,
-                              const _GLFWfbconfig* fbconfig)
-{
+int _glfwPlatformCreateWindow(_GLFWwindow* window, const _GLFWwndconfig* wndconfig, const _GLFWctxconfig* ctxconfig, const _GLFWfbconfig* fbconfig, const GLFWLayerShellConfig *lsc) {
     window->ns.deadKeyState = 0;
+    if (lsc) {
+        window->ns.layer_shell.is_active = true;
+        window->ns.layer_shell.config = *lsc;
+    } else window->ns.layer_shell.is_active = false;
     if (!_glfw.ns.finishedLaunching)
     {
         [NSApp run];
@@ -1941,10 +2510,12 @@ int _glfwPlatformCreateWindow(_GLFWwindow* window,
 
 void _glfwPlatformDestroyWindow(_GLFWwindow* window)
 {
+    GLFWWindow *w = window->ns.object;
     if (_glfw.ns.disabledCursorWindow == window)
         _glfw.ns.disabledCursorWindow = NULL;
+    free_drop_data(window);
 
-    [window->ns.object orderOut:nil];
+    [w orderOut:nil];
 
     if (window->monitor)
         releaseMonitor(window);
@@ -1952,7 +2523,8 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
     if (window->context.destroy)
         window->context.destroy(window);
 
-    [window->ns.object setDelegate:nil];
+    [w setDelegate:nil];
+    [window->ns.delegate cleanup];
     [window->ns.delegate release];
     window->ns.delegate = nil;
 
@@ -1960,9 +2532,181 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
     [window->ns.view release];
     window->ns.view = nil;
 
-    [window->ns.object removeGLFWWindow];
-    [window->ns.object close];
+    [w removeGLFWWindow];
+    // Workaround for macOS Tahoe where if the frame is not set to zero size
+    // even after NSWindow::close the window remains on screen as an invisible
+    // rectangle that intercepts mouse events and takes up space in mission
+    // control. Sigh.
+    NSRect frame = w.frame; frame.size.width = 0; frame.size.height = 0;
+    [w setFrame:frame display:NO];
+    [w setHasShadow:NO];
+    [w close];  // sends a release to NSWindow so we dont release it
     window->ns.object = nil;
+}
+
+static NSScreen*
+screen_for_window_center(_GLFWwindow *window) {
+    NSRect windowFrame = [window->ns.object frame];
+    NSPoint windowCenter = NSMakePoint(NSMidX(windowFrame), NSMidY(windowFrame));
+    for (NSScreen *screen in [NSScreen screens]) {
+        if (NSPointInRect(windowCenter, [screen frame])) {
+            return screen;
+        }
+    }
+    return NSScreen.mainScreen;
+}
+
+static NSScreen*
+active_screen(void) {
+    NSPoint mouseLocation = [NSEvent mouseLocation];
+    NSArray<NSScreen *> *screens = [NSScreen screens];
+    for (NSScreen *screen in screens) {
+        if (NSPointInRect(mouseLocation, [screen frame])) {
+            return screen;
+        }
+    }
+    // As a fallback, return the main screen
+    return [NSScreen mainScreen];
+}
+
+static bool
+is_same_screen(NSScreen *screenA, NSScreen * screenB) {
+    if (screenA == screenB) return true;
+    NSDictionary<NSDeviceDescriptionKey, id> *deviceDescriptionA = [screenA deviceDescription];
+    NSDictionary<NSDeviceDescriptionKey, id> *deviceDescriptionB = [screenB deviceDescription];
+    NSNumber *screenNumberA = deviceDescriptionA[@"NSScreenNumber"];
+    NSNumber *screenNumberB = deviceDescriptionB[@"NSScreenNumber"];
+    return [screenNumberA isEqualToNumber:screenNumberB];
+}
+
+static void
+move_window_to_screen(_GLFWwindow *window, NSScreen *target) {
+    NSRect screenFrame = [target visibleFrame];
+    NSRect windowFrame = [window->ns.object frame];
+    CGFloat newX = NSMidX(screenFrame) - (windowFrame.size.width / 2.0);
+    CGFloat newY = NSMidY(screenFrame) - (windowFrame.size.height / 2.0);
+    NSRect newWindowFrame = NSMakeRect(newX, newY, windowFrame.size.width, windowFrame.size.height);
+    [window->ns.object setFrame:newWindowFrame display:NO animate:NO];
+    if (window->ns.layer_shell.is_active) _glfwPlatformSetLayerShellConfig(window, NULL);
+}
+
+const GLFWLayerShellConfig*
+_glfwPlatformGetLayerShellConfig(_GLFWwindow *window) {
+    return &window->ns.layer_shell.config;
+}
+
+static NSScreen*
+screen_for_name(const char *name) {
+    int count = 0;
+    GLFWmonitor **monitors = glfwGetMonitors(&count);
+    for (int i = 0; i < count; i++) {
+        const char *q = glfwGetMonitorName(monitors[i]);
+        if (q && strcmp(q, name) == 0) return ((_GLFWmonitor*)monitors[i])->ns.screen;
+    }
+    return NULL;
+}
+
+bool
+_glfwPlatformSetLayerShellConfig(_GLFWwindow* window, const GLFWLayerShellConfig *value) {
+#define config window->ns.layer_shell.config
+#define nswindow window->ns.object
+    window->resizable = false;
+    if (value) config = *value;
+    const bool is_transparent = _glfwPlatformFramebufferTransparent(window);
+    int background_blur = config.related.background_blur;
+    if (!is_transparent || config.related.background_opacity >= 1.f) { background_blur = 0; }
+    [nswindow setBackgroundColor:[NSColor clearColor]];
+    _glfwPlatformSetWindowBlur(window, background_blur);
+    window->ns.titlebar_hidden = true;
+    window->decorated = false;
+    [nswindow setTitlebarAppearsTransparent:false];
+    [nswindow setHasShadow:false];
+    [nswindow setTitleVisibility:NSWindowTitleHidden];
+    NSColorSpace *cs = nil;
+    switch (config.related.color_space) {
+        case SRGB_COLORSPACE: cs = [NSColorSpace sRGBColorSpace]; break;
+        case DISPLAY_P3_COLORSPACE: cs = [NSColorSpace displayP3ColorSpace]; break;
+        case DEFAULT_COLORSPACE: cs = nil; break;  // using deviceRGBColorSpace causes a hang when transitioning to fullscreen
+    }
+    [nswindow setColorSpace:cs];
+    [[nswindow standardWindowButton: NSWindowCloseButton] setHidden:true];
+    [[nswindow standardWindowButton: NSWindowMiniaturizeButton] setHidden:true];
+    [[nswindow standardWindowButton: NSWindowZoomButton] setHidden:true];
+    [nswindow setStyleMask:NSWindowStyleMaskBorderless];
+    // HACK: Changing the style mask can cause the first responder to be cleared
+    [nswindow makeFirstResponder:window->ns.view];
+    NSScreen *screen = screen_for_window_center(window);
+    if (config.output_name[0]) {
+        NSScreen *q = screen_for_name(config.output_name);
+        if (q) screen = q;
+    }
+    unsigned cell_width, cell_height; double left_edge_spacing, top_edge_spacing, right_edge_spacing, bottom_edge_spacing;
+    float xscale = (float)config.expected.xscale, yscale = (float)config.expected.yscale;
+    _glfwPlatformGetWindowContentScale(window, &xscale, &yscale);
+    config.size_callback((GLFWwindow*)window, xscale, yscale, &cell_width, &cell_height, &left_edge_spacing, &top_edge_spacing, &right_edge_spacing, &bottom_edge_spacing);
+    double spacing_x = left_edge_spacing + right_edge_spacing;
+    double spacing_y = top_edge_spacing + bottom_edge_spacing;
+    const unsigned xsz = config.x_size_in_pixels ? (unsigned)(config.x_size_in_pixels * xscale) : (cell_width * config.x_size_in_cells);
+    const unsigned ysz = config.y_size_in_pixels ? (unsigned)(config.y_size_in_pixels * yscale) : (cell_height * config.y_size_in_cells);
+    CGFloat dock_height = NSMinY(screen.visibleFrame) - NSMinY(screen.frame);
+    CGFloat menubar_height = NSHeight(screen.frame) - NSHeight(screen.visibleFrame) - dock_height;
+    CGFloat x = NSMinX(screen.visibleFrame), y = NSMinY(screen.visibleFrame) - 1, width = NSWidth(screen.visibleFrame), height = NSHeight(screen.visibleFrame) + 2;
+    if (config.type == GLFW_LAYER_SHELL_BACKGROUND || config.edge == GLFW_EDGE_CENTER) {
+        x = NSMinX(screen.frame); height = NSHeight(screen.frame) - menubar_height + 1; y = NSMinY(screen.frame); width = NSWidth(screen.frame);
+    }
+    // Screen co-ordinate system is with origin in lower left and y increasing upwards and x increasing rightwards
+    // NSLog(@"frame: %@ visibleFrame: %@\n", NSStringFromRect(screen.frame), NSStringFromRect(screen.visibleFrame));
+    NSWindowLevel level = NSPopUpMenuWindowLevel - 1; // so that popup menus from globalmenubar function
+    NSWindowAnimationBehavior animation_behavior = NSWindowAnimationBehaviorUtilityWindow;
+    switch (config.type) {
+        case GLFW_LAYER_SHELL_BACKGROUND:
+            animation_behavior = NSWindowAnimationBehaviorNone;
+            // See: https://stackoverflow.com/questions/4982584/how-do-i-draw-the-desktop-on-mac-os-x/4982619#4982619
+            level = kCGDesktopWindowLevel;
+            break;
+        case GLFW_LAYER_SHELL_OVERLAY: case GLFW_LAYER_SHELL_NONE: break;
+        case GLFW_LAYER_SHELL_PANEL: level = NSNormalWindowLevel - 1; break;
+        case GLFW_LAYER_SHELL_TOP: level--; break;
+    }
+    if (config.type != GLFW_LAYER_SHELL_BACKGROUND && config.edge != GLFW_EDGE_CENTER) {
+        double panel_height = spacing_y + ysz / yscale, panel_width = spacing_x + xsz / xscale;
+        switch (config.edge) {
+            case GLFW_EDGE_BOTTOM: height = panel_height; break;
+            case GLFW_EDGE_TOP:
+                y += height - panel_height + 1.;
+                height = panel_height;
+                break;
+            case GLFW_EDGE_LEFT: width = panel_width; break;
+            case GLFW_EDGE_RIGHT:
+                x += width - panel_width + 1.;
+                width = panel_width;
+                break;
+            case GLFW_EDGE_CENTER_SIZED:
+                x += (width - panel_width) / 2;
+                y += (height - panel_height) / 2;
+                width = panel_width; height = panel_height;
+                break;
+            default:  // top left
+                y += height - panel_height + 1.;
+                height = panel_height; width = panel_width;
+                break;
+        }
+        if (width < 1.) width = NSWidth(screen.visibleFrame);
+        if (height < 1.) height = NSWidth(screen.visibleFrame);
+    }
+
+    if (config.edge != GLFW_EDGE_CENTER_SIZED) {
+        x += config.requested_left_margin; width -= config.requested_left_margin + config.requested_right_margin;
+        y += config.requested_bottom_margin; height -= config.requested_top_margin + config.requested_bottom_margin;
+    }
+
+    [nswindow setAnimationBehavior:animation_behavior];
+    [nswindow setLevel:level];
+    [nswindow setCollectionBehavior: (NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle)];
+    [nswindow setFrame:NSMakeRect(x, y, width, height) display:YES];
+    return true;
+#undef config
+#undef nswindow
 }
 
 void _glfwPlatformSetWindowTitle(_GLFWwindow* window, const char* title)
@@ -2013,6 +2757,7 @@ void _glfwPlatformGetWindowSize(_GLFWwindow* window, int* width, int* height)
 
 void _glfwPlatformSetWindowSize(_GLFWwindow* window, int width, int height)
 {
+    if (window->ns.layer_shell.is_active) return;
     if (window->monitor)
     {
         if (window->monitor->window == window)
@@ -2131,14 +2876,62 @@ void _glfwPlatformMaximizeWindow(_GLFWwindow* window)
     }
 }
 
-void _glfwPlatformShowWindow(_GLFWwindow* window)
+void _glfwPlatformShowWindow(_GLFWwindow* window, bool move_to_active_screen)
 {
-    [window->ns.object orderFront:nil];
+    const bool is_background = window->ns.layer_shell.is_active && window->ns.layer_shell.config.type == GLFW_LAYER_SHELL_BACKGROUND;
+    NSWindow *nw = window->ns.object;
+    if (move_to_active_screen) {
+        NSScreen *current_screen = screen_for_window_center(window);
+        NSScreen *target_screen = active_screen();
+        if (!is_same_screen(current_screen, target_screen)) {
+            debug_rendering("Moving OS window %llu to active screen\n", window->id);
+            move_window_to_screen(window, target_screen);
+        }
+    }
+    if (is_background) {
+        [nw orderBack:nil];
+    } else {
+        // Cocoa has a bug where when showing a hidden window after
+        // fullscreening an application, the window does not get added
+        // to the current space even though it has NSWindowCollectionBehaviorCanJoinAllSpaces
+        // probably because it wasnt added to the temp space used for
+        // fullscreen. So to work around that, we change the collection
+        // behavior temporarily to NSWindowCollectionBehaviorMoveToActiveSpace
+        // and then change it back asynchronously.
+        // See https://github.com/kovidgoyal/kitty/issues/8740
+        NSWindowCollectionBehavior old = nw.collectionBehavior;
+        nw.collectionBehavior = (old & !NSWindowCollectionBehaviorCanJoinAllSpaces) | NSWindowCollectionBehaviorMoveToActiveSpace;
+        [nw orderFront:nil];
+        __block __typeof__(nw) weakSelf = nw;
+        dispatch_async(dispatch_get_main_queue(), ^{
+			weakSelf.collectionBehavior = old;
+		});
+    }
 }
 
 void _glfwPlatformHideWindow(_GLFWwindow* window)
 {
     [window->ns.object orderOut:nil];
+    pid_t prev_app_pid = _glfw.ns.previous_front_most_application; _glfw.ns.previous_front_most_application = 0;
+    NSRunningApplication *app;
+    if (window->ns.layer_shell.is_active && prev_app_pid > 0 && (app = [NSRunningApplication runningApplicationWithProcessIdentifier:prev_app_pid])) {
+        unsigned num_visible = 0;
+        for (_GLFWwindow *w = _glfw.windowListHead;  w;  w = w->next) {
+            if (_glfwPlatformWindowVisible(w)) num_visible++;
+        }
+        if (!num_visible) {
+            // yieldActivationToApplication was introduced in macOS 14 (Sonoma)
+            SEL selector = NSSelectorFromString(@"yieldActivationToApplication:");
+            if ([NSApp respondsToSelector:selector]) {
+                [NSApp performSelector:selector withObject:app];
+                [app activateWithOptions:0];
+            } else {
+                #define NSApplicationActivateIgnoringOtherApps 2
+                [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+                #undef NSApplicationActivateIgnoringOtherApps
+            }
+        }
+    }
 }
 
 void _glfwPlatformRequestWindowAttention(_GLFWwindow* window UNUSED)
@@ -2154,12 +2947,16 @@ int _glfwPlatformWindowBell(_GLFWwindow* window UNUSED)
 
 void _glfwPlatformFocusWindow(_GLFWwindow* window)
 {
-    // Make us the active application
-    // HACK: This is here to prevent applications using only hidden windows from
-    //       being activated, but should probably not be done every time any
-    //       window is shown
-    [NSApp activateIgnoringOtherApps:YES];
-    [window->ns.object makeKeyAndOrderFront:nil];
+    if (_glfwPlatformWindowIconified(window)) {
+        // miniaturized windows return false in canBecomeKeyWindow therefore
+        // unminiaturize first
+        [window->ns.object deminiaturize:nil];
+    }
+    if ([window->ns.object canBecomeKeyWindow]) {
+        // Make us the active application
+        [NSApp activateIgnoringOtherApps:YES];
+        [window->ns.object makeKeyAndOrderFront:nil];
+    }
 }
 
 void _glfwPlatformSetWindowMonitor(_GLFWwindow* window,
@@ -2335,24 +3132,6 @@ void _glfwPlatformSetRawMouseMotion(_GLFWwindow *window UNUSED, bool enabled UNU
 bool _glfwPlatformRawMouseMotionSupported(void)
 {
     return false;
-}
-
-void
-_glfwDispatchRenderFrame(CGDirectDisplayID displayID) {
-    _GLFWwindow *w = _glfw.windowListHead;
-    while (w) {
-        if (w->ns.renderFrameRequested && displayID == displayIDForWindow(w)) {
-            w->ns.renderFrameRequested = false;
-            w->ns.renderFrameCallback((GLFWwindow*)w);
-        }
-        w = w->next;
-    }
-    for (size_t i = 0; i < _glfw.ns.displayLinks.count; i++) {
-        _GLFWDisplayLinkNS *dl = &_glfw.ns.displayLinks.entries[i];
-        if (dl->displayID == displayID) {
-            dl->first_unserviced_render_frame_request_at = 0;
-        }
-    }
 }
 
 void _glfwPlatformGetCursorPos(_GLFWwindow* window, double* xpos, double* ypos)
@@ -2718,29 +3497,6 @@ bool _glfwPlatformToggleFullscreen(_GLFWwindow* w, unsigned int flags) {
 
 // Clipboard {{{
 
-#define UTI_ROUNDTRIP_PREFIX @"uti-is-typical-apple-nih."
-
-static NSString*
-mime_to_uti(const char *mime) {
-    if (strcmp(mime, "text/plain") == 0) return NSPasteboardTypeString;
-    if (@available(macOS 11.0, *)) {
-        UTType *t = [UTType typeWithMIMEType:@(mime)];  // auto-released
-        if (t != nil && !t.dynamic) return t.identifier;
-    }
-    return [NSString stringWithFormat:@"%@%s", UTI_ROUNDTRIP_PREFIX, mime];  // auto-released
-}
-
-static const char*
-uti_to_mime(NSString *uti) {
-    if ([uti isEqualToString:NSPasteboardTypeString]) return "text/plain";
-    if ([uti hasPrefix:UTI_ROUNDTRIP_PREFIX]) return [[uti substringFromIndex:[UTI_ROUNDTRIP_PREFIX length]] UTF8String];
-    if (@available(macOS 11.0, *)) {
-        UTType *t = [UTType typeWithIdentifier:uti];  // auto-released
-        if (t.preferredMIMEType != nil) return [t.preferredMIMEType UTF8String];
-    }
-    return "";
-}
-
 static void
 list_clipboard_mimetypes(GLFWclipboardwritedatafun write_data, void *object) {
 #define w(x) { if (ok) ok = write_data(object, x, strlen(x)); }
@@ -3029,6 +3785,8 @@ _glfwPlatformSetWindowBlur(_GLFWwindow *window, int radius) {
 GLFWAPI id glfwGetCocoaWindow(GLFWwindow* handle)
 {
     _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
     _GLFW_REQUIRE_INIT_OR_RETURN(nil);
     return window->ns.object;
 }
@@ -3067,22 +3825,117 @@ GLFWAPI GLFWcocoarenderframefun glfwCocoaSetWindowResizeCallback(GLFWwindow *w, 
     return current;
 }
 
+@implementation NSView (FindByIdentifier)
+
+- (NSArray<NSView *> *)viewsWithIdentifier:(NSUserInterfaceItemIdentifier)identifier {
+    NSMutableArray<NSView *> *result = [NSMutableArray array];
+    if ([self.identifier isEqual:identifier]) {
+        [result addObject:self];
+    }
+    for (NSView *sub in self.subviews) {
+        [result addObjectsFromArray:[sub viewsWithIdentifier:identifier]];
+    }
+    return result;
+}
+
+@end
+
+static
+void clear_title_bar_background_views(NSWindow *window) {
+#define tag @"kitty-for-transparent-titlebar"
+    NSView *contentView = window.contentView, *titlebarContainer = contentView ? contentView.superview : nil;
+    if (titlebarContainer) {
+        for (NSView *subview in [titlebarContainer viewsWithIdentifier:tag]) [subview removeFromSuperview];
+    }
+}
+
+static void
+set_title_bar_background(NSWindow *window, NSColor *backgroundColor) {
+    // add an extra view that just renders the background color under the transparent titlebar
+    NSView *contentView = window.contentView, *titlebarContainer = contentView ? contentView.superview : nil;
+    if (!titlebarContainer) return;
+    for (NSView *subview in [titlebarContainer viewsWithIdentifier:tag]) [subview removeFromSuperview];
+    if (!backgroundColor) return;
+
+    NSButton *b = [window standardWindowButton:NSWindowCloseButton];
+    if (b) {
+        NSView *titlebarView = b.superview;
+        NSView *bgView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, titlebarView.bounds.size.width, titlebarView.bounds.size.height)];
+        bgView.translatesAutoresizingMaskIntoConstraints = NO;
+        bgView.wantsLayer = YES;
+        bgView.layer.backgroundColor = backgroundColor.CGColor;
+        bgView.identifier = tag;
+        [titlebarView addSubview:bgView positioned:NSWindowBelow relativeTo:titlebarView.subviews[0]];
+        [NSLayoutConstraint activateConstraints:@[
+            // Pin to the top of the content view.
+            [bgView.topAnchor constraintEqualToAnchor:titlebarView.topAnchor],
+            // Pin to the leading edge of the content view.
+            [bgView.leadingAnchor constraintEqualToAnchor:titlebarView.leadingAnchor],
+            // Pin to the trailing edge of the content view.
+            [bgView.trailingAnchor constraintEqualToAnchor:titlebarView.trailingAnchor],
+            // Give it a fixed height
+            [bgView.bottomAnchor constraintEqualToAnchor:titlebarView.bottomAnchor]
+        ]];
+        [bgView release];
+        return;
+    }
+    NSView *bgView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, titlebarContainer.bounds.size.width, 32)];
+    bgView.translatesAutoresizingMaskIntoConstraints = NO;
+    bgView.wantsLayer = YES;
+    bgView.layer.backgroundColor = backgroundColor.CGColor;
+    bgView.identifier = tag;
+    // position the background view above the content view but below the titlebar view
+    [titlebarContainer addSubview:bgView positioned:NSWindowAbove relativeTo:contentView];
+    // for (NSView *subview in titlebarContainer.subviews) NSLog(@"sv: %@", subview.identifier);
+    [NSLayoutConstraint activateConstraints:@[
+        // Pin to the top of the content view.
+        [bgView.topAnchor constraintEqualToAnchor:titlebarContainer.topAnchor],
+        // Pin to the leading edge of the content view.
+        [bgView.leadingAnchor constraintEqualToAnchor:titlebarContainer.leadingAnchor],
+        // Pin to the trailing edge of the content view.
+        [bgView.trailingAnchor constraintEqualToAnchor:titlebarContainer.trailingAnchor],
+        // Give it a fixed height
+        [bgView.bottomAnchor constraintEqualToAnchor:contentView.topAnchor]
+    ]];
+    [bgView release];
+#undef tag
+}
+
+static void
+apply_titlebar_color_settings(_GLFWwindow *window) {
+#define tc window->ns.last_applied_titlebar_settings.color
+    GLFWWindow *nsw = window->ns.object;
+    if (!window->ns.titlebar_hidden && window->decorated && tc.was_set && window->ns.last_applied_titlebar_settings.transparent) {
+        NSColor *titlebar_color = [NSColor colorWithSRGBRed:tc.red green:tc.green blue:tc.blue alpha:tc.alpha];
+        set_title_bar_background(nsw, titlebar_color);
+        [titlebar_color release];
+    } else clear_title_bar_background_views(nsw);
+#undef tc
+}
+
+
+
 GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool use_system_color, unsigned int system_color, int background_blur, unsigned int hide_window_decorations, bool show_text_in_titlebar, int color_space, float background_opacity, bool resizable) { @autoreleasepool {
     _GLFWwindow* window = (_GLFWwindow*)w;
-    const bool is_transparent = ![window->ns.object isOpaque];
+    if (window->ns.layer_shell.is_active) return;
+    GLFWWindow *nsw = window->ns.object;
+    const bool is_transparent = _glfwPlatformFramebufferTransparent(window);
     if (!is_transparent) { background_opacity = 1.0; background_blur = 0; }
-    NSColor *background = nil;
+    NSColor *window_background = [NSColor windowBackgroundColor];
+    if (background_opacity < 1.0) {
+        // use a clear color (fully transparent) so that the final color is just the color from the surface.
+        // prevent blurring of shadows at window corners with desktop background by setting a low alpha background
+        window_background = background_blur > 0 ? [NSColor colorWithWhite: 0 alpha: 0.001f] : [NSColor clearColor];
+    }
     NSAppearance *appearance = nil;
-    bool titlebar_transparent = false;
-    const NSWindowStyleMask current_style_mask = [window->ns.object styleMask];
+#define tc window->ns.last_applied_titlebar_settings.color
+    tc.was_set = false;
+    window->ns.last_applied_titlebar_settings.transparent = false;
+    const NSWindowStyleMask current_style_mask = [nsw styleMask];
     const bool in_fullscreen = ((current_style_mask & NSWindowStyleMaskFullScreen) != 0) || window->ns.in_traditional_fullscreen;
     NSAppearance *light_appearance = is_transparent ? [NSAppearance appearanceNamed:NSAppearanceNameVibrantLight] : [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     NSAppearance *dark_appearance = is_transparent ? [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark] : [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    if (use_system_color || background_opacity < 1.0) {
-        if (is_transparent) {
-            // prevent blurring of shadows at window corners with desktop background by setting a low alpha background
-            background = background_blur > 0 ? [NSColor colorWithWhite: 0 alpha: 0.001f] : [NSColor clearColor];
-        } else background = [NSColor windowBackgroundColor];
+    if (use_system_color) {
         switch (system_color) {
             case 1:
                 appearance = light_appearance; break;
@@ -3090,17 +3943,17 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
                 appearance = dark_appearance; break;
         }
     } else {
-        // set a background color and make the title bar transparent so the background color is visible
-        double red = ((color >> 16) & 0xFF) / 255.0;
-        double green = ((color >> 8) & 0xFF) / 255.0;
-        double blue = (color & 0xFF) / 255.0;
-        double luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-        background = [NSColor colorWithSRGBRed:red green:green blue:blue alpha:1.f];
+        tc.red = ((color >> 16) & 0xFF) / 255.0;
+        tc.green = ((color >> 8) & 0xFF) / 255.0;
+        tc.blue = (color & 0xFF) / 255.0;
+        tc.alpha = background_opacity;
+        tc.was_set = true;
+        double luma = 0.2126 * tc.red + 0.7152 * tc.green + 0.0722 * tc.blue;
         appearance = luma < 0.5 ? dark_appearance : light_appearance;
-        titlebar_transparent = true;
+        window->ns.last_applied_titlebar_settings.transparent = true;
     }
-    [window->ns.object setBackgroundColor:background];
-    [window->ns.object setAppearance:appearance];
+    [nsw setBackgroundColor:window_background];
+    [nsw setAppearance:appearance];
     _glfwPlatformSetWindowBlur(window, background_blur);
     bool has_shadow = false;
     const char *decorations_desc = "full";
@@ -3114,7 +3967,7 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
             decorations_desc = "no-titlebar";
             window->decorated = true;
             has_shadow = true;
-            titlebar_transparent = true;
+            window->ns.last_applied_titlebar_settings.transparent = true;
             window->ns.titlebar_hidden = true;
             show_text_in_titlebar = false;
             break;
@@ -3132,9 +3985,9 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
     // https://github.com/kovidgoyal/kitty/issues/6439
     if (is_transparent) has_shadow = false;
     bool hide_titlebar_buttons = !in_fullscreen && window->ns.titlebar_hidden;
-    [window->ns.object setTitlebarAppearsTransparent:titlebar_transparent];
-    [window->ns.object setHasShadow:has_shadow];
-    [window->ns.object setTitleVisibility:(show_text_in_titlebar) ? NSWindowTitleVisible : NSWindowTitleHidden];
+    [nsw setTitlebarAppearsTransparent:window->ns.last_applied_titlebar_settings.transparent];
+    [nsw setHasShadow:has_shadow];
+    [nsw setTitleVisibility:(show_text_in_titlebar) ? NSWindowTitleVisible : NSWindowTitleHidden];
     NSColorSpace *cs = nil;
     switch (color_space) {
         case SRGB_COLORSPACE: cs = [NSColorSpace sRGBColorSpace]; break;
@@ -3145,43 +3998,34 @@ GLFWAPI void glfwCocoaSetWindowChrome(GLFWwindow *w, unsigned int color, bool us
     debug(
         "Window Chrome state:\n\tbackground: %s\n\tappearance: %s color_space: %s\n\t"
         "blur: %d has_shadow: %d resizable: %d decorations: %s (%d)\n\t"
-        "titlebar: transparent: %d title_visibility: %d hidden: %d buttons_hidden: %d"
+        "titlebar_transparent: %d titlebar_color_set: %d title_visibility: %d hidden: %d buttons_hidden: %d"
         "\n",
-        background ? [background.description UTF8String] : "<nil>",
+        window_background ? [window_background.description UTF8String] : "<nil>",
         appearance ? [appearance.name UTF8String] : "<nil>",
         cs ? (cs.localizedName ? [cs.localizedName UTF8String] : [cs.description UTF8String]) : "<nil>",
-        background_blur, has_shadow, resizable, decorations_desc, window->decorated, titlebar_transparent,
+        background_blur, has_shadow, resizable, decorations_desc, window->decorated,
+        window->ns.last_applied_titlebar_settings.transparent, tc.was_set,
         show_text_in_titlebar, window->ns.titlebar_hidden, hide_titlebar_buttons
     );
-    [window->ns.object setColorSpace:cs];
-    [[window->ns.object standardWindowButton: NSWindowCloseButton] setHidden:hide_titlebar_buttons];
-    [[window->ns.object standardWindowButton: NSWindowMiniaturizeButton] setHidden:hide_titlebar_buttons];
-    [[window->ns.object standardWindowButton: NSWindowZoomButton] setHidden:hide_titlebar_buttons];
+    [nsw setColorSpace:cs];
+    [[nsw standardWindowButton: NSWindowCloseButton] setHidden:hide_titlebar_buttons];
+    [[nsw standardWindowButton: NSWindowMiniaturizeButton] setHidden:hide_titlebar_buttons];
+    [[nsw standardWindowButton: NSWindowZoomButton] setHidden:hide_titlebar_buttons];
     // Apple throws a hissy fit if one attempts to clear the value of NSWindowStyleMaskFullScreen outside of a full screen transition
     // event. See https://github.com/kovidgoyal/kitty/issues/7106
     NSWindowStyleMask fsmask = current_style_mask & NSWindowStyleMaskFullScreen;
     window->ns.pre_full_screen_style_mask = getStyleMask(window);
     if (in_fullscreen && window->ns.in_traditional_fullscreen) {
-        [window->ns.object setStyleMask:NSWindowStyleMaskBorderless];
+        [nsw setStyleMask:NSWindowStyleMaskBorderless];
     } else {
-        [window->ns.object setStyleMask:window->ns.pre_full_screen_style_mask | fsmask];
+        [nsw setStyleMask:window->ns.pre_full_screen_style_mask | fsmask];
     }
+#undef tc
+    apply_titlebar_color_settings(window);
+
     // HACK: Changing the style mask can cause the first responder to be cleared
-    [window->ns.object makeFirstResponder:window->ns.view];
+    [nsw makeFirstResponder:window->ns.view];
 }}
-
-GLFWAPI GLFWColorScheme glfwGetCurrentSystemColorTheme(void) {
-    int theme_type = 0;
-    NSAppearance *changedAppearance = NSApp.effectiveAppearance;
-    NSAppearanceName newAppearance = [changedAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
-    if([newAppearance isEqualToString:NSAppearanceNameDarkAqua]){
-        theme_type = 1;
-    } else {
-        theme_type = 2;
-    }
-    return theme_type;
-}
-
 
 GLFWAPI uint32_t
 glfwGetCocoaKeyEquivalent(uint32_t glfw_key, int glfw_mods, int *cocoa_mods) {
@@ -3198,6 +4042,37 @@ glfwGetCocoaKeyEquivalent(uint32_t glfw_key, int glfw_mods, int *cocoa_mods) {
         *cocoa_mods |= NSEventModifierFlagCapsLock;
     return _glfwPlatformGetNativeKeyForKey(glfw_key);
 }
+
+GLFWAPI bool glfwIsLayerShellSupported(void) { return true; }
+
+GLFWAPI void
+glfwCocoaCycleThroughOSWindows(bool backwards) {
+    NSArray *allWindows = [NSApp windows];
+    if (allWindows.count < 2) return;
+    NSMutableArray<NSWindow *> *filteredWindows = [NSMutableArray array];
+    for (NSWindow *window in allWindows) {
+        NSRect windowFrame = [window frame];
+        // Exclude zero size windows which are likely zombie windows from the Tahoe bug
+        // if ([obj isMemberOfClass:[MyClass class]]) {
+        if (
+            windowFrame.size.width > 0 && windowFrame.size.height > 0 && \
+            !window.isMiniaturized && window.isVisible && \
+            [window isMemberOfClass:[GLFWWindow class]]
+        ) [filteredWindows addObject:window];
+    }
+    if (filteredWindows.count < 2) return;
+    NSWindow *keyWindow = [NSApp keyWindow];
+    NSUInteger index = [filteredWindows indexOfObject:keyWindow];
+    NSUInteger nextIndex = 0;
+    if (index != NSNotFound) {
+        if (backwards) {
+            nextIndex = (index == 0) ? [filteredWindows count] - 1 : index - 1;
+        } else nextIndex = (index + 1) % filteredWindows.count;
+    }
+    NSWindow *nextWindow = filteredWindows[nextIndex];
+    [nextWindow makeKeyAndOrderFront:nil];
+}
+
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -3223,3 +4098,216 @@ void _glfwCocoaPostEmptyEvent(void) {
                                            data2:0];
     [NSApp postEvent:event atStart:YES];
 }
+
+void _glfwPlatformCancelDrag(_GLFWwindow* window) {
+    // Clean up all pending drag source data
+    cleanup_all_ns_pending_drag_source_data(window);
+    // Notify the application that the drag source is closed
+    _glfwInputDragSourceRequest(window, NULL, NULL);
+}
+
+int _glfwPlatformStartDrag(_GLFWwindow* window,
+                           const char* const* mime_types,
+                           int mime_count,
+                           const GLFWimage* thumbnail,
+                           int operations) {
+    // cleanup stored data from previous drag
+    cleanup_all_ns_pending_drag_source_data(window);
+
+    // Store the operations for the dragging source callback
+    window->ns.dragOperations = operations;
+
+    @autoreleasepool {
+        // Create dragging items array - one NSFilePromiseProvider per MIME type
+        NSMutableArray<NSDraggingItem*>* dragItems = [[NSMutableArray alloc] init];
+
+        for (int i = 0; i < mime_count; i++) {
+            NSString* utiString = mime_to_uti(mime_types[i]);
+
+            // Create file promise provider with our delegate
+            GLFWFilePromiseProviderDelegate* delegate = [[GLFWFilePromiseProviderDelegate alloc]
+                initWithWindow:window mimeType:mime_types[i]];
+            NSFilePromiseProvider* provider = [[NSFilePromiseProvider alloc]
+                initWithFileType:utiString delegate:delegate];
+
+            // Store the delegate in the provider's user info so it's retained
+            provider.userInfo = delegate;
+
+            // Create the dragging item
+            NSDraggingItem* dragItem = [[NSDraggingItem alloc] initWithPasteboardWriter:provider];
+
+            if (i == 0 && thumbnail && thumbnail->pixels) {
+                // Create NSImage from thumbnail for the first item
+                NSBitmapImageRep* imageRep = [[NSBitmapImageRep alloc]
+                    initWithBitmapDataPlanes:NULL
+                                  pixelsWide:thumbnail->width
+                                  pixelsHigh:thumbnail->height
+                               bitsPerSample:8
+                             samplesPerPixel:4
+                                    hasAlpha:YES
+                                    isPlanar:NO
+                              colorSpaceName:NSDeviceRGBColorSpace
+                                 bytesPerRow:thumbnail->width * 4
+                                bitsPerPixel:32];
+
+                if (imageRep) {
+                    memcpy([imageRep bitmapData], thumbnail->pixels,
+                           thumbnail->width * thumbnail->height * 4);
+
+                    NSImage* image = [[NSImage alloc] initWithSize:
+                        NSMakeSize(thumbnail->width, thumbnail->height)];
+                    [image addRepresentation:imageRep];
+
+                    [dragItem setDraggingFrame:NSMakeRect(0, 0, thumbnail->width, thumbnail->height)
+                                      contents:image];
+                }
+            } else {
+                [dragItem setDraggingFrame:NSMakeRect(0, 0, 32, 32) contents:nil];
+            }
+
+            [dragItems addObject:dragItem];
+        }
+
+        if (dragItems.count == 0) {
+            _glfwPlatformCancelDrag(window);
+            return EINVAL;
+        }
+
+        // Start the drag session - try current event first, then create a synthetic one
+        NSEvent* event = [NSApp currentEvent];
+        if (!event || ([event type] != NSEventTypeLeftMouseDown &&
+                       [event type] != NSEventTypeLeftMouseDragged)) {
+            // Create a synthetic left mouse down event using stored cursor position
+            // Convert window coordinates to screen coordinates
+            NSRect contentRect = [window->ns.view frame];
+            NSPoint windowPos = NSMakePoint(window->virtualCursorPosX,
+                                            contentRect.size.height - window->virtualCursorPosY);
+
+            event = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                       location:windowPos
+                                  modifierFlags:0
+                                      timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                   windowNumber:[window->ns.object windowNumber]
+                                        context:nil
+                                    eventNumber:0
+                                     clickCount:1
+                                       pressure:1.0];
+        }
+
+        if (event) {
+            [window->ns.view beginDraggingSessionWithItems:dragItems
+                                                    event:event
+                                                   source:window->ns.view];
+            return 0;
+        }
+
+        return EIO;
+    }
+}
+
+ssize_t
+_glfwPlatformSendDragData(GLFWDragSourceData* source_data, const void* data, size_t size) {
+    if (!source_data || source_data->finished) return -EINVAL;
+    if (!source_data->platform_data) return -EINVAL;
+
+    GLFWFilePromiseState* state = (GLFWFilePromiseState*)source_data->platform_data;
+
+    // End of data: NULL data pointer and size zero
+    if (!data && size == 0) {
+        source_data->finished = true;
+
+        // Close the file handle
+        @try {
+            [state->fileHandle closeFile];
+        } @catch (NSException* e) {
+            (void)e;
+        }
+
+        // Call the completion handler with success
+        if (state->completionHandler) {
+            state->completionHandler(nil);
+            Block_release(state->completionHandler);
+            state->completionHandler = nil;
+        }
+
+        // Remove from pending list and clean up
+        _GLFWwindow* window = _glfwWindowForId(source_data->window_id);
+        if (window) {
+            remove_ns_pending_drag_source_data(window, source_data);
+        }
+        // source_data->finished is true, so cleanup_ns_drag_source_data won't call completionHandler again
+        cleanup_ns_drag_source_data(source_data);
+
+        return 0;
+    }
+
+    // Error from application: NULL data pointer and size is error code
+    if (!data && size > 0) {
+        source_data->finished = true;
+        source_data->error_code = (int)size;
+        state->errorCode = (int)size;
+
+        // Close the file handle
+        @try {
+            [state->fileHandle closeFile];
+        } @catch (NSException* e) {
+            (void)e;
+        }
+
+        // Call the completion handler with error
+        if (state->completionHandler) {
+            NSError* error = [NSError errorWithDomain:NSPOSIXErrorDomain code:size userInfo:nil];
+            state->completionHandler(error);
+            Block_release(state->completionHandler);
+            state->completionHandler = nil;
+        }
+
+        // Remove from pending list and clean up
+        _GLFWwindow* window = _glfwWindowForId(source_data->window_id);
+        if (window) {
+            remove_ns_pending_drag_source_data(window, source_data);
+        }
+        // source_data->finished is true, so cleanup_ns_drag_source_data won't call completionHandler again
+        cleanup_ns_drag_source_data(source_data);
+
+        return 0;
+    }
+
+    // Write data to the file - Cocoa file operations are typically synchronous
+    // but we return the number of bytes written to match the non-blocking interface
+    if (state->fileHandle) {
+        @try {
+            NSData* nsData = [NSData dataWithBytes:data length:size];
+            if (@available(macOS 10.15, *)) {
+                NSError* error = nil;
+                if (![state->fileHandle writeData:nsData error:&error]) {
+                    int errCode = error ? (int)error.code : EIO;
+                    if (errCode == 0) errCode = EIO;  // Ensure we have a valid error code
+                    source_data->error_code = errCode;
+                    _glfwInputError(GLFW_PLATFORM_ERROR,
+                        "Cocoa: Failed to write drag data: %s",
+                        error ? [[error localizedDescription] UTF8String] : "unknown error");
+                    return -errCode;
+                }
+            } else {
+                // Pre-10.15 writeData: writes all bytes synchronously or throws an exception.
+                // NSFileHandle.writeData: is documented to write all data atomically,
+                // so returning size is correct. Any failure throws NSFileHandleOperationException.
+                [state->fileHandle writeData:nsData];
+            }
+            // NSFileHandle.writeData writes all data atomically, so size == bytes written
+            return (ssize_t)size;
+        } @catch (NSException* e) {
+            source_data->error_code = EIO;
+            _glfwInputError(GLFW_PLATFORM_ERROR,
+                "Cocoa: Exception writing drag data: %s",
+                e ? [[e reason] UTF8String] : "unknown exception");
+            return -EIO;
+        }
+    }
+
+    // No file handle, consider all data accepted
+    return (ssize_t)size;
+}
+
+

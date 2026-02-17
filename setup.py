@@ -26,6 +26,7 @@ from glfw import glfw
 from glfw.glfw import ISA, BinaryArch, Command, CompileKey, CompilerType
 
 src_base = os.path.dirname(os.path.abspath(__file__))
+setattr(sys, 'running_from_setup', True)
 
 def check_version_info() -> None:
     with open(os.path.join(src_base, 'pyproject.toml')) as f:
@@ -66,7 +67,9 @@ is_freebsd = 'freebsd' in _plat
 is_netbsd = 'netbsd' in _plat
 is_dragonflybsd = 'dragonfly' in _plat
 is_bsd = is_freebsd or is_netbsd or is_dragonflybsd or is_openbsd
+is_windows = sys.platform == 'win32'
 is_arm = platform.processor() == 'arm' or platform.machine() in ('arm64', 'aarch64')
+c_std = '' if is_openbsd else '-std=c11'
 Env = glfw.Env
 env = Env()
 PKGCONFIG = os.environ.get('PKGCONFIG_EXE', 'pkg-config')
@@ -133,7 +136,10 @@ class CompilationDatabase:
 
     def cmd_changed(self, compile_cmd: Command) -> bool:
         key, cmd = compile_cmd.key, compile_cmd.cmd
-        return bool(self.db.get(key) != cmd)
+        dkey = self.db.get(key)
+        if dkey != cmd:
+            return True
+        return False
 
     def __enter__(self) -> 'CompilationDatabase':
         self.all_keys: Set[CompileKey] = set()
@@ -234,6 +240,12 @@ def pkg_config(pkg: str, *args: str, extra_pc_dir: str = '', fatal: bool = True)
                 )
             )
         )
+    except FileNotFoundError:
+        if is_windows:
+            raise SystemExit(
+                f'The command {error(PKGCONFIG)} was not found. You might need to install MSYS2 and its'
+                ' mingw-w64-x86_64-pkg-config package, or use WSL.')
+        raise
     except subprocess.CalledProcessError:
         if fatal:
             raise SystemExit(f'The package {error(pkg)} was not found on your system')
@@ -279,6 +291,12 @@ def libcrypto_flags() -> Tuple[List[str], List[str]]:
     return cflags, ldflags
 
 
+@lru_cache(maxsize=2)
+def xxhash_flags() -> tuple[list[str], list[str]]:
+    return pkg_config('libxxhash', '--cflags-only-I'), pkg_config('libxxhash', '--libs')
+
+
+
 def at_least_version(package: str, major: int, minor: int = 0) -> None:
     q = f'{major}.{minor}'
     if subprocess.run([PKGCONFIG, package, f'--atleast-version={q}']
@@ -300,7 +318,16 @@ def cc_version() -> Tuple[List[str], Tuple[int, int]]:
     if 'CC' in os.environ:
         q = os.environ['CC']
     else:
-        if is_macos:
+        if is_windows:
+            if shutil.which('cl.exe'):
+                q = 'cl.exe'
+            elif shutil.which('gcc'):
+                q = 'gcc'
+            elif shutil.which('clang'):
+                q = 'clang'
+            else:
+                raise SystemExit('No C compiler found. On Windows, install Visual Studio (MSVC) or MinGW-w64 (gcc/clang).')
+        elif is_macos:
             q = 'clang'
         else:
             if shutil.which('gcc'):
@@ -310,6 +337,11 @@ def cc_version() -> Tuple[List[str], Tuple[int, int]]:
             else:
                 q = 'cc'
     cc = shlex.split(q)
+    if is_windows and cc[0].lower() == 'cl.exe':
+        raw = subprocess.check_output(cc + ['/?']).decode()
+        if m := re.search(r'Compiler Version ([\d\.]+)', raw):
+            parts = tuple(map(int, m.group(1).split('.')))
+            return cc, (parts[0], parts[1])
     raw = subprocess.check_output(cc + ['-dumpversion']).decode('utf-8')
     ver_ = raw.strip().split('.')[:2]
     try:
@@ -489,17 +521,18 @@ def init_env(
         cppflags.append('-DDEBUG_{}'.format(el.upper().replace('-', '_')))
     has_copy_file_range = test_compile(cc, src='#define _GNU_SOURCE 1\n#include <unistd.h>\nint main() { copy_file_range(1, NULL, 2, NULL, 0, 0); return 0; }')
     werror = '' if ignore_compiler_warnings else '-pedantic-errors -Werror'
-    std = '' if is_openbsd else '-std=c11'
     sanitize_flag = ' '.join(sanitize_args)
     env_cflags = shlex.split(os.environ.get('CFLAGS', ''))
     env_cppflags = shlex.split(os.environ.get('CPPFLAGS', ''))
     env_ldflags = shlex.split(os.environ.get('LDFLAGS', ''))
+    # Newer clang does not use -fno-plt leading to an error
+    no_plt = '-fno-plt' if test_compile(cc, '-fno-plt', '-Werror') else ''
 
     cflags_ = os.environ.get(
         'OVERRIDE_CFLAGS', (
-            f'-Wextra {float_conversion} -Wno-missing-field-initializers -Wall -Wstrict-prototypes {std}'
+            f'-Wextra {float_conversion} -Wno-missing-field-initializers -Wall -Wstrict-prototypes {c_std}'
             f' {werror} {optimize} {sanitize_flag} -fwrapv {stack_protector} {missing_braces}'
-            f' -pipe -fvisibility=hidden -fno-plt'
+            f' -pipe -fvisibility=hidden {no_plt}'
         )
     )
     cflags = shlex.split(cflags_) + shlex.split(
@@ -589,6 +622,8 @@ def init_env(
         ccver=ccver, ldpaths=ldpaths, vcs_rev=vcs_rev,
     )
     ans.has_copy_file_range = bool(has_copy_file_range)
+    if ans.compiler_type is CompilerType.gcc:
+        cflags.append('-Wno-packed-bitfield-compat')
     if verbose:
         print(ans.cc_version_string.strip())
         print('Detected:', ans.compiler_type)
@@ -606,9 +641,11 @@ def kitty_env(args: Options) -> Env:
     ans.secondary_version = version[1]
     ans.xt_version = '.'.join(map(str, version))
 
+    xxhash = xxhash_flags()
     at_least_version('harfbuzz', 1, 5)
     cflags.extend(pkg_config('libpng', '--cflags-only-I'))
     cflags.extend(pkg_config('lcms2', '--cflags-only-I'))
+    cflags.extend(xxhash[0])
     # simde doesnt come with pkg-config files but some Linux distros add
     # them and on macOS when building with homebrew it is required
     with suppress(SystemExit, subprocess.CalledProcessError):
@@ -632,15 +669,16 @@ def kitty_env(args: Options) -> Env:
         # warnings about it
         cppflags.append('-DGL_SILENCE_DEPRECATION')
     else:
-        cflags.extend(pkg_config('fontconfig', '--cflags-only-I'))
+        cflags.extend(pkg_config('cairo-fc', '--cflags-only-I'))
         platform_libs = []
+        platform_libs.extend(pkg_config('cairo-fc', '--libs'))
     cflags.extend(pkg_config('harfbuzz', '--cflags-only-I'))
     platform_libs.extend(pkg_config('harfbuzz', '--libs'))
     pylib = get_python_flags(args, cflags)
     gl_libs = ['-framework', 'OpenGL'] if is_macos else pkg_config('gl', '--libs')
     libpng = pkg_config('libpng', '--libs')
     lcms2 = pkg_config('lcms2', '--libs')
-    ans.ldpaths += pylib + platform_libs + gl_libs + libpng + lcms2 + libcrypto_ldflags
+    ans.ldpaths += pylib + platform_libs + gl_libs + libpng + lcms2 + libcrypto_ldflags + xxhash[1]
     if is_macos:
         ans.ldpaths.extend('-framework Cocoa'.split())
     elif not is_openbsd:
@@ -658,36 +696,55 @@ def define(x: str) -> str:
 
 
 def run_tool(cmd: Union[str, List[str]], desc: Optional[str] = None) -> None:
-    if isinstance(cmd, str):
-        cmd = shlex.split(cmd[0])
     if verbose:
         desc = None
-    print(desc or ' '.join(cmd))
-    p = subprocess.Popen(cmd)
+
+    if is_windows:
+        # On Windows, it's generally safer to pass a single string to Popen with shell=True
+        # for commands that might involve shell built-ins or complex paths.
+        if isinstance(cmd, list):
+            wcmd_to_execute = shlex.join(cmd)
+        else:
+            wcmd_to_execute = cmd
+        print(desc or wcmd_to_execute)
+        p = subprocess.Popen(wcmd_to_execute, shell=True)
+    else:
+        # On Unix-like systems, passing a list is generally preferred for security and clarity.
+        if isinstance(cmd, str):
+            cmd_to_execute = shlex.split(cmd) # Split the string into a list of arguments
+        else:
+            cmd_to_execute = cmd
+        print(desc or ' '.join(cmd_to_execute))
+        p = subprocess.Popen(cmd_to_execute)
+
     ret = p.wait()
     if ret != 0:
         if desc:
-            print(' '.join(cmd))
+            print(wcmd_to_execute if is_windows else cmd_to_execute) # Print the actual command that was executed
         raise SystemExit(ret)
 
 
 @lru_cache
 def get_vcs_rev() -> str:
     ans = ''
+    git_exe = shutil.which('git') or 'git'
     if os.path.exists('.git'):
         try:
-            rev = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('utf-8')
-        except FileNotFoundError:
+            rev = subprocess.check_output([git_exe, 'rev-parse', 'HEAD']).decode('utf-8')
+            ans = rev.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback for older git versions or other issues
             try:
-                with open('.git/refs/heads/master') as f:
-                    rev = f.read()
-            except NotADirectoryError:
-                with open('.git') as f:
-                    gitloc = f.read()
-                with open(os.path.join(gitloc, 'refs/heads/master')) as f:
-                    rev = f.read()
-
-        ans = rev.strip()
+                with open(os.path.join('.git', 'HEAD')) as f:
+                    head_content = f.read().strip()
+                if head_content.startswith('ref:'):
+                    ref_path = head_content[5:].strip()
+                    with open(os.path.join('.git', ref_path)) as f:
+                        ans = f.read().strip()
+                else:
+                    ans = head_content
+            except Exception as e:
+                print(error(f'Warning: Failed to get git revision from .git directory: {e}'), file=sys.stderr)
     return ans
 
 
@@ -866,7 +923,26 @@ def add_builtin_fonts(args: Options) -> None:
             continue
         font_file = ''
         if is_macos:
-            for candidate in (os.path.expanduser('~/Library/Fonts'), '/Library/Fonts', '/System/Library/Fonts', '/Network/Library/Fonts'):
+            candidates = (
+                os.path.expanduser('~/Library/Fonts'), '/Library/Fonts', '/System/Library/Fonts', '/Network/Library/Fonts')
+            for candidate in candidates:
+                q = os.path.join(candidate, filename)
+                if os.path.exists(q):
+                    font_file = q
+                    break
+            else:
+                for candidate in candidates:
+                    for root, _, files in os.walk(candidate):
+                        if filename in files:
+                            font_file = os.path.join(root, filename)
+                            break
+                    if font_file:
+                        break
+        elif is_windows:
+            for candidate in (
+                    os.path.expandvars(r'%userprofile%\AppData\Local\Microsoft\Windows\Fonts'),
+                    os.path.expandvars(r'%windir%\Fonts'),
+            ):
                 q = os.path.join(candidate, filename)
                 if os.path.exists(q):
                     font_file = q
@@ -1015,8 +1091,9 @@ def compile_kittens(args: Options) -> None:
         headers = list_files(os.path.join('kittens', kitten, '*.h')) + list(extra_headers)
         return kitten, sources, headers, f'kittens/{kitten}/{output}', includes, libraries
 
+    xxhash = xxhash_flags()
     for kitten, sources, all_headers, dest, includes, libraries in (
-        files('transfer', 'rsync', libraries=pkg_config('libxxhash', '--libs'), includes=pkg_config('libxxhash', '--cflags-only-I')),
+        files('transfer', 'rsync', libraries=xxhash[1], includes=xxhash[0]),
     ):
         final_env = kenv.copy()
         final_env.cflags.extend(includes)
@@ -1041,17 +1118,30 @@ def extract_rst_targets() -> Dict[str, Dict[str, str]]:
     return cast(Dict[str, Dict[str, str]], m['main']())
 
 
+def update_if_changed(path: str, text: str) -> None:
+    q = ''
+    with suppress(FileNotFoundError), open(path) as f:
+        q = f.read()
+    if q != text:
+        with open(path, 'w') as f:
+            f.write(text)
+
+
 def build_ref_map(skip_generation: bool = False) -> str:
     dest = 'kitty/docs_ref_map_generated.h'
     if not skip_generation:
         d = extract_rst_targets()
         h = 'static const char docs_ref_map[] = {\n' + textwrap.fill(', '.join(map(str, bytearray(json.dumps(d, sort_keys=True).encode('utf-8'))))) + '\n};\n'
-        q = ''
-        with suppress(FileNotFoundError), open(dest) as f:
-            q = f.read()
-        if q != h:
-            with open(dest, 'w') as f:
-                f.write(h)
+        update_if_changed(dest, h)
+    return dest
+
+
+def build_cli_parser_specs(skip_generation: bool = False) -> str:
+    dest = 'kitty/launcher/cli-parser-data_generated.h'
+    if not skip_generation:
+        m = runpy.run_path('kitty/simple_cli_definitions.py', {'appname': appname})
+        h = '\n'.join(m['generate_c_parsers']())
+        update_if_changed(dest, h)
     return dest
 
 
@@ -1059,7 +1149,7 @@ def build_uniforms_header(skip_generation: bool = False) -> str:
     dest = 'kitty/uniforms_generated.h'
     if skip_generation:
         return dest
-    lines = ['#include "gl.h"', '']
+    lines: list[str] = []
     a = lines.append
     uniform_names: Dict[str, Tuple[str, ...]] = {}
     class_names = {}
@@ -1072,7 +1162,7 @@ def build_uniforms_header(skip_generation: bool = False) -> str:
 
     for x in sorted(glob.glob('kitty/*.glsl')):
         name = os.path.basename(x).partition('.')[0]
-        name, sep, shader_type = name.partition('_')
+        name, sep, shader_type = name.rpartition('_')
         if not sep or shader_type not in ('fragment', 'vertex'):
             continue
         class_names[name] = f'{name.capitalize()}Uniforms'
@@ -1084,7 +1174,7 @@ def build_uniforms_header(skip_generation: bool = False) -> str:
         class_name, function_name, uniforms = class_names[name], function_names[name], uniform_names[name]
         a(f'typedef struct {class_name} ''{')
         for n in uniforms:
-            a(f'    GLint {n};')
+            a(f'    int {n};')
         a('}'f' {class_name};')
         a('')
         a(f'static inline void\n{function_name}(int program, {class_name} *ans) ''{')
@@ -1117,8 +1207,10 @@ def wrapped_kittens() -> str:
 def build(args: Options, native_optimizations: bool = True, call_init: bool = True) -> None:
     if call_init:
         init_env_from_args(args, native_optimizations)
+
     sources, headers = find_c_files()
     headers.append(build_ref_map(args.skip_code_generation))
+    headers.append(build_cli_parser_specs(args.skip_code_generation))
     headers.append(build_uniforms_header(args.skip_code_generation))
     compile_c_extension(
         kitty_env(args), 'kitty/fast_data_types', args.compilation_database, sources, headers,
@@ -1161,17 +1253,29 @@ def parse_go_version(x: str) -> Tuple[int, int, int]:
     return ans[0], ans[1], ans[2]
 
 
+@lru_cache(2)
+def go_cmd() -> list[str]:
+    go = shutil.which('go')
+    if go:
+        return [go]
+    return []
+
+
 def build_static_kittens(
     args: Options, launcher_dir: str, destination_dir: str = '', for_freeze: bool = False,
     for_platform: Optional[Tuple[str, str]] = None
 ) -> str:
     sys.stdout.flush()
     sys.stderr.flush()
-    go = shutil.which('go')
+    go = go_cmd()
     if not go:
         raise SystemExit('The go tool was not found on this system. Install Go')
-    required_go_version = subprocess.check_output([go] + 'list -f {{.GoVersion}} -m'.split(), env=dict(os.environ, GO111MODULE="on")).decode().strip()
-    current_go_version = subprocess.check_output([go, 'version']).decode().strip().split()[2][2:]
+    required_go_version = subprocess.check_output(go + 'list -f {{.GoVersion}} -m'.split(), env=dict(os.environ, GO111MODULE="on")).decode().strip()
+    go_version_raw = subprocess.check_output(go + ['version']).decode().strip().split()
+    if go_version_raw[2] != "devel":
+        current_go_version = go_version_raw[2][2:]
+    else:
+        current_go_version = go_version_raw[3][2:]
     if parse_go_version(required_go_version) > parse_go_version(current_go_version):
         raise SystemExit(f'The version of go on this system ({current_go_version}) is too old. go >= {required_go_version} is needed')
     if not for_platform:
@@ -1179,7 +1283,7 @@ def build_static_kittens(
     if args.skip_building_kitten:
         print('Skipping building of the kitten binary because of a command line option. Build is incomplete', file=sys.stderr)
         return ''
-    cmd = [go, 'build', '-v']
+    cmd = go + ['build', '-v']
     vcs_rev = args.vcs_rev or get_vcs_rev()
     ld_flags: List[str] = []
     binary_data_flags = [f"-X kitty.VCSRevision={vcs_rev}"]
@@ -1237,11 +1341,10 @@ def build_static_binaries(args: Options, launcher_dir: str) -> None:
             build_static_kittens(args, launcher_dir, args.dir_for_static_binaries, for_platform=(os_, arch))
 
 
-@lru_cache(2)
-def kitty_cli_boolean_options() -> Tuple[str, ...]:
-    with open(os.path.join(src_base, 'kitty/cli.py')) as f:
+def read_bool_options(path: str = 'kitty/cli.py') -> Tuple[str, ...]:
+    with open(os.path.join(src_base, path)) as f:
         raw = f.read()
-    m = re.search(r"^\s*OPTIONS = '''(.+?)'''", raw, flags=re.MULTILINE | re.DOTALL)
+    m = re.search(r"^\s*OPTIONS = r?'''(.+?)'''", raw, flags=re.MULTILINE | re.DOTALL)
     assert m is not None
     ans: List[str] = []
     in_option: List[str] = []
@@ -1261,12 +1364,14 @@ def kitty_cli_boolean_options() -> Tuple[str, ...]:
     return tuple(ans)
 
 
-def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 'source') -> None:
+def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 'source') -> str:
     werror = '' if args.ignore_compiler_warnings else '-pedantic-errors -Werror'
-    cflags = f'-Wall {werror} -fpie'.split()
+    cflags = f'-Wall {werror} -fpie {c_std}'.strip().split()
     cppflags = [define(f'WRAPPED_KITTENS=" {wrapped_kittens()} "')]
-    libs: List[str] = []
     ldflags = shlex.split(os.environ.get('LDFLAGS', ''))
+    xxhash = xxhash_flags()
+    cppflags.extend(xxhash[0])
+    libs: list[str] = xxhash[1]
     if args.profile or args.sanitize:
         cflags.append('-g3')
         if args.sanitize:
@@ -1318,15 +1423,16 @@ def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 's
     os.makedirs(launcher_dir, exist_ok=True)
     os.makedirs(build_dir, exist_ok=True)
     objects = []
-    cppflags.append('-DKITTY_CLI_BOOL_OPTIONS=" ' + ' '.join(kitty_cli_boolean_options()) + ' "')
+    headers = glob.glob('kitty/launcher/*.h')
     cppflags.append('-DKITTY_VERSION="' + '.'.join(map(str, version)) + '"')
-    for src in ('kitty/launcher/main.c', 'kitty/launcher/single-instance.c'):
+    for src in ('kitty/launcher/main.c', 'kitty/launcher/single-instance.c', 'kitty/launcher/cmdline.c'):
         obj = os.path.join(build_dir, src.replace('/', '-').replace('.c', '.o'))
         objects.append(obj)
         cmd = env.cc + cppflags + cflags + ['-c', src, '-o', obj]
         key = CompileKey(src, os.path.basename(obj))
-        args.compilation_database.add_command(f'Compiling {emphasis(src)} ...', cmd, partial(newer, obj, src), key=key, keyfile=src)
-    dest = os.path.join(launcher_dir, 'kitty')
+        args.compilation_database.add_command(
+            f'Compiling {emphasis(src)} ...', cmd, partial(newer, obj, src, *dependecies_for(src, obj, headers)), key=key, keyfile=src)
+    dest = kitty_exe = os.path.join(launcher_dir, 'kitty')
     link_targets.append(os.path.abspath(dest))
     desc = f'Linking {emphasis("launcher")} ...'
     cmd = env.cc + ldflags + objects + libs + pylib + ['-o', dest]
@@ -1336,6 +1442,7 @@ def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 's
         dsym = f'{dest}.dSYM/Contents/Resources/DWARF/{os.path.basename(dest)}'
         args.compilation_database.add_command(desc, ['dsymutil', dest], partial(newer, dsym, dest), key=LinkKey(dsym), is_post_link=True)
     args.compilation_database.build_all()
+    return kitty_exe
 
 
 # Packaging {{{
@@ -1431,6 +1538,11 @@ StartupNotify=true
 Exec=kitty
 Icon=kitty
 Categories=System;TerminalEmulator;
+X-TerminalArgExec=--
+X-TerminalArgTitle=--title
+X-TerminalArgAppId=--class
+X-TerminalArgDir=--working-directory
+X-TerminalArgHold=--hold
 ''')
     with open(os.path.join(deskdir, 'kitty-open.desktop'), 'w') as f:
         f.write(
@@ -1456,14 +1568,14 @@ MimeType=image/*;application/x-sh;application/x-shellscript;inode/directory;text
     os.symlink(os.path.relpath(launcher, os.path.dirname(in_src_launcher)), in_src_launcher)
 
 
-def macos_info_plist() -> bytes:
+def macos_info_plist(for_quake: str = '') -> bytes:
     import plistlib
     VERSION = '.'.join(map(str, version))
 
     def access(what: str, verb: str = 'would like to access') -> str:
         return f'A program running inside kitty {verb} {what}'
 
-    docs = [
+    docs = [] if for_quake else [
         {
             'CFBundleTypeName': 'Terminal scripts',
             'CFBundleTypeExtensions': ['command', 'sh', 'zsh', 'bash', 'fish', 'tool'],
@@ -1501,7 +1613,7 @@ def macos_info_plist() -> bytes:
         },
     ]
 
-    url_schemes = [
+    url_schemes = [] if for_quake else [
         {
             'CFBundleURLName': 'File URL',
             'CFBundleURLSchemes': ['file'],
@@ -1556,6 +1668,12 @@ def macos_info_plist() -> bytes:
 
     services = [
         {
+            'NSMenuItem': {'default': for_quake},
+            'NSMessage': 'quickAccessTerminal',
+            'NSRequiredContext': {'NSServiceCategory': 'None'},
+        },
+    ] if for_quake else [
+        {
             'NSMenuItem': {'default': f'New {appname} Tab Here'},
             'NSMessage': 'openTab',
             'NSRequiredContext': {'NSTextContent': 'FilePath'},
@@ -1577,10 +1695,10 @@ def macos_info_plist() -> bytes:
 
     pl = dict(
         # Naming
-        CFBundleName=appname,
-        CFBundleDisplayName=appname,
+        CFBundleName=f'{appname}-quick-access' if for_quake else appname,
+        CFBundleDisplayName=f'{appname}-quick-access' if for_quake else appname,
         # Identification
-        CFBundleIdentifier=f'net.kovidgoyal.{appname}',
+        CFBundleIdentifier=f'net.kovidgoyal.{appname}' + ('-quick-access' if for_quake else ''),
         # Bundle Version Info
         CFBundleVersion=VERSION,
         CFBundleShortVersionString=VERSION,
@@ -1588,13 +1706,13 @@ def macos_info_plist() -> bytes:
         NSHumanReadableCopyright=time.strftime('Copyright %Y, Kovid Goyal'),
         CFBundleGetInfoString='kitty - The fast, feature-rich, GPU based terminal emulator. https://sw.kovidgoyal.net/kitty/',
         # Operating System Version
-        LSMinimumSystemVersion='10.15.0',
+        LSMinimumSystemVersion='11.0.0',
         # Categorization
         CFBundlePackageType='APPL',
         CFBundleSignature='????',
         LSApplicationCategoryType='public.app-category.utilities',
         # App Execution
-        CFBundleExecutable=appname,
+        CFBundleExecutable=quake_name if for_quake else appname,
         LSEnvironment={'KITTY_LAUNCHED_BY_LAUNCH_SERVICES': '1'},
         LSRequiresNativeExecution=True,
         NSSupportsSuddenTermination=False,
@@ -1640,6 +1758,9 @@ def macos_info_plist() -> bytes:
         # Speech
         NSSpeechRecognitionUsageDescription=access('speech recognition.'),
     )
+    if for_quake:
+        # exclude from dock and menubar
+        pl['LSBackgroundOnly'] = True
     return plistlib.dumps(pl)
 
 
@@ -1664,6 +1785,27 @@ def create_macos_app_icon(where: str = 'Resources') -> None:
         ]])
 
 
+quake_name = f'{appname}-quick-access'
+
+
+def create_quick_access_bundle(kapp: str, quake_desc: str = 'Quick access to kitty') -> None:
+    qapp = os.path.join(kapp, 'Contents', f'{quake_name}.app')
+    base_exe_dir = os.path.join(kapp, 'Contents/MacOS')
+    if os.path.exists(qapp):
+        shutil.rmtree(qapp)
+    bin_dir = os.path.join(qapp, 'Contents/MacOS')
+    os.makedirs(bin_dir)
+    with open(os.path.join(qapp, 'Contents/Info.plist'), 'wb') as f:
+        f.write(macos_info_plist(quake_desc))
+    for exe in os.listdir(base_exe_dir):
+        os.symlink(f'../../../MacOS/{exe}', os.path.join(bin_dir, exe))
+    base_exe = os.path.join(base_exe_dir, 'kitty')
+    if os.path.exists(base_exe):  # during freeze launcher is built after bundle is created
+        shutil.copy2(base_exe, os.path.join(bin_dir, quake_name))
+    for x in ('Frameworks', 'Resources'):
+        os.symlink(f'../../{x}', os.path.join(qapp, 'Contents', x))
+
+
 def create_minimal_macos_bundle(args: Options, launcher_dir: str, relocate: bool = False) -> None:
     kapp = os.path.join(launcher_dir, 'kitty.app')
     if os.path.exists(kapp):
@@ -1685,6 +1827,7 @@ def create_minimal_macos_bundle(args: Options, launcher_dir: str, relocate: bool
             os.remove(kitty_exe)
         os.symlink(os.path.join(os.path.relpath(bin_dir, launcher_dir), appname), kitty_exe)
     create_macos_app_icon(resources_dir)
+    create_quick_access_bundle(kapp, 'Quick access to kitty built from source')
 
 
 def create_macos_bundle_gunk(dest: str, for_freeze: bool, args: Options) -> str:
@@ -1711,6 +1854,7 @@ def create_macos_bundle_gunk(dest: str, for_freeze: bool, args: Options) -> str:
             raise SystemExit('kitten not built cannot create macOS bundle')
         os.symlink(os.path.relpath(kitten_exe, os.path.dirname(in_src_launcher)),
                    os.path.join(os.path.dirname(in_src_launcher), os.path.basename(kitten_exe)))
+    create_quick_access_bundle(dest)
     return str(kitty_exe)
 
 
@@ -1763,7 +1907,7 @@ def package(args: Options, bundle_type: str, do_build_all: bool = True) -> None:
             return raw
         tname = type(defval).__name__
         if tname == 'frozenset':
-            tname = 'typing.FrozenSet[str]'
+            tname = 'frozenset[str]'
         prefix = f'{name}: {tname} ='
         nraw = raw.replace(f'{prefix} {defval!r}', f'{prefix} {val!r}', 1)
         if nraw == raw:
@@ -1793,7 +1937,7 @@ def package(args: Options, bundle_type: str, do_build_all: bool = True) -> None:
             os.chmod(path, 0o755 if should_be_executable(path) else 0o644)
     if not for_freeze and not bundle_type.startswith('macos-'):
         build_static_kittens(args, launcher_dir=launcher_dir)
-    if not is_macos:
+    if not is_macos and not is_windows:
         create_linux_bundle_gunk(ddir, args)
 
     if bundle_type.startswith('macos-'):
@@ -1846,14 +1990,15 @@ def clean(for_cross_compile: bool = False) -> None:
             dirs.remove(d)
         for f in files:
             ext = f.rpartition('.')[-1]
-            if ext in ('so', 'dylib', 'pyc', 'pyo') or (not for_cross_compile and is_generated(f)):
+            if ext in ('so', 'pyc', 'pyo', 'pyd', 'dylib') or (not for_cross_compile and is_generated(f)):
                 os.unlink(os.path.join(root, f))
     for x in glob.glob('glfw/wayland-*-protocol.[ch]'):
         os.unlink(x)
     for x in glob.glob('kittens/*'):
         if os.path.isdir(x) and not os.path.exists(os.path.join(x, '__init__.py')):
             shutil.rmtree(x)
-    subprocess.check_call(['go', 'clean', '-cache', '-testcache', '-modcache', '-fuzzcache'])
+    if go := go_cmd():
+        subprocess.check_call(go + ['clean', '-cache', '-testcache', '-modcache', '-fuzzcache'])
 
 
 def option_parser() -> argparse.ArgumentParser:  # {{{
@@ -2115,7 +2260,7 @@ def macos_freeze(args: Options, launcher_dir: str, only_frozen_launcher: bool = 
             args.compilation_database = cdb
             init_env_from_args(args, native_optimizations=False)
             if only_frozen_launcher:
-                build_launcher(args, launcher_dir=launcher_dir, bundle_type=bundle_type)
+                kitty_exe_path = build_launcher(args, launcher_dir=launcher_dir, bundle_type=bundle_type)
             else:
                 build_launcher(args, launcher_dir=launcher_dir)
                 build(args, native_optimizations=False, call_init=False)
@@ -2126,7 +2271,10 @@ def macos_freeze(args: Options, launcher_dir: str, only_frozen_launcher: bool = 
             os.rename(x, arch_specific)
     build_dir = orig_build_dir
     lipo(link_target_map)
-    if not only_frozen_launcher:
+    if only_frozen_launcher:
+        if is_macos:
+            shutil.copy2(kitty_exe_path, os.path.dirname(kitty_exe_path) + f'/../Contents/{quake_name}.app/Contents/MacOS/{quake_name}')
+    else:
         package(args, bundle_type=bundle_type, do_build_all=False)
 
 

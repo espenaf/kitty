@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
-from typing import Any, Callable, NamedTuple, Optional, Union
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 from .constants import is_macos, is_wayland
 from .fast_data_types import get_options
 from .options.types import Options
 from .types import FloatEdges
-from .typing import EdgeLiteral
+from .typing_compat import EdgeLiteral
 from .utils import log_error
 
 
@@ -37,7 +38,7 @@ def sanitize_window_size(x: Any) -> int:
     return max(20, min(ans, 50000))
 
 
-def edge_spacing(which: EdgeLiteral, opts:Optional[Union[WindowSizeData, Options]] = None) -> float:
+def edge_spacing(which: EdgeLiteral, opts: WindowSizeData | Options | None = None) -> float:
     if opts is None:
         opts = get_options()
     margin: float = getattr(opts.single_window_margin_width, which)

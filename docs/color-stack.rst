@@ -52,8 +52,8 @@ than numbers. The syntax of the escape code is::
     <OSC> 21 ; key=value ; key=value ; ... <ST>
 
 The spaces in the above definition are for reading clarity and should be ignored.
-Here, ``<OSC>`` is the two bytes ``0x1b (ESC)`` and ``0x5b ([)``. ``ST`` is
-either `0x7 (BEL)` or the two bytes ``0x1b (ESC)`` and ``0x5c (\\)``.
+Here, ``<OSC>`` is the two bytes ``0x1b (ESC)`` and ``0x5d (])``. ``<ST>`` is
+either ``0x07 (BEL)`` or the two bytes ``0x1b (ESC)`` and ``0x5c (\\)``.
 
 ``key`` is a number from 0-255 to query or set the color values from the
 terminals ANSI color table, or one of the strings in the table below for
@@ -69,8 +69,11 @@ selection_foreground              The foreground color of selections            
 cursor                            The color of the text cursor                    Foreground color
 cursor_text                       The color of text under the cursor              Background color
 visual_bell                       The color of a visual bell                      Automatic color selection based on current screen colors
-second_transparent_background     A color that might be rendered semi-transparent No second color is made transparent
-                                  in addition to the default background color
+transparent_background_color1..7  A background color that is rendered             Unset
+                                  with the specified opacity in cells that have
+                                  the specified background color. An opacity
+                                  value less than zero means, use the
+                                  :opt:`background_opacity` value.
 ================================= =============================================== ===============================
 
 In this table the third column shows what effect setting the color to *dynamic*
@@ -100,7 +103,7 @@ This indicates that the foreground color is red and the cursor color is
 undefined (typically the cursor takes the color of the text under it and the
 text takes the color of the background).
 
-If the terminal does not know a field that a client send to it for a query it
+If the terminal does not know a field that a client sends to it for a query it
 must respond back with the ``field=?``, that is, it must send back a question
 mark as the value.
 
@@ -141,25 +144,38 @@ compatibility, but a sane, rigorously specified subset is chosen.
 
 RGB colors are encoded in one of three forms:
 
-rgb:<red>/<green>/<blue>
-    <red>, <green>, <blue> := h | hh | hhh | hhhh
-    h := single hexadecimal digits (case insignificant)
-    Note that h indicates the value scaled in 4 bits, hh the value scaled in 8 bits, hhh the value scaled in 12 bits, and hhhh the value scaled
-    in 16 bits, respectively.
+``rgb:<red>/<green>/<blue>``
+    | <red>, <green>, <blue> := h | hh | hhh | hhhh
+    | h := single hexadecimal digits (case insignificant)
+    | Note that h indicates the value scaled in 4 bits, hh the value scaled in 8 bits,
+      hhh the value scaled in 12 bits, and hhhh the value scaled in 16 bits, respectively.
 
-#<h...>
-    h := single hexadecimal digits (case insignificant)
-    #RGB            (4 bits each)
-    #RRGGBB         (8 bits each)
-    #RRRGGGBBB      (12 bits each)
-    #RRRRGGGGBBBB   (16 bits each)
-    The R, G, and B represent single hexadecimal digits.  When fewer than 16 bits each are specified, they represent the most significant bits
-    of the value (unlike the “rgb:” syntax, in which values are scaled). For example, the string ``#3a7`` is the same as ``#3000a0007000``.
+``#<h...>``
+    | h := single hexadecimal digits (case insignificant)
+    | #RGB            (4 bits each)
+    | #RRGGBB         (8 bits each)
+    | #RRRGGGBBB      (12 bits each)
+    | #RRRRGGGGBBBB   (16 bits each)
+    | The R, G, and B represent single hexadecimal digits.  When fewer than 16 bits
+      each are specified, they represent the most significant bits of the value
+      (unlike the “rgb:” syntax, in which values are scaled). For example,
+      the string ``#3a7`` is the same as ``#3000a0007000``.
 
-rgbi:<red>/<green>/<blue>
+``rgbi:<red>/<green>/<blue>``
     red, green, and blue are floating-point values between 0.0 and 1.0, inclusive. The input format for these values is an optional
-    sign, a string of numbers possibly containing a decimal point, and an optional exponent field containing an E or e followed by  a  possibly
-    signed integer string.
+    sign, a string of numbers possibly containing a decimal point, and an optional exponent field containing an E or e followed by a possibly
+    signed integer string. Values outside the ``0 - 1`` range must be clipped to be within the range.
+
+If a color should have an alpha component, it must be suffixed to the color
+specification in the form :code:`@number between zero and one`. For example::
+
+    red@0.5 rgb:ff0000@0.1 #ff0000@0.3
+
+The syntax for the floating point alpha component is the same as used for the
+components of ``rgbi`` defined above. When not specified, the default alpha
+value is ``1.0``. Values outside the range ``0 - 1`` must be clipped
+to be within the range, negative values may have special context dependent
+meaning.
 
 In addition, the following color names are accepted (case-insensitively) corresponding to the
 specified RGB values.

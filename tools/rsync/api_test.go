@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -135,7 +135,7 @@ func generate_data(block_size, num_of_blocks int, extra ...string) []byte {
 	e := strings.Join(extra, "")
 	ans := make([]byte, num_of_blocks*block_size+len(e))
 	utils.Memset(ans, '_')
-	for i := 0; i < num_of_blocks; i++ {
+	for i := range num_of_blocks {
 		offset := i * block_size
 		copy(ans[offset:], strconv.Itoa(i))
 	}
@@ -183,14 +183,14 @@ func TestRsyncHashers(t *testing.T) {
 	h := new_xxh3_64()
 	h.Write([]byte("abcd"))
 	if diff := cmp.Diff(hex.EncodeToString(h.Sum(nil)), `6497a96f53a89890`); diff != "" {
-		t.Fatalf(diff)
+		t.Fatalf("%s", diff)
 	}
 	if diff := cmp.Diff(h.Sum64(), uint64(7248448420886124688)); diff != "" {
-		t.Fatalf(diff)
+		t.Fatalf("%s", diff)
 	}
 	h2 := new_xxh3_128()
 	h2.Write([]byte("abcd"))
 	if diff := cmp.Diff(hex.EncodeToString(h2.Sum(nil)), `8d6b60383dfa90c21be79eecd1b1353d`); diff != "" {
-		t.Fatalf(diff)
+		t.Fatalf("%s", diff)
 	}
 }

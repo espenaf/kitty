@@ -11,13 +11,13 @@ import (
 	"strings"
 	"unicode"
 
-	"kitty/tools/cli"
-	"kitty/tools/tty"
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -33,7 +33,7 @@ func convert_text(text string, cols int) string {
 			continue
 		}
 		if strings.TrimRight(full_line, "\r") == "" {
-			for i := 0; i < len(full_line); i++ {
+			for range len(full_line) {
 				lines = append(lines, empty_line)
 			}
 			continue
@@ -111,7 +111,28 @@ func decode_hint(x string, alphabet string) (ans int) {
 	return
 }
 
+func as_rgb(c uint32) [3]float32 {
+	return [3]float32{float32((c>>16)&255) / 255.0, float32((c>>8)&255) / 255.0, float32(c&255) / 255.0}
+}
+
+func hints_text_color(confval string) (ans string) {
+	ans = confval
+	if ans == "auto" {
+		ans = "bright-gray"
+		if bc, err := tui.ReadBasicColors(); err == nil {
+			bg := as_rgb(bc.Background)
+			c15 := as_rgb(bc.Color15)
+			c8 := as_rgb(bc.Color8)
+			if utils.RGBContrast(bg[0], bg[1], bg[2], c8[0], c8[1], c8[2]) > utils.RGBContrast(bg[0], bg[1], bg[2], c15[0], c15[1], c15[2]) {
+				ans = "bright-black"
+			}
+		}
+	}
+	return
+}
+
 func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
+	o.HintsTextColor = hints_text_color(o.HintsTextColor)
 	output := tui.KittenOutputSerializer()
 	if tty.IsTerminal(os.Stdin.Fd()) {
 		return 1, fmt.Errorf("You must pass the text to be hinted on STDIN")
@@ -182,6 +203,27 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 		if len(mark_text) <= len(hint) {
 			mark_text = ""
 		} else {
+			replaced_text := mark_text[:len(hint)]
+			replaced_text = strings.ReplaceAll(replaced_text, "\r", "\n")
+			if strings.Contains(replaced_text, "\n") {
+				buf := strings.Builder{}
+				buf.Grow(2 * len(hint))
+				h := hint
+				parts := strings.Split(replaced_text, "\n")
+				for i, x := range parts {
+					if x != "" {
+						buf.WriteString(h[:len(x)])
+						h = h[len(x):]
+					}
+					if i != len(parts)-1 {
+						buf.WriteString("\n")
+					}
+				}
+				if h != "" {
+					buf.WriteString(h)
+				}
+				hint = buf.String()
+			}
 			mark_text = mark_text[len(hint):]
 		}
 		ans := hint_style(hint) + text_style(mark_text)
@@ -217,11 +259,11 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 	}
 
 	lp.OnInitialize = func() (string, error) {
-		lp.SendOverlayReady()
 		lp.SetCursorVisible(false)
 		lp.SetWindowTitle(window_title)
 		lp.AllowLineWrapping(false)
 		draw_screen()
+		lp.SendOverlayReady()
 		return "", nil
 	}
 	lp.OnFinalize = func() string {

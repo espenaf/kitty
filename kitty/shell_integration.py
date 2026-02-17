@@ -3,13 +3,16 @@
 
 
 import os
+import re
 import subprocess
+from collections.abc import Callable
 from contextlib import suppress
-from typing import Callable, Optional
+from typing import Iterable
 
 from .constants import shell_integration_dir
 from .fast_data_types import get_options
 from .options.types import Options, defaults
+from .types import run_once
 from .utils import log_error, which
 
 
@@ -24,7 +27,7 @@ def setup_fish_env(env: dict[str, str], argv: list[str]) -> None:
         env['XDG_DATA_DIRS'] = os.pathsep.join(dirs)
 
 
-def is_new_zsh_install(env: dict[str, str], zdotdir: Optional[str]) -> bool:
+def is_new_zsh_install(env: dict[str, str], zdotdir: str | None) -> bool:
     # if ZDOTDIR is empty, zsh will read user rc files from /
     # if there aren't any, it'll run zsh-newuser-install
     # the latter will bail if there are rc files in $HOME
@@ -39,7 +42,7 @@ def is_new_zsh_install(env: dict[str, str], zdotdir: Optional[str]) -> bool:
     return True
 
 
-def get_zsh_zdotdir_from_global_zshenv(env: dict[str, str], argv: list[str]) -> Optional[str]:
+def get_zsh_zdotdir_from_global_zshenv(env: dict[str, str], argv: list[str]) -> str | None:
     exe = which(argv[0], only_system=True) or 'zsh'
     with suppress(Exception):
         return subprocess.check_output([exe, '--norcs', '--interactive', '-c', 'echo -n $ZDOTDIR'], env=env).decode('utf-8')
@@ -182,8 +185,11 @@ ENV_SERIALIZERS: dict[str, Callable[[dict[str, str]], str]] = {
     'fish': fish_serialize_env,
 }
 
+QUOTERES =  {
+    'fish': as_fish_str_literal
+}
 
-def get_supported_shell_name(path: str) -> Optional[str]:
+def get_supported_shell_name(path: str) -> str | None:
     name = os.path.basename(path)
     if name.lower().endswith('.exe'):
         name = name.rpartition('.')[0]
@@ -205,7 +211,23 @@ def serialize_env(path: str, env: dict[str, str]) -> str:
     return ENV_SERIALIZERS[name](env)
 
 
-def get_effective_ksi_env_var(opts: Optional[Options] = None) -> str:
+@run_once
+def unsafe_pat() -> re.Pattern[str]:
+    return re.compile(r'[^\w@%+=:,./-]', re.ASCII)
+
+
+def join(path: str, cmd: Iterable[str]) -> str:
+    name = get_supported_shell_name(path)
+    _find_unsafe = unsafe_pat().search
+    if not name:
+        raise ValueError(f'{path} is not a supported shell')
+    q = QUOTERES.get(name, as_str_literal)
+    def quote(x: str) -> str:
+        return x if _find_unsafe(x) is None else q(x)
+    return ' '.join(map(quote, cmd))
+
+
+def get_effective_ksi_env_var(opts: Options | None = None) -> str:
     opts = opts or get_options()
     if 'disabled' in opts.shell_integration:
         return ''

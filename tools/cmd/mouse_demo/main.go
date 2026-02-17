@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
 )
 
 var _ = fmt.Print
@@ -72,6 +72,10 @@ func Run(args []string) (rc int, err error) {
 			return
 		}
 		lp.ClearScreen()
+		if current_mouse_event.Event_type == loop.MOUSE_LEAVE {
+			lp.Println("Mouse has left the window")
+			return
+		}
 		lp.Printf("Position: %d, %d (pixels)\r\n", current_mouse_event.Pixel.X, current_mouse_event.Pixel.Y)
 		lp.Printf("Cell    : %d, %d\r\n", current_mouse_event.Cell.X, current_mouse_event.Cell.Y)
 		lp.Printf("Type    : %s\r\n", current_mouse_event.Event_type)

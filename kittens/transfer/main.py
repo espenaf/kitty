@@ -3,7 +3,6 @@
 
 
 import sys
-from typing import List
 
 usage = 'source_files_or_directories destination_path'
 help_text = '''\
@@ -121,14 +120,14 @@ actually degrade performance on fast links or with small files, so use with care
 '''
 
 
-def main(args: List[str]) -> None:
+def main(args: list[str]) -> None:
     raise SystemExit('This should be run as kitten transfer')
 
 
 if __name__ == '__main__':
     main(sys.argv)
 elif __name__ == '__doc__':
-    from kitty.cli import CompletionSpec
+    from kitty.simple_cli_definitions import CompletionSpec
     cd = sys.cli_docs  # type: ignore
     cd['usage'] = usage
     cd['options'] = option_text

@@ -419,6 +419,9 @@ specialize_font_descriptor(PyObject *base_descriptor, double font_sz_in_pts, dou
 
     FcPattern *pat = FcPatternCreate();
     if (pat == NULL) return PyErr_NoMemory();
+    RAII_PyObject(features, PyList_New(0));
+    if (!features) return NULL;
+    RAII_PyObject(final_features, NULL);
     RAII_PyObject(ans, NULL);
     AP(FcPatternAddString, FC_FILE, (const FcChar8*)PyUnicode_AsUTF8(p), "path");
     AP(FcPatternAddInteger, FC_INDEX, face_idx, "index");
@@ -428,7 +431,7 @@ specialize_font_descriptor(PyObject *base_descriptor, double font_sz_in_pts, dou
     FcPatternDestroy(pat); pat = NULL;
     if (!ans) return NULL;
     // fontconfig returns a completely random font if the base descriptor
-    // points to a font that fontconfig hasnt indexed, for example the builting
+    // points to a font that fontconfig hasnt indexed, for example the built-in
     // NERD font
     PyObject *new_path = PyDict_GetItemString(ans, "path");
     if (!new_path || PyObject_RichCompareBool(p, new_path, Py_EQ) != 1) { Py_CLEAR(ans); ans = PyDict_Copy(base_descriptor); if (!ans) return NULL;  }
@@ -445,10 +448,23 @@ specialize_font_descriptor(PyObject *base_descriptor, double font_sz_in_pts, dou
     if (axes) {
         if (PyDict_SetItemString(ans, "axes", axes) != 0) return NULL;
     }
-    PyObject *features = PyDict_GetItemString(base_descriptor, "features");
-    if (features) {
-        if (PyDict_SetItemString(ans, "features", features) != 0) return NULL;
+    PyObject *ff = PyDict_GetItemString(ans, "fontfeatures");
+    if (ff && PyList_GET_SIZE(ff)) {
+        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(ff); i++) {
+            RAII_PyObject(pff, (PyObject*)parse_font_feature(PyUnicode_AsUTF8(PyList_GET_ITEM(ff, i))));
+            if (pff == NULL) {
+                PyErr_Print(); fprintf(stderr, "\n");
+            } else if (PyList_Append(features, pff) != 0) return NULL;
+        }
     }
+    PyObject *base_features = PyDict_GetItemString(base_descriptor, "features");
+    final_features = PyTuple_New(PyList_GET_SIZE(features) + (base_features ? PyTuple_GET_SIZE(base_features) : 0));
+    if (!final_features) return NULL;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(features); i++) { PyTuple_SET_ITEM(final_features, i, Py_NewRef(PyList_GET_ITEM(features, i))); }
+    if (base_features) {
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(base_features); i++) { PyTuple_SET_ITEM(final_features, i + PyList_GET_SIZE(features), Py_NewRef(PyTuple_GET_ITEM(base_features, i))); }
+    }
+    if (PyDict_SetItemString(ans, "features", final_features) != 0) return NULL;
     Py_INCREF(ans);
     return ans;
 end:
@@ -478,7 +494,7 @@ end:
 static bool face_has_codepoint(const void *face, char_type cp) { return glyph_id_for_codepoint(face, cp) > 0; }
 
 PyObject*
-create_fallback_face(PyObject UNUSED *base_face, CPUCell* cell, bool bold, bool italic, bool emoji_presentation, FONTS_DATA_HANDLE fg) {
+create_fallback_face(PyObject UNUSED *base_face, const ListOfChars *lc, bool bold, bool italic, bool emoji_presentation, FONTS_DATA_HANDLE fg) {
     ensure_initialized();
     PyObject *ans = NULL;
     RAII_PyObject(d, NULL);
@@ -489,7 +505,7 @@ create_fallback_face(PyObject UNUSED *base_face, CPUCell* cell, bool bold, bool 
     if (!emoji_presentation && bold) { AP(FcPatternAddInteger, FC_WEIGHT, FC_WEIGHT_BOLD, "weight"); }
     if (!emoji_presentation && italic) { AP(FcPatternAddInteger, FC_SLANT, FC_SLANT_ITALIC, "slant"); }
     if (emoji_presentation) { AP(FcPatternAddBool, FC_COLOR, true, "color"); }
-    size_t num = cell_as_unicode_for_fallback(cell, char_buf);
+    size_t num = cell_as_unicode_for_fallback(lc, char_buf, arraysz(char_buf));
     add_charset(pat, num);
     d = _fc_match(pat);
 face_from_descriptor:
@@ -499,22 +515,22 @@ face_from_descriptor:
         while ((q = iter_fallback_faces(fg, &idx))) {
             if (face_equals_descriptor(q, d)) {
                 ans = PyLong_FromSsize_t(idx);
-                if (!glyph_found) glyph_found = has_cell_text(face_has_codepoint, q, cell, false);
+                if (!glyph_found) glyph_found = has_cell_text(face_has_codepoint, q, false, lc);
                 goto end;
             }
         }
         ans = face_from_descriptor(d, fg);
-        if (!glyph_found) glyph_found = has_cell_text(face_has_codepoint, ans, cell, false);
+        if (!glyph_found && ans) glyph_found = has_cell_text(face_has_codepoint, ans, false, lc);
     }
 end:
     Py_CLEAR(d);
     if (pat != NULL) { FcPatternDestroy(pat); pat = NULL; }
     if (!glyph_found && !PyErr_Occurred()) {
-        if (builtin_nerd_font.face && has_cell_text(face_has_codepoint, builtin_nerd_font.face, cell, false)) {
+        if (builtin_nerd_font.face && has_cell_text(face_has_codepoint, builtin_nerd_font.face, false, lc)) {
             Py_CLEAR(ans);
             d = builtin_nerd_font.descriptor; Py_INCREF(d); glyph_found = true; goto face_from_descriptor;
         } else {
-            if (global_state.debug_font_fallback && ans) has_cell_text(face_has_codepoint, ans, cell, true);
+            if (global_state.debug_font_fallback && ans) has_cell_text(face_has_codepoint, ans, true, lc);
             Py_CLEAR(ans); ans = Py_None; Py_INCREF(ans);
         }
     }

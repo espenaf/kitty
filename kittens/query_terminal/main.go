@@ -3,14 +3,14 @@ package query_terminal
 import (
 	"bytes"
 	"fmt"
-	"kitty"
+	"github.com/kovidgoyal/kitty"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
-	"kitty/tools/cli"
-	"kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
 )
 
 var _ = fmt.Print
@@ -26,7 +26,7 @@ func main(cmd *cli.Command, opts *Options, args []string) (rc int, err error) {
 			queries[i] = x
 		}
 	}
-	lp, err := loop.New(loop.NoAlternateScreen, loop.NoKeyboardStateChange, loop.NoMouseTracking, loop.NoRestoreColors)
+	lp, err := loop.New(loop.NoAlternateScreen, loop.NoKeyboardStateChange, loop.NoMouseTracking, loop.NoRestoreColors, loop.NoInBandResizeNotifications)
 	if err != nil {
 		return 1, err
 	}

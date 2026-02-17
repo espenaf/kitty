@@ -12,7 +12,9 @@
 #undef _DARWIN_C_SOURCE
 #endif
 
-#include "data-types.h"
+#include "char-props.h"
+#include "launcher/utils.h"
+#include "line.h"
 #include "charsets.h"
 #include "base64.h"
 #include <sys/socket.h>
@@ -21,7 +23,6 @@
 #include "cleanup.h"
 #include "safe-wrappers.h"
 #include "control-codes.h"
-#include "wcwidth-std.h"
 #include "wcswidth.h"
 #include "modes.h"
 #include <stddef.h>
@@ -41,14 +42,14 @@
 #include <xlocale.h>
 
 static PyObject*
-user_cache_dir(void) {
+user_cache_dir(PyObject *self UNUSED, PyObject *args UNUSED) {
     static char buf[1024];
     if (!confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf) - 1)) return PyErr_SetFromErrno(PyExc_OSError);
     return PyUnicode_FromString(buf);
 }
 
 static PyObject*
-process_group_map(void) {
+process_group_map(PyObject *self UNUSED, PyObject *args UNUSED) {
     int num_of_processes = proc_listallpids(NULL, 0);
     size_t bufsize = sizeof(pid_t) * (num_of_processes + 1024);
     RAII_ALLOC(pid_t, buf, malloc(bufsize));
@@ -67,20 +68,13 @@ process_group_map(void) {
 #endif
 
 static PyObject*
-redirect_std_streams(PyObject UNUSED *self, PyObject *args) {
-    char *devnull = NULL;
-    if (!PyArg_ParseTuple(args, "s", &devnull)) return NULL;
-    if (freopen(devnull, "r", stdin) == NULL) return PyErr_SetFromErrno(PyExc_OSError);
-    if (freopen(devnull, "w", stdout) == NULL) return PyErr_SetFromErrno(PyExc_OSError);
-    if (freopen(devnull, "w", stderr) == NULL)  return PyErr_SetFromErrno(PyExc_OSError);
-    Py_RETURN_NONE;
-}
-
-static PyObject*
-pybase64_encode(PyObject UNUSED *self, PyObject *args) {
+pybase64_encode(PyObject UNUSED *self, PyObject *const *args, Py_ssize_t nargs) {
     int add_padding = 0;
+    if (nargs < 1 || nargs > 2) { PyErr_SetString(PyExc_TypeError, "must supply one or two arguments"); return NULL; }
     RAII_PY_BUFFER(view);
-    if (!PyArg_ParseTuple(args, "s*|p", &view, &add_padding)) return NULL;
+    if (PyUnicode_Check(args[0])) view.buf = (void*)PyUnicode_AsUTF8AndSize(args[0], &view.len);
+    else if (PyObject_GetBuffer(args[0], &view, PyBUF_SIMPLE) != 0) return NULL;
+    if (nargs == 2) add_padding = PyObject_IsTrue(args[1]);
     size_t sz = required_buffer_size_for_base64_encode(view.len);
     PyObject *ans = PyBytes_FromStringAndSize(NULL, sz);
     if (!ans) return NULL;
@@ -90,9 +84,21 @@ pybase64_encode(PyObject UNUSED *self, PyObject *args) {
 }
 
 static PyObject*
-pybase64_decode(PyObject UNUSED *self, PyObject *args) {
+base64_encode_into(PyObject UNUSED *self, PyObject *args) {
+    int add_padding = 0;
+    RAII_PY_BUFFER(view); RAII_PY_BUFFER(output);
+    if (!PyArg_ParseTuple(args, "s*w*|i", &view, &output, &add_padding)) return NULL;
+    size_t sz = required_buffer_size_for_base64_encode(view.len);
+    if (output.len < (ssize_t)sz) { PyErr_SetString(PyExc_TypeError, "output buffer too small"); return NULL; }
+    base64_encode8(view.buf, view.len, output.buf, &sz, add_padding);
+    return PyLong_FromSize_t(sz);
+}
+
+static PyObject*
+pybase64_decode(PyObject UNUSED *self, PyObject *input_data) {
     RAII_PY_BUFFER(view);
-    if (!PyArg_ParseTuple(args, "s*", &view)) return NULL;
+    if (PyUnicode_Check(input_data)) view.buf = (void*)PyUnicode_AsUTF8AndSize(input_data, &view.len);
+    else if (PyObject_GetBuffer(input_data, &view, PyBUF_SIMPLE) != 0) return NULL;
     size_t sz = required_buffer_size_for_base64_decode(view.len);
     PyObject *ans = PyBytes_FromStringAndSize(NULL, sz);
     if (!ans) return NULL;
@@ -105,11 +111,53 @@ pybase64_decode(PyObject UNUSED *self, PyObject *args) {
     return ans;
 }
 
+static PyObject*
+base64_decode_into(PyObject UNUSED *self, PyObject *args) {
+    RAII_PY_BUFFER(view); RAII_PY_BUFFER(output);
+    if (!PyArg_ParseTuple(args, "s*w*", &view, &output)) return NULL;
+    size_t sz = required_buffer_size_for_base64_decode(view.len);
+    if (output.len < (ssize_t)sz) { PyErr_SetString(PyExc_TypeError, "output buffer too small"); return NULL; }
+    if (!base64_decode8(view.buf, view.len, output.buf, &sz)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid base64 input data");
+        return NULL;
+    }
+    return PyLong_FromSize_t(sz);
+}
+
+static PyObject*
+split_into_graphemes(PyObject UNUSED *self, PyObject *src) {
+    if (!PyUnicode_Check(src)) { PyErr_SetString(PyExc_TypeError, "must provide a unicode string"); return NULL; }
+    int kind = PyUnicode_KIND(src); char *data = PyUnicode_DATA(src);
+    RAII_PyObject(ans, PyList_New(0));
+    if (!ans) return NULL;
+    GraphemeSegmentationResult s; grapheme_segmentation_reset(&s);
+    Py_ssize_t pos = 0;
+    for (Py_ssize_t i = 0; i < PyUnicode_GET_LENGTH(src); i++) {
+        char_type ch = PyUnicode_READ(kind, data, i);
+        if (!(s = grapheme_segmentation_step(s, char_props_for(ch))).add_to_current_cell) {
+            RAII_PyObject(u, PyUnicode_FromKindAndData(kind, data + kind * pos, i - pos));
+            if (!u || PyList_Append(ans, u) != 0) return NULL;
+            pos = i;
+        }
+    }
+    if (pos < PyUnicode_GET_LENGTH(src)) {
+        RAII_PyObject(u, PyUnicode_FromKindAndData(kind, data + kind * pos, PyUnicode_GET_LENGTH(src) - pos));
+        if (!u || PyList_Append(ans, u) != 0) return NULL;
+    }
+    return Py_NewRef(ans);
+}
+
 typedef struct StreamingBase64Decoder {
     PyObject_HEAD
     struct base64_state state;
-    bool add_trailing_bytes;
+    bool add_trailing_bytes, needs_more_data;
 } StreamingBase64Decoder;
+
+static void
+StreamingBase64Decoder_reset_(StreamingBase64Decoder *self) {
+    base64_stream_decode_init(&self->state, 0);
+    self->needs_more_data = false;
+}
 
 static int
 StreamingBase64Decoder_init(PyObject *s, PyObject *args, PyObject *kwds UNUSED) {
@@ -127,10 +175,17 @@ StreamingBase64Decoder_decode(StreamingBase64Decoder *self, PyObject *a) {
     size_t sz = required_buffer_size_for_base64_decode(data.len);
     RAII_PyObject(ans, PyBytes_FromStringAndSize(NULL, sz));
     if (!ans) return NULL;
-    if (!base64_stream_decode(&self->state, data.buf, data.len, PyBytes_AS_STRING(ans), &sz)) {
+    int ret;
+    Py_BEGIN_ALLOW_THREADS
+    ret = base64_stream_decode(&self->state, data.buf, data.len, PyBytes_AS_STRING(ans), &sz);
+    Py_END_ALLOW_THREADS;
+    if (!ret) {
+        StreamingBase64Decoder_reset_(self);
         PyErr_SetString(PyExc_ValueError, "Invalid base64 input data");
         return NULL;
     }
+    if (self->state.eof) StreamingBase64Decoder_reset_(self);
+    else self->needs_more_data = self->state.carry != 0 || self->state.bytes != 0;
     if (_PyBytes_Resize(&ans, sz) != 0) return NULL;
     return Py_NewRef(ans);
 }
@@ -146,17 +201,28 @@ StreamingBase64Decoder_decode_into(StreamingBase64Decoder *self, PyObject *const
     if (!src.buf || !src.len) return PyLong_FromLong(0);
     size_t sz = required_buffer_size_for_base64_decode(src.len);
     if ((Py_ssize_t)sz > data.len) { PyErr_SetString(PyExc_BufferError, "output buffer too small"); return NULL; }
-    if (!base64_stream_decode(&self->state, src.buf, src.len, data.buf, &sz)) {
+    int ret;
+    Py_BEGIN_ALLOW_THREADS
+    ret = base64_stream_decode(&self->state, src.buf, src.len, data.buf, &sz);
+    Py_END_ALLOW_THREADS
+    if (!ret) {
+        StreamingBase64Decoder_reset_(self);
         PyErr_SetString(PyExc_ValueError, "Invalid base64 input data");
         return NULL;
     }
+    if (self->state.eof) StreamingBase64Decoder_reset_(self); else self->needs_more_data = true;
     return PyLong_FromSize_t(sz);
 }
 
 static PyObject*
 StreamingBase64Decoder_reset(StreamingBase64Decoder *self, PyObject *args UNUSED) {
-    base64_stream_decode_init(&self->state, 0);
+    StreamingBase64Decoder_reset_(self);
     Py_RETURN_NONE;
+}
+
+static PyObject*
+StreamingBase64Decoder_needs_more_data(StreamingBase64Decoder *self, PyObject *args UNUSED) {
+    return Py_NewRef(self->needs_more_data ? Py_True : Py_False);
 }
 
 static PyTypeObject StreamingBase64Decoder_Type = {
@@ -169,6 +235,7 @@ static PyTypeObject StreamingBase64Decoder_Type = {
         {"decode", (PyCFunction)StreamingBase64Decoder_decode, METH_O, ""},
         {"decode_into", (PyCFunction)(void(*)(void))StreamingBase64Decoder_decode_into, METH_FASTCALL, ""},
         {"reset", (PyCFunction)StreamingBase64Decoder_reset, METH_NOARGS, ""},
+        {"needs_more_data", (PyCFunction)StreamingBase64Decoder_needs_more_data, METH_NOARGS, ""},
         {NULL, NULL, 0, NULL},
     },
     .tp_new = PyType_GenericNew,
@@ -196,7 +263,9 @@ StreamingBase64Encoder_encode(StreamingBase64Decoder *self, PyObject *a) {
     size_t sz = required_buffer_size_for_base64_encode(data.len);
     RAII_PyObject(ans, PyBytes_FromStringAndSize(NULL, sz));
     if (!ans) return NULL;
+    Py_BEGIN_ALLOW_THREADS
     base64_stream_encode(&self->state, data.buf, data.len, PyBytes_AS_STRING(ans), &sz);
+    Py_END_ALLOW_THREADS
     if (_PyBytes_Resize(&ans, sz) != 0) return NULL;
     return Py_NewRef(ans);
 }
@@ -212,7 +281,9 @@ StreamingBase64Encoder_encode_into(StreamingBase64Decoder *self, PyObject *const
     if (!src.buf || !src.len) return PyLong_FromLong(0);
     size_t sz = required_buffer_size_for_base64_encode(src.len);
     if ((Py_ssize_t)sz > data.len) { PyErr_SetString(PyExc_BufferError, "output buffer too small"); return NULL; }
+    Py_BEGIN_ALLOW_THREADS
     base64_stream_encode(&self->state, src.buf, src.len, data.buf, &sz);
+    Py_END_ALLOW_THREADS
     return PyLong_FromSize_t(sz);
 }
 
@@ -347,7 +418,7 @@ py_shm_unlink(PyObject UNUSED *self, PyObject *args) {
 
 static PyObject*
 wcwidth_wrap(PyObject UNUSED *self, PyObject *chr) {
-    return PyLong_FromLong(wcwidth_std(PyLong_AsLong(chr)));
+    return PyLong_FromLong(wcwidth_std(char_props_for(PyLong_AsLong(chr))));
 }
 
 static PyObject*
@@ -358,23 +429,6 @@ locale_is_valid(PyObject *self UNUSED, PyObject *args) {
     if (!test_locale) { Py_RETURN_FALSE; }
     freelocale(test_locale);
     Py_RETURN_TRUE;
-}
-
-static PyObject*
-py_getpeereid(PyObject *self UNUSED, PyObject *args) {
-    int fd;
-    if (!PyArg_ParseTuple(args, "i", &fd)) return NULL;
-    uid_t euid = 0; gid_t egid = 0;
-#ifdef __linux__
-    struct ucred cr;
-    socklen_t sz = sizeof(cr);
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &sz) != 0) { PyErr_SetFromErrno(PyExc_OSError); return NULL; }
-    euid = cr.uid; egid = cr.gid;
-#else
-    if (getpeereid(fd, &euid, &egid) != 0) { PyErr_SetFromErrno(PyExc_OSError); return NULL; }
-#endif
-    int u = euid, g = egid;
-    return Py_BuildValue("ii", u, g);
 }
 
 #include "docs_ref_map_generated.h"
@@ -563,24 +617,96 @@ py_timed_debug_print(PyObject *self UNUSED, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static locale_t c_locale = 0;
+locale_t get_c_locale(void) { return c_locale; }
+
+static PyObject*
+py_run_atexit_cleanup_functions(PyObject *self UNUSED, PyObject *args UNUSED) {
+    run_at_exit_cleanup_functions();
+    Py_RETURN_NONE;
+}
+
+static PyObject*
+py_char_props_for(PyObject *self UNUSED, PyObject *ch) {
+    if (!PyUnicode_Check(ch) || PyUnicode_GET_LENGTH(ch) != 1) { PyErr_SetString(PyExc_TypeError, "must supply a single character"); return NULL; }
+    char_type c = PyUnicode_READ_CHAR(ch, 0);
+    CharProps cp = char_props_for(c);
+#define B(x) #x, cp.x ? Py_True : Py_False
+    return Py_BuildValue("{si sO sB sB ss sO sO}",
+        "width", wcwidth_std(cp), B(is_extended_pictographic), "grapheme_break", cp.grapheme_break,
+        "indic_conjunct_break", cp.indic_conjunct_break, "category", char_category(cp), B(is_emoji), B(is_emoji_presentation_base)
+    );
+#undef B
+}
+
+static PyObject*
+expanduser(PyObject *self UNUSED, PyObject *path) {
+    if (!PyUnicode_Check(path)) { PyErr_SetString(PyExc_TypeError, "path must a string"); return NULL; }
+    char buf[PATH_MAX + 1];
+    expand_tilde(PyUnicode_AsUTF8(path), buf, arraysz(buf));
+    return PyUnicode_FromString(buf);
+}
+
+static PyObject*
+abspath(PyObject *self UNUSED, PyObject *path) {
+    if (!PyUnicode_Check(path)) { PyErr_SetString(PyExc_TypeError, "path must a string"); return NULL; }
+    char buf[PATH_MAX + 1];
+    lexical_absolute_path(PyUnicode_AsUTF8(path), buf, arraysz(buf));
+    return PyUnicode_FromString(buf);
+}
+
+static PyObject*
+read_file(PyObject *self UNUSED, PyObject *path) {
+    if (!PyUnicode_Check(path)) { PyErr_SetString(PyExc_TypeError, "path must a string"); return NULL; }
+    size_t sz;
+    char *result = read_full_file(PyUnicode_AsUTF8(path), &sz);
+    if (!result) { PyErr_SetFromErrno(PyExc_OSError); return NULL; }
+    PyObject *ans = PyBytes_FromStringAndSize(result, sz);
+    free(result);
+    return ans;
+}
+
+static PyObject*
+py_makedirs(PyObject *self UNUSED, PyObject *args) {
+    int mode = 0755; const char *p;
+    if (!PyArg_ParseTuple(args, "s|i", &p, &mode)) return NULL;
+    if (!makedirs(p, mode)) { PyErr_SetFromErrno(PyExc_OSError); return NULL; }
+    Py_RETURN_NONE;
+}
+
+static PyObject*
+py_get_config_dir(PyObject *self UNUSED, PyObject *args UNUSED) {
+    char buf[PATH_MAX];
+    if (get_config_dir(buf, PATH_MAX)) return PyUnicode_FromString(buf);
+    return PyUnicode_FromString("");
+}
+
+#include "launcher/cli-parser.h"
 
 static PyMethodDef module_methods[] = {
     METHODB(replace_c0_codes_except_nl_space_tab, METH_O),
+    METHODB(read_file, METH_O),
+    {"parse_cli_from_spec", parse_cli_from_python_spec, METH_VARARGS, ""},
     {"wcwidth", (PyCFunction)wcwidth_wrap, METH_O, ""},
+    {"expanduser", (PyCFunction)expanduser, METH_O, ""},
+    {"abspath", (PyCFunction)abspath, METH_O, ""},
     {"expand_ansi_c_escapes", (PyCFunction)expand_ansi_c_escapes, METH_O, ""},
     {"get_docs_ref_map", (PyCFunction)get_docs_ref_map, METH_NOARGS, ""},
-    {"getpeereid", (PyCFunction)py_getpeereid, METH_VARARGS, ""},
+    {"get_config_dir", (PyCFunction)py_get_config_dir, METH_NOARGS, ""},
     {"wcswidth", (PyCFunction)wcswidth_std, METH_O, ""},
-    {"unicode_database_version", (PyCFunction)unicode_database_version, METH_NOARGS, ""},
     {"open_tty", open_tty, METH_VARARGS, ""},
+    {"makedirs", py_makedirs, METH_VARARGS, ""},
     {"normal_tty", normal_tty, METH_VARARGS, ""},
     {"raw_tty", raw_tty, METH_VARARGS, ""},
     {"close_tty", close_tty, METH_VARARGS, ""},
     {"set_iutf8_fd", (PyCFunction)pyset_iutf8, METH_VARARGS, ""},
-    {"base64_encode", (PyCFunction)pybase64_encode, METH_VARARGS, ""},
-    {"base64_decode", (PyCFunction)pybase64_decode, METH_VARARGS, ""},
+    {"base64_encode", (PyCFunction)(void (*) (void))(pybase64_encode), METH_FASTCALL, ""},
+    {"base64_encode_into", (PyCFunction)base64_encode_into, METH_VARARGS, ""},
+    {"base64_decode", (PyCFunction)(void (*) (void))(pybase64_decode), METH_O, ""},
+    {"base64_decode_into", (PyCFunction)base64_decode_into, METH_VARARGS, ""},
+    {"char_props_for", py_char_props_for, METH_O, ""},
+    {"split_into_graphemes", (PyCFunction)split_into_graphemes, METH_O, ""},
     {"thread_write", (PyCFunction)cm_thread_write, METH_VARARGS, ""},
-    {"redirect_std_streams", (PyCFunction)redirect_std_streams, METH_VARARGS, ""},
     {"locale_is_valid", (PyCFunction)locale_is_valid, METH_VARARGS, ""},
     {"shm_open", (PyCFunction)py_shm_open, METH_VARARGS, ""},
     {"shm_unlink", (PyCFunction)py_shm_unlink, METH_VARARGS, ""},
@@ -589,6 +715,7 @@ static PyMethodDef module_methods[] = {
     {"monotonic", (PyCFunction)py_monotonic, METH_NOARGS, ""},
     {"timed_debug_print", (PyCFunction)py_timed_debug_print, METH_VARARGS, ""},
     {"find_in_memoryview", (PyCFunction)find_in_memoryview, METH_VARARGS, ""},
+    {"run_at_exit_cleanup_functions", (PyCFunction)py_run_atexit_cleanup_functions, METH_NOARGS, ""},
 #ifdef __APPLE__
     METHODB(user_cache_dir, METH_NOARGS),
     METHODB(process_group_map, METH_NOARGS),
@@ -602,6 +729,7 @@ static PyMethodDef module_methods[] = {
 
 static void
 free_fast_data_types_module(void *m UNUSED) {
+    freelocale(c_locale);
     run_at_exit_cleanup_functions();
 }
 
@@ -664,14 +792,10 @@ shift_to_first_set_bit(CellAttrs x) {
     return ans;
 }
 
+
 EXPORTED PyMODINIT_FUNC
 PyInit_fast_data_types(void) {
     PyObject *m;
-    if (sizeof(CellAttrs) != 2u) {
-        PyErr_SetString(PyExc_RuntimeError, "Size of CellAttrs is not 2 on this platform");
-        return NULL;
-    }
-
     m = PyModule_Create(&module);
     if (m == NULL) return NULL;
     init_monotonic();
@@ -716,11 +840,10 @@ PyInit_fast_data_types(void) {
     CellAttrs a;
 #define s(name, attr) { a.val = 0; a.attr = 1; PyModule_AddIntConstant(m, #name, shift_to_first_set_bit(a)); }
     s(BOLD, bold); s(ITALIC, italic); s(REVERSE, reverse); s(MARK, mark);
-    s(STRIKETHROUGH, strike); s(DIM, dim); s(DECORATION, decoration);
+    s(STRIKETHROUGH, strike); s(DIM, dim); s(DECORATION, decoration); s(BLINK, blink);
 #undef s
     PyModule_AddIntConstant(m, "MARK_MASK", MARK_MASK);
     PyModule_AddIntConstant(m, "DECORATION_MASK", DECORATION_MASK);
-    PyModule_AddIntConstant(m, "NUM_UNDERLINE_STYLES", NUM_UNDERLINE_STYLES);
     PyModule_AddStringMacro(m, ERROR_PREFIX);
 #ifdef KITTY_VCS_REV
     PyModule_AddStringMacro(m, KITTY_VCS_REV);
@@ -728,6 +851,7 @@ PyInit_fast_data_types(void) {
     PyModule_AddIntMacro(m, CURSOR_BLOCK);
     PyModule_AddIntMacro(m, CURSOR_BEAM);
     PyModule_AddIntMacro(m, CURSOR_UNDERLINE);
+    PyModule_AddIntMacro(m, CURSOR_HOLLOW);
     PyModule_AddIntMacro(m, NO_CURSOR_SHAPE);
     PyModule_AddIntMacro(m, DECAWM);
     PyModule_AddIntMacro(m, DECCOLM);
@@ -739,6 +863,11 @@ PyInit_fast_data_types(void) {
     PyModule_AddIntMacro(m, ESC_APC);
     PyModule_AddIntMacro(m, ESC_DCS);
     PyModule_AddIntMacro(m, ESC_PM);
+    PyModule_AddIntMacro(m, TEXT_SIZE_CODE);
+    PyModule_AddIntMacro(m, COLOR_NOT_SET);
+    PyModule_AddIntMacro(m, COLOR_IS_SPECIAL);
+    PyModule_AddIntMacro(m, COLOR_IS_INDEX);
+    PyModule_AddIntMacro(m, COLOR_IS_RGB);
 #ifdef __APPLE__
     // Apple says its SHM_NAME_MAX but SHM_NAME_MAX is not actually declared in typical CrApple style.
     // This value is based on experimentation and from qsharedmemory.cpp in Qt
@@ -752,6 +881,8 @@ PyInit_fast_data_types(void) {
     if (PyModule_AddObject(m, "StreamingBase64Decoder", (PyObject *) &StreamingBase64Decoder_Type) < 0) return NULL;
     if (PyType_Ready(&StreamingBase64Encoder_Type) < 0) return NULL;
     if (PyModule_AddObject(m, "StreamingBase64Encoder", (PyObject *) &StreamingBase64Encoder_Type) < 0) return NULL;
+    c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    if (!c_locale) { PyErr_NoMemory(); return NULL; }
 
     return m;
 }

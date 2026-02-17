@@ -10,7 +10,6 @@
 #include "state.h"
 #include "threading.h"
 #include "screen.h"
-#include "fonts.h"
 #include "monotonic.h"
 #include <termios.h>
 #include <unistd.h>
@@ -152,6 +151,8 @@ mask_kitty_signals_process_wide(PyObject *self UNUSED, PyObject *a UNUSED) {
     Py_RETURN_NONE;
 }
 
+static int verify_peer_uid = false;
+
 static PyObject *
 new_childmonitor_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
     ChildMonitor *self;
@@ -160,7 +161,7 @@ new_childmonitor_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwd
     int ret;
 
     if (the_monitor) { PyErr_SetString(PyExc_RuntimeError, "Can have only a single ChildMonitor instance"); return NULL; }
-    if (!PyArg_ParseTuple(args, "OO|ii", &death_notify, &dump_callback, &talk_fd, &listen_fd)) return NULL;
+    if (!PyArg_ParseTuple(args, "OO|iip", &death_notify, &dump_callback, &talk_fd, &listen_fd, &verify_peer_uid)) return NULL;
     if ((ret = pthread_mutex_init(&children_lock, NULL)) != 0) {
         PyErr_Format(PyExc_RuntimeError, "Failed to create children_lock mutex: %s", strerror(ret));
         return NULL;
@@ -228,7 +229,7 @@ wakeup_io_loop(ChildMonitor *self, bool in_signal_handler) {
 
 static void* io_loop(void *data);
 static void* talk_loop(void *data);
-static void send_response_to_peer(id_type peer_id, const char *msg, size_t msg_sz);
+static void send_response_to_peer(id_type peer_id, const char *msg, size_t msg_sz, bool is_async_response);
 static void wakeup_talk_loop(bool);
 static bool add_peer_to_injection_queue(int peer_fd, int pipe_fd);
 static bool talk_thread_started = false;
@@ -506,10 +507,11 @@ parse_input(ChildMonitor *self) {
                 if (!resp) PyErr_Print();
             }
             if (resp) {
-                if (PyBytes_Check(resp)) send_response_to_peer(msg->peer_id, PyBytes_AS_STRING(resp), PyBytes_GET_SIZE(resp));
-                else if (resp == Py_None) send_response_to_peer(msg->peer_id, NULL, 0);
+                if (PyBytes_Check(resp)) send_response_to_peer(msg->peer_id, PyBytes_AS_STRING(resp), PyBytes_GET_SIZE(resp), false);
+                else if (resp == Py_None) send_response_to_peer(msg->peer_id, NULL, 0, false);
+                else if (resp == Py_True) send_response_to_peer(msg->peer_id, NULL, 0, true);
                 Py_CLEAR(resp);
-            } else send_response_to_peer(msg->peer_id, NULL, 0);
+            } else send_response_to_peer(msg->peer_id, NULL, 0, false);
         }
         free(msgs); msgs = NULL;
     }
@@ -532,7 +534,7 @@ parse_input(ChildMonitor *self) {
         DECREF_CHILD(scratch[i]);
     }
     if (reload_config_called) {
-        call_boss(load_config_file, "");
+        call_boss(load_config_file, NULL);
     }
     return input_read;
 }
@@ -651,9 +653,7 @@ pyset_iutf8(ChildMonitor *self, PyObject *args) {
 
 static bool
 cursor_needs_render(Window *w) {
-#define cri w->render_data.screen->cursor_render_info
-    return w->cursor_opacity_at_last_render != cri.opacity || w->render_data.screen->last_rendered.cursor_x != cri.x || w->render_data.screen->last_rendered.cursor_y != cri.y || w->last_cursor_shape != cri.shape;
-#undef cri
+    return memcmp(&w->render_data.screen->last_rendered.cursor, &w->render_data.screen->cursor_render_info, sizeof(CursorRenderInfo)) != 0;
 }
 
 static bool
@@ -669,24 +669,32 @@ collect_cursor_info(CursorRenderInfo *ans, Window *w, monotonic_t now, OSWindow 
         cursor = rd->screen->paused_rendering.expires_at ? &rd->screen->paused_rendering.cursor : rd->screen->cursor;
         ans->x = cursor->x; ans->y = cursor->y;
     }
-    ans->opacity = 0;
-    if (rd->screen->scrolled_by || !screen_is_cursor_visible(rd->screen)) return cursor_needs_render(w);
+    ans->is_visible = false; ans->multicursor_count = 0; ans->cursor_opacity = 1; ans->text_blink_opacity = 1;
+    if (!rd->screen->scrolled_by) {
+        ans->multicursor_count = screen_multi_cursor_count(rd->screen);
+        ans->is_visible = screen_is_cursor_visible(rd->screen);
+    }
+    if (!ans->is_visible && ans->multicursor_count == 0 && !rd->screen->sgr_blink_was_used) return cursor_needs_render(w);
     monotonic_t time_since_start_blink = now - os_window->cursor_blink_zero_time;
-    bool cursor_blinking = OPT(cursor_blink_interval) > 0 && !cursor->non_blinking && os_window->is_focused && (OPT(cursor_stop_blinking_after) == 0 || time_since_start_blink <= OPT(cursor_stop_blinking_after));
-    ans->opacity = 1;
-    if (cursor_blinking) {
+    const bool allow_blinking = OPT(cursor_blink_interval) > 0;
+    const bool blink_has_ceased = OPT(cursor_stop_blinking_after) != 0 && time_since_start_blink > OPT(cursor_stop_blinking_after);
+    const bool cursor_blinking = !cursor->non_blinking && os_window->is_focused;
+    float blink_opacity = 1.f;
+    if (allow_blinking && !blink_has_ceased && (cursor_blinking || rd->screen->sgr_blink_was_used)) {
         if (animation_is_valid(OPT(animation.cursor))) {
             monotonic_t duration = OPT(cursor_blink_interval) * 2;
             monotonic_t time_into_cycle = time_since_start_blink % duration;
             double frac_into_cycle = (double)time_into_cycle / (double)duration;
-            ans->opacity = (float)apply_easing_curve(OPT(animation.cursor), frac_into_cycle, duration);
+            blink_opacity = (float)apply_easing_curve(OPT(animation.cursor), frac_into_cycle, duration);
             set_maximum_wait(ANIMATION_SAMPLE_WAIT);
         } else {
             monotonic_t n = time_since_start_blink / OPT(cursor_blink_interval);
-            ans->opacity = 1 - n % 2;
+            blink_opacity = 1 - n % 2;
             set_maximum_wait((n + 1) * OPT(cursor_blink_interval) - time_since_start_blink);
         }
     }
+    ans->text_blink_opacity = blink_opacity;
+    ans->cursor_opacity = cursor_blinking ? blink_opacity: 1.0f;
     ans->shape = cursor->shape ? cursor->shape : OPT(cursor_shape);
     ans->is_focused = os_window->is_focused;
     return cursor_needs_render(w);
@@ -708,26 +716,37 @@ prepare_to_render_os_window(OSWindow *os_window, monotonic_t now, unsigned int *
 #define TD os_window->tab_bar_render_data
     bool needs_render = os_window->needs_render;
     os_window->needs_render = false;
-    if (TD.screen && os_window->num_tabs >= OPT(tab_bar_min_tabs)) {
+    bool was_previously_rendered_with_layers = os_window->needs_layers;
+    os_window->needs_layers = (
+        !global_state.supports_framebuffer_srgb || effective_os_window_alpha(os_window) < 1.f ||
+        os_window->live_resize.in_progress || (os_window->bgimage && os_window->bgimage->texture_id > 0)
+    );
+    if (TD.screen && os_window->num_tabs && !os_window->has_too_few_tabs) {
         if (!os_window->tab_bar_data_updated) {
             call_boss(update_tab_bar_data, "K", os_window->id);
             os_window->tab_bar_data_updated = true;
         }
-        if (send_cell_data_to_gpu(TD.vao_idx, TD.xstart, TD.ystart, TD.dx, TD.dy, TD.screen, os_window)) needs_render = true;
+        // we never render a cursor in the tab bar
+        CursorRenderInfo *cri = &TD.screen->cursor_render_info;
+        zero_at_ptr(cri); cri->x = TD.screen->cursor->x; cri->y = TD.screen->cursor->y;
+        if (send_cell_data_to_gpu(TD.vao_idx, TD.screen, os_window)) needs_render = true;
+        os_window->needs_layers = os_window->needs_layers || screen_needs_rendering_in_layers(os_window, NULL, TD.screen);
     }
-    if (OPT(mouse_hide_wait) > 0 && !is_mouse_hidden(os_window)) {
-        if (now - os_window->last_mouse_activity_at >= OPT(mouse_hide_wait)) hide_mouse(os_window);
-        else set_maximum_wait(OPT(mouse_hide_wait) - now + os_window->last_mouse_activity_at);
+    if (OPT(mouse_hide.hide_wait) > 0 && !is_mouse_hidden(os_window)) {
+        if (now - os_window->last_mouse_activity_at >= OPT(mouse_hide.hide_wait)) hide_mouse(os_window);
+        else set_maximum_wait(OPT(mouse_hide.hide_wait) - now + os_window->last_mouse_activity_at);
     }
     Tab *tab = os_window->tabs + os_window->active_tab;
     *active_window_bg = OPT(background);
     *all_windows_have_same_bg = true;
     *num_visible_windows = 0;
     color_type first_window_bg = 0;
+    os_window->needs_layers = os_window->needs_layers || (OPT(cursor_trail) && tab->cursor_trail.needs_render);
     for (unsigned int i = 0; i < tab->num_windows; i++) {
         Window *w = tab->windows + i;
 #define WD w->render_data
         if (w->visible && WD.screen) {
+            os_window->needs_layers = os_window->needs_layers || screen_needs_rendering_in_layers(os_window, w, WD.screen);
             screen_check_pause_rendering(WD.screen, now);
             *num_visible_windows += 1;
             color_type window_bg = colorprofile_to_color(WD.screen->color_profile, WD.screen->color_profile->overridden.default_bg, WD.screen->color_profile->configured.default_bg).rgb;
@@ -749,12 +768,32 @@ prepare_to_render_os_window(OSWindow *os_window, monotonic_t now, unsigned int *
                 WD.screen->cursor_render_info.is_focused = os_window->is_focused;
                 set_os_window_title_from_window(w, os_window);
                 *active_window_bg = window_bg;
+                if (OPT(cursor_trail)) {
+                    if (update_cursor_trail(&tab->cursor_trail, w, now, os_window)) {
+                        needs_render = true;
+                        // A max wait of zero causes key input processing to be
+                        // slow so handle the case of OPT(repaint_delay) == 0, see https://github.com/kovidgoyal/kitty/pull/8066
+                        set_maximum_wait(MAX(OPT(repaint_delay), ms_to_monotonic_t(1ll)));
+                    } else if (OPT(cursor_trail) > now - WD.screen->cursor->position_changed_by_client_at) {
+                        // If update_cursor_trail failed due to time threshold, the trail animation
+                        // should be evaluated again shortly. Schedule next update when enough time
+                        // has passed since the cursor was last moved.
+                        set_maximum_wait(OPT(cursor_trail) - now + WD.screen->cursor->position_changed_by_client_at);
+                    }
+                }
+
             } else {
                 if (WD.screen->cursor_render_info.render_even_when_unfocused) {
                     if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
                     WD.screen->cursor_render_info.is_focused = false;
                 } else {
-                    WD.screen->cursor_render_info.opacity = 0;
+                    if (WD.screen->sgr_blink_was_used) {
+                        if (collect_cursor_info(&WD.screen->cursor_render_info, w, now, os_window)) needs_render = true;
+                        WD.screen->cursor_render_info.is_focused = false;
+                    } else {
+                        WD.screen->cursor_render_info.text_blink_opacity = 1;
+                    }
+                    WD.screen->cursor_render_info.cursor_opacity = 0;
                 }
             }
             if (scan_for_animated_images) {
@@ -765,48 +804,34 @@ prepare_to_render_os_window(OSWindow *os_window, monotonic_t now, unsigned int *
                     set_maximum_wait(min_gap);
                 }
             }
-            if (send_cell_data_to_gpu(WD.vao_idx, WD.xstart, WD.ystart, WD.dx, WD.dy, WD.screen, os_window)) needs_render = true;
+            if (send_cell_data_to_gpu(WD.vao_idx, WD.screen, os_window)) needs_render = true;
             if (WD.screen->start_visual_bell_at != 0) needs_render = true;
         }
     }
-    return needs_render;
-}
-
-static void
-draw_resizing_text(OSWindow *w) {
-    if (monotonic() - w->created_at > ms_to_monotonic_t(1000) && w->live_resize.num_of_resize_events > 1) {
-        char text[32] = {0};
-        unsigned int width = w->live_resize.width, height = w->live_resize.height;
-        snprintf(text, sizeof(text), "%u x %u cells", width / w->fonts_data->cell_width, height / w->fonts_data->cell_height);
-        StringCanvas rendered = render_simple_text(w->fonts_data, text);
-        if (rendered.canvas) {
-            draw_centered_alpha_mask(w, width, height, rendered.width, rendered.height, rendered.canvas, OPT(background_opacity));
-            free(rendered.canvas);
-        }
-    }
+    return needs_render || was_previously_rendered_with_layers != os_window->needs_layers;
 }
 
 static void
 render_prepared_os_window(OSWindow *os_window, unsigned int active_window_id, color_type active_window_bg, unsigned int num_visible_windows, bool all_windows_have_same_bg) {
-    // ensure all pixels are cleared to background color at least once in every buffer
-    if (os_window->clear_count++ < 3) blank_os_window(os_window);
     Tab *tab = os_window->tabs + os_window->active_tab;
+    setup_os_window_for_rendering(os_window, tab, NULL, true);
     BorderRects *br = &tab->border_rects;
-    draw_borders(br->vao_idx, br->num_border_rects, br->rect_buf, br->is_dirty, os_window->viewport_width, os_window->viewport_height, active_window_bg, num_visible_windows, all_windows_have_same_bg, os_window);
+    draw_borders(br->vao_idx, br->num_border_rects, br->rect_buf, br->is_dirty, active_window_bg, num_visible_windows, all_windows_have_same_bg, os_window);
     br->is_dirty = false;
-    if (TD.screen && os_window->num_tabs >= OPT(tab_bar_min_tabs)) draw_cells(TD.vao_idx, &TD, os_window, true, true, false, NULL);
+    if (TD.screen && os_window->num_tabs && !os_window->has_too_few_tabs) draw_cells(&TD, os_window, true, true, false, NULL);
     unsigned int num_of_visible_windows = 0;
+    Window *active_window = NULL;
     for (unsigned int i = 0; i < tab->num_windows; i++) { if (tab->windows[i].visible) num_of_visible_windows++; }
     for (unsigned int i = 0; i < tab->num_windows; i++) {
         Window *w = tab->windows + i;
         if (w->visible && WD.screen) {
             bool is_active_window = i == tab->active_window;
-            draw_cells(WD.vao_idx, &WD, os_window, is_active_window, false, num_of_visible_windows == 1, w);
+            if (is_active_window) active_window = w;
+            draw_cells(&WD, os_window, is_active_window, false, num_of_visible_windows == 1, w);
             if (WD.screen->start_visual_bell_at != 0) set_maximum_wait(ANIMATION_SAMPLE_WAIT);
-            w->cursor_opacity_at_last_render = WD.screen->cursor_render_info.opacity; w->last_cursor_shape = WD.screen->cursor_render_info.shape;
         }
     }
-    if (os_window->live_resize.in_progress) draw_resizing_text(os_window);
+    setup_os_window_for_rendering(os_window, tab, active_window, false);
     swap_window_buffers(os_window);
     os_window->last_active_tab = os_window->active_tab; os_window->last_num_tabs = os_window->num_tabs; os_window->last_active_window_id = active_window_id;
     os_window->focused_at_last_render = os_window->is_focused;
@@ -830,14 +855,14 @@ no_render_frame_received_recently(OSWindow *w, monotonic_t now, monotonic_t max_
 }
 
 bool
-render_os_window(OSWindow *w, monotonic_t now, bool ignore_render_frames, bool scan_for_animated_images) {
+render_os_window(OSWindow *w, monotonic_t now, bool scan_for_animated_images) {
     if (!w->num_tabs) return false;
     if (!should_os_window_be_rendered(w)) {
         update_os_window_title(w);
         if (w->is_focused) change_menubar_title(w->window_title);
         return false;
     }
-    if (!ignore_render_frames && USE_RENDER_FRAMES && w->render_state != RENDER_FRAME_READY) {
+    if (!w->keep_rendering_till_swap && USE_RENDER_FRAMES && w->render_state != RENDER_FRAME_READY) {
         if (w->render_state == RENDER_FRAME_NOT_REQUESTED || no_render_frame_received_recently(w, now, ms_to_monotonic_t(250ll))) request_frame_render(w);
         // dont respect render frames soon after a resize on Wayland as they cause flicker because
         // we want to fill the newly resized buffer ASAP, not at compositors convenience
@@ -847,11 +872,9 @@ render_os_window(OSWindow *w, monotonic_t now, bool ignore_render_frames, bool s
     }
     w->render_calls++;
     make_os_window_context_current(w);
-    if (w->live_resize.in_progress) blank_os_window(w);
     bool needs_render = w->redraw_count > 0 || w->live_resize.in_progress;
     if (w->viewport_size_dirty) {
-        w->clear_count = 0;
-        update_surface_size(w->viewport_width, w->viewport_height, 0);
+        set_gpu_viewport(w->viewport_width, w->viewport_height);
         w->viewport_size_dirty = false;
         needs_render = true;
     }
@@ -869,7 +892,7 @@ render_os_window(OSWindow *w, monotonic_t now, bool ignore_render_frames, bool s
 
 static void
 render(monotonic_t now, bool input_read) {
-    EVDBG("input_read: %d, check_for_active_animated_images: %d", input_read, global_state.check_for_active_animated_images);
+    EVDBG("input_read: %d, check_for_active_animated_images: %d\n", input_read, global_state.check_for_active_animated_images);
     static monotonic_t last_render_at = MONOTONIC_T_MIN;
     monotonic_t time_since_last_render = last_render_at == MONOTONIC_T_MIN ? OPT(repaint_delay) : now - last_render_at;
     if (!input_read && time_since_last_render < OPT(repaint_delay)) {
@@ -886,10 +909,17 @@ render(monotonic_t now, bool input_read) {
         // rendering is done in cocoa_os_window_resized()
         if (w->live_resize.in_progress) continue;
 #endif
-        if (!render_os_window(w, now, false, scan_for_animated_images)) {
+        if (!render_os_window(w, now, scan_for_animated_images)) {
             // since we didn't scan the window for animations, force a rescan on next wakeup/render frame
             if (scan_for_animated_images) global_state.check_for_active_animated_images = true;
         }
+        if (w->keep_rendering_till_swap) {
+            debug_rendering("Re-rendering window %llu on the %u attempt since swap did not happen\n", w->id, w->keep_rendering_till_swap);
+            set_maximum_wait(OPT(repaint_delay));
+            w->needs_render = true;
+            w->keep_rendering_till_swap--;
+        }
+
     }
     last_render_at = now;
 #undef TD
@@ -1088,8 +1118,11 @@ close_os_window(ChildMonitor *self, OSWindow *os_window) {
     if (os_window->before_fullscreen.is_set && is_os_window_fullscreen(os_window)) {
         w = os_window->before_fullscreen.w; h = os_window->before_fullscreen.h;
     }
+    int x = 0, y = 0;
+    if (os_window->handle && !global_state.is_wayland) glfwGetWindowPos(os_window->handle, &x, &y);
+    bool is_layer_shell = os_window->is_layer_shell;
     destroy_os_window(os_window);
-    call_boss(on_os_window_closed, "Kii", os_window->id, w, h);
+    call_boss(on_os_window_closed, "KiiiiO", os_window->id, x, y, w, h, is_layer_shell ? Py_True : Py_False);
     for (size_t t=0; t < os_window->num_tabs; t++) {
         Tab *tab = os_window->tabs + t;
         for (size_t w = 0; w < tab->num_windows; w++) mark_child_for_close(self, tab->windows[w].id);
@@ -1203,8 +1236,14 @@ process_cocoa_pending_actions(void) {
     if (cocoa_pending_actions[CLOSE_WINDOW]) { call_boss(close_window, NULL); }
     if (cocoa_pending_actions[RESET_TERMINAL]) { call_boss(clear_terminal, "sO", "reset", Py_True ); }
     if (cocoa_pending_actions[CLEAR_TERMINAL_AND_SCROLLBACK]) { call_boss(clear_terminal, "sO", "to_cursor", Py_True ); }
+    if (cocoa_pending_actions[CLEAR_SCROLLBACK]) { call_boss(clear_terminal, "sO", "scrollback", Py_True ); }
+    if (cocoa_pending_actions[CLEAR_SCREEN]) { call_boss(clear_terminal, "sO", "to_cursor_scroll", Py_True ); }
+    if (cocoa_pending_actions[CLEAR_LAST_COMMAND]) { call_boss(clear_terminal, "sO", "last_command", Py_True ); }
     if (cocoa_pending_actions[RELOAD_CONFIG]) { call_boss(load_config_file, NULL); }
     if (cocoa_pending_actions[TOGGLE_MACOS_SECURE_KEYBOARD_ENTRY]) { call_boss(toggle_macos_secure_keyboard_entry, NULL); }
+    if (cocoa_pending_actions[MACOS_CYCLE_THROUGH_OS_WINDOWS]) { call_boss(macos_cycle_through_os_windows, NULL); }
+    if (cocoa_pending_actions[MACOS_CYCLE_THROUGH_OS_WINDOWS_BACKWARDS]) { call_boss(macos_cycle_through_os_windows_backwards, NULL); }
+    if (cocoa_pending_actions[SEARCH_SCROLLBACK]) { call_boss(search_scrollback_in_active, NULL); }
     if (cocoa_pending_actions[TOGGLE_FULLSCREEN]) { call_boss(toggle_fullscreen, NULL); }
     if (cocoa_pending_actions[OPEN_KITTY_WEBSITE]) { call_boss(open_kitty_website, NULL); }
     if (cocoa_pending_actions[HIDE]) { call_boss(hide_macos_app, NULL); }
@@ -1610,7 +1649,7 @@ io_loop(void *data) {
 typedef struct {
     id_type id;
     size_t num_of_unresponded_messages_sent_to_main_thread, fd_array_idx;
-    bool finished_reading;
+    bool finished_reading, waiting_for_async_response;
     int fd;
     struct {
         char *data;
@@ -1656,12 +1695,41 @@ add_peer(int peer, bool is_remote_control_peer) {
 }
 
 static bool
+getpeerid(int fd, uid_t *euid, gid_t *egid) {
+#ifdef __linux__
+    struct ucred cr;
+    socklen_t sz = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &sz) != 0) return false;
+    *euid = cr.uid; *egid = cr.gid;
+#else
+    if (getpeereid(fd, euid, egid) != 0) return false;
+#endif
+    return true;
+}
+
+
+static bool
 accept_peer(int listen_fd, bool shutting_down, bool is_remote_control_peer) {
     int peer = accept(listen_fd, NULL, NULL);
     if (UNLIKELY(peer == -1)) {
         if (errno == EINTR) return true;
         if (!shutting_down) perror("accept() on talk socket failed!");
         return false;
+    }
+    if (verify_peer_uid) {
+        uid_t peer_uid; gid_t peer_gid;
+        if (!getpeerid(peer, &peer_uid, &peer_gid)) {
+            log_error("Denying access to peer because failed to get uid and gid for peer: %d with error: %s", peer, strerror(errno));
+            shutdown(peer, SHUT_RDWR);
+            safe_close(peer, __FILE__, __LINE__);
+            return true;
+        }
+        if (peer_uid != geteuid()) {
+            log_error("Denying access to peer because its uid (%d) does not match our uid (%d)", peer_uid, geteuid());
+            shutdown(peer, SHUT_RDWR);
+            safe_close(peer, __FILE__, __LINE__);
+            return true;
+        }
     }
     add_peer(peer, is_remote_control_peer);
     return true;
@@ -1788,7 +1856,7 @@ prune_peers(ChildMonitor *self) {
     bool pruned = false;
     for (size_t idx = talk_data.num_peers; idx-- > 0;) {
         Peer *p = talk_data.peers + idx;
-        if (p->read.finished && !p->num_of_unresponded_messages_sent_to_main_thread && !p->write.used) {
+        if (p->read.finished && !p->num_of_unresponded_messages_sent_to_main_thread && !p->write.used && !p->waiting_for_async_response) {
             notify_on_peer_removal(self, p);
             free_peer(p);
             remove_i_from_array(talk_data.peers, idx, talk_data.num_peers);
@@ -1887,13 +1955,17 @@ talk_loop(void *data) {
             for (size_t k = 0; k < talk_data.num_peers; k++) {
                 Peer *p = talk_data.peers + k;
                 if (p->fd_array_idx) {
-                    if (fds[p->fd_array_idx].revents & (POLLIN | POLLHUP)) read_from_peer(self, p);
+                    if (fds[p->fd_array_idx].revents & POLLIN) read_from_peer(self, p);
                     if (fds[p->fd_array_idx].revents & POLLOUT) write_to_peer(p);
+                    if (fds[p->fd_array_idx].revents & POLLHUP) {
+                        // try to read and write nonetheless these functions will set the failed flags.
+                        if (!p->read.finished) read_from_peer(self, p);
+                        if (p->write.used) write_to_peer(p);
+                    }
                     if (fds[p->fd_array_idx].revents & POLLNVAL) {
                         p->read.finished = true;
                         p->write.failed = true; p->write.used = 0;
                     }
-                    break;
                 }
             }
         } else if (ret < 0) { if (errno != EAGAIN && errno != EINTR) perror("poll() on talk fds failed"); }
@@ -1906,12 +1978,13 @@ end:
 }
 
 static void
-send_response_to_peer(id_type peer_id, const char *msg, size_t msg_sz) {
+send_response_to_peer(id_type peer_id, const char *msg, size_t msg_sz, bool is_async_response) {
     bool wakeup = false;
     talk_mutex(lock);
     for (size_t i = 0; i < talk_data.num_peers; i++) {
         Peer *peer = talk_data.peers + i;
         if (peer->id == peer_id) {
+            peer->waiting_for_async_response = is_async_response;
             if (peer->num_of_unresponded_messages_sent_to_main_thread) peer->num_of_unresponded_messages_sent_to_main_thread--;
             if (!peer->write.failed) {
                 if (peer->write.capacity - peer->write.used < msg_sz) {
@@ -1989,33 +2062,14 @@ static PyObject*
 send_data_to_peer(PyObject *self UNUSED, PyObject *args) {
     char * msg; Py_ssize_t sz;
     unsigned long long peer_id;
-    if (!PyArg_ParseTuple(args, "Ks#", &peer_id, &msg, &sz)) return NULL;
-    send_response_to_peer(peer_id, msg, sz);
+    int is_async_response = 0;
+    if (!PyArg_ParseTuple(args, "Ks#|p", &peer_id, &msg, &sz, &is_async_response)) return NULL;
+    send_response_to_peer(peer_id, msg, sz, is_async_response);
     Py_RETURN_NONE;
-}
-
-static PyObject *
-random_unix_socket(PyObject *self UNUSED, PyObject *args UNUSED) {
-#ifndef SO_PASSCRED
-    errno = ENOTSUP;
-    return PyErr_SetFromErrno(PyExc_OSError);
-#else
-    int fd, optval = 1;
-    struct sockaddr_un bind_addr = {.sun_family=AF_UNIX};
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return PyErr_SetFromErrno(PyExc_OSError);
-    if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &optval, sizeof optval) != 0) goto fail;
-    if (bind(fd, (struct sockaddr *)&bind_addr, sizeof(sa_family_t)) != 0) goto fail;
-    return PyLong_FromLong((long)fd);
-fail:
-    safe_close(fd, __FILE__, __LINE__);
-    return PyErr_SetFromErrno(PyExc_OSError);
-#endif
 }
 
 static PyMethodDef module_methods[] = {
     METHODB(safe_pipe, METH_VARARGS),
-    METHODB(random_unix_socket, METH_NOARGS),
     {"add_timer", (PyCFunction)add_python_timer, METH_VARARGS, ""},
     {"remove_timer", (PyCFunction)remove_python_timer, METH_VARARGS, ""},
     METHODB(monitor_pid, METH_VARARGS),

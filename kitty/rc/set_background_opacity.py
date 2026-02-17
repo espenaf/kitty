@@ -2,7 +2,7 @@
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import (
     MATCH_TAB_OPTION,
@@ -60,7 +60,7 @@ equal to the specified value, otherwise it will be set to the specified value.
             'all': opts.all, 'match_tab': opts.match_tab, 'toggle': opts.toggle,
         }
 
-    def response_from_kitty(self, boss: Boss, window: Optional[Window], payload_get: PayloadGetType) -> ResponseType:
+    def response_from_kitty(self, boss: Boss, window: Window | None, payload_get: PayloadGetType) -> ResponseType:
         from kitty.fast_data_types import background_opacity_of, get_options
         opts = get_options()
         if not opts.dynamic_background_opacity:
@@ -70,7 +70,10 @@ equal to the specified value, otherwise it will be set to the specified value.
             val: float = payload_get('opacity') or 0.
             if payload_get('toggle'):
                 current = background_opacity_of(os_window_id)
-                if current == val:
+                # GLFW represents opacity as a float internally, but python's
+                # "float" type has double precision, so we can't rely on precise
+                # equality here
+                if current is not None and abs(current - val) <= 0.0001:
                     val = opts.background_opacity
             boss._set_os_window_background_opacity(os_window_id, val)
         return None

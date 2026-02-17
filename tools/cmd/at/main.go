@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,15 +18,15 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"kitty"
-	"kitty/tools/cli"
-	"kitty/tools/crypto"
-	"kitty/tools/tty"
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/utils/base85"
-	"kitty/tools/utils/shlex"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/crypto"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/base85"
+	"github.com/kovidgoyal/kitty/tools/utils/shlex"
 )
 
 const lowerhex = "0123456789abcdef"
@@ -184,7 +185,7 @@ func (self *ResponseData) UnmarshalJSON(data []byte) error {
 
 type Response struct {
 	Ok        bool         `json:"ok"`
-	Data      ResponseData `json:"data,omitempty"`
+	Data      ResponseData `json:"data"`
 	Error     string       `json:"error,omitempty"`
 	Traceback string       `json:"tb,omitempty"`
 }
@@ -326,8 +327,22 @@ func get_password(password string, password_file string, password_env string, us
 					ttyf.Close()
 				}
 			}
+		} else if strings.HasPrefix(password_file, "fd:") {
+			var fd int
+			if fd, err = strconv.Atoi(password_file[3:]); err == nil {
+				f := os.NewFile(uintptr(fd), password_file)
+				var q []byte
+				if q, err = io.ReadAll(f); err == nil {
+					ans.is_set = true
+					ans.val = string(q)
+				}
+				f.Close()
+			}
 		} else {
 			var q []byte
+			if !filepath.IsAbs(password_file) {
+				password_file = filepath.Join(utils.ConfigDir(), password_file)
+			}
 			q, err = os.ReadFile(password_file)
 			if err == nil {
 				ans.is_set, ans.val = true, strings.TrimRight(string(q), " \n\t")

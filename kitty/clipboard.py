@@ -3,11 +3,11 @@
 
 import io
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum, IntEnum
 from gettext import gettext as _
 from tempfile import TemporaryFile
-from typing import IO, Callable, NamedTuple, Optional, Union
+from typing import IO, NamedTuple, Union
 
 from .conf.utils import uniq
 from .constants import supports_primary_selection
@@ -22,13 +22,16 @@ from .fast_data_types import (
     get_options,
     set_clipboard_data_types,
 )
+from .typing_compat import WindowType
 from .utils import log_error
+
+READ_RESPONSE_CHUNK_SIZE = 4096
 
 
 class Tempfile:
 
     def __init__(self, max_size: int) -> None:
-        self.file: Union[io.BytesIO, IO[bytes]] = io.BytesIO()
+        self.file: io.BytesIO | IO[bytes] = io.BytesIO()
         self.max_size = max_size
 
     def rollover_if_needed(self, sz: int) -> None:
@@ -74,11 +77,15 @@ TARGETS_MIME = '.'
 class ClipboardType(IntEnum):
     clipboard = GLFW_CLIPBOARD
     primary_selection = GLFW_PRIMARY_SELECTION
+    unknown = -311
 
     @staticmethod
     def from_osc52_where_field(where: str) -> 'ClipboardType':
-        where = where or 's0'
-        return ClipboardType.clipboard if 'c' in where or 's' in where else ClipboardType.primary_selection
+        if where in ('c', 's'):
+            return ClipboardType.clipboard
+        if where == 'p':
+            return ClipboardType.primary_selection
+        return ClipboardType.unknown
 
 
 class Clipboard:
@@ -88,7 +95,7 @@ class Clipboard:
         self.clipboard_type = clipboard_type
         self.enabled = self.clipboard_type is ClipboardType.clipboard or supports_primary_selection
 
-    def set_text(self, x: Union[str, bytes]) -> None:
+    def set_text(self, x: str | bytes) -> None:
         if isinstance(x, str):
             x = x.encode('utf-8')
         self.set_mime({'text/plain': x})
@@ -153,7 +160,7 @@ class Clipboard:
         return data()
 
 
-def set_clipboard_string(x: Union[str, bytes]) -> None:
+def set_clipboard_string(x: str | bytes) -> None:
     get_boss().clipboard.set_text(x)
 
 
@@ -161,7 +168,7 @@ def get_clipboard_string() -> str:
     return get_boss().clipboard.get_text()
 
 
-def set_primary_selection(x: Union[str, bytes]) -> None:
+def set_primary_selection(x: str | bytes) -> None:
     get_boss().primary_selection.set_text(x)
 
 
@@ -194,7 +201,7 @@ def encode_mime(x: str) -> str:
 
 
 def decode_metadata_value(k: str, x: str) -> str:
-    if k == 'mime':
+    if k in ('mime', 'name', 'pw'):
         import base64
         x = base64.standard_b64decode(x).decode('utf-8')
     return x
@@ -205,8 +212,14 @@ class ReadRequest(NamedTuple):
     mime_types: tuple[str, ...] = ('text/plain',)
     id: str = ''
     protocol_type: ProtocolType = ProtocolType.osc_52
+    human_name: str = ''
+    password: str = ''
+    otp_for_response: str = ''
 
-    def encode_response(self, status: str = 'DATA', mime: str = '', payload: bytes = b'') -> bytes:
+    def encode_response(self, status: str = 'DATA', mime: str = '', payload: bytes | memoryview = b'') -> bytes:
+        from base64 import standard_b64encode
+        def encode_b64(s: str) -> str:
+            return standard_b64encode(s.encode()).decode()
         ans = f'{self.protocol_type.value};type=read:status={status}'
         if status == 'OK' and self.is_primary_selection:
             ans += ':loc=primary'
@@ -214,10 +227,11 @@ class ReadRequest(NamedTuple):
             ans += f':id={self.id}'
         if mime:
             ans += f':mime={encode_mime(mime)}'
+        if self.otp_for_response:
+            ans += f':pw={encode_b64(self.otp_for_response)}'
         a = ans.encode('ascii')
         if payload:
-            import base64
-            a += b';' + base64.standard_b64encode(payload)
+            a += b';' + standard_b64encode(payload)
         return a
 
 
@@ -236,9 +250,11 @@ class WriteRequest:
 
     def __init__(
         self, is_primary_selection: bool = False, protocol_type: ProtocolType = ProtocolType.osc_52, id: str = '',
-        rollover_size: int = 16 * 1024 * 1024, max_size: int = -1,
+        rollover_size: int = 16 * 1024 * 1024, max_size: int = -1, human_name: str = '', password: str = '',
     ) -> None:
         self.decoder = StreamingBase64Decoder()
+        self.human_name = human_name
+        self.password = password
         self.id = id
         self.is_primary_selection = is_primary_selection
         self.protocol_type = protocol_type
@@ -249,6 +265,8 @@ class WriteRequest:
         self.max_size = (get_options().clipboard_max_size * 1024 * 1024) if max_size < 0 else max_size
         self.aliases: dict[str, str] = {}
         self.committed = False
+        self.permission_pending = True
+        self.commit_pending = False
 
     def encode_response(self, status: str = 'OK') -> bytes:
         ans = f'{self.protocol_type.value};type=write:status={status}'
@@ -260,7 +278,11 @@ class WriteRequest:
     def commit(self) -> None:
         if self.committed:
             return
+        if self.permission_pending:
+            self.commit_pending = True
+            return
         self.committed = True
+        self.commit_pending = False
         cp = get_boss().primary_selection if self.is_primary_selection else get_boss().clipboard
         if cp.enabled:
             for alias, src in self.aliases.items():
@@ -270,7 +292,7 @@ class WriteRequest:
             x = {mime: self.tempfile.create_chunker(pos.start, pos.size) for mime, pos in self.mime_map.items()}
             cp.set_mime(x)
 
-    def add_base64_data(self, data: Union[str, bytes], mime: str = 'text/plain') -> None:
+    def add_base64_data(self, data: str | bytes | memoryview, mime: str = 'text/plain') -> None:
         if isinstance(data, str):
             data = data.encode('ascii')
         if self.currently_writing_mime and self.currently_writing_mime != mime:
@@ -282,14 +304,21 @@ class WriteRequest:
 
     def flush_base64_data(self) -> None:
         if self.currently_writing_mime:
+            if self.decoder.needs_more_data():
+                log_error('Received incomplete data for clipboard')
             self.decoder.reset()
             start = self.mime_map[self.currently_writing_mime][0]
             self.mime_map[self.currently_writing_mime] = MimePos(start, self.tempfile.tell() - start)
             self.currently_writing_mime = ''
 
-    def write_base64_data(self, b: bytes) -> None:
+    def write_base64_data(self, b: bytes | memoryview) -> None:
         if not self.max_size_exceeded:
-            decoded = self.decoder.decode(b)
+            try:
+                decoded = self.decoder.decode(b)
+            except ValueError as e:
+                log_error(f'Clipboard write request has invalid data, ignoring this chunk of data. Error: {e}')
+                self.decoder.reset()
+                decoded = b''
             if decoded:
                 self.tempfile.write(decoded)
                 if self.max_size > 0 and self.tempfile.tell() > (self.max_size * 1024 * 1024):
@@ -303,12 +332,25 @@ class WriteRequest:
         return self.tempfile.read(start+offset, size)
 
 
+class GrantedPermission:
+
+    one_time: bool = False
+    write_ban: bool = False
+    read_ban: bool = False
+
+    def __init__(self, read: bool = False, write: bool = False, one_time: bool = False):
+        self.read, self.write = read, write
+        self.one_time = one_time
+
+
 class ClipboardRequestManager:
 
     def __init__(self, window_id: int) -> None:
         self.window_id = window_id
-        self.currently_asking_permission_for: Optional[ReadRequest] = None
-        self.in_flight_write_request: Optional[WriteRequest] = None
+        self.currently_asking_permission_for: ReadRequest | None = None
+        self.in_flight_write_request: WriteRequest | None = None
+        self.osc52_in_flight_write_requests: dict[ClipboardType, WriteRequest] = {}
+        self.granted_passwords: dict[str, GrantedPermission] = {}
 
     def parse_osc_5522(self, data: memoryview) -> None:
         import base64
@@ -335,13 +377,15 @@ class ClipboardRequestManager:
             rr = ReadRequest(
                 is_primary_selection=m.get('loc', '') == 'primary',
                 mime_types=tuple(payload.decode('utf-8').split()),
-                protocol_type=ProtocolType.osc_5522, id=sanitize_id(m.get('id', ''))
+                protocol_type=ProtocolType.osc_5522, id=sanitize_id(m.get('id', '')),
+                human_name=m.get('name', ''), password=m.get('pw', ''),
             )
             self.handle_read_request(rr)
         elif typ == 'write':
             self.in_flight_write_request = WriteRequest(
                 is_primary_selection=m.get('loc', '') == 'primary',
-                protocol_type=ProtocolType.osc_5522, id=sanitize_id(m.get('id', ''))
+                protocol_type=ProtocolType.osc_5522, id=sanitize_id(m.get('id', '')),
+                human_name=m.get('name', ''), password=m.get('pw', ''),
             )
             self.handle_write_request(self.in_flight_write_request)
         elif typ == 'walias':
@@ -371,11 +415,17 @@ class ClipboardRequestManager:
                     self.in_flight_write_request = None
                     raise
             else:
-                wr.flush_base64_data()
-                wr.commit()
-                self.in_flight_write_request = None
-                if w is not None:
-                    w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='DONE'))
+                self.commit_write_request(wr)
+
+    def commit_write_request(self, wr: WriteRequest, needs_flush: bool = True) -> None:
+        if needs_flush:
+            wr.flush_base64_data()
+        wr.commit()
+        if wr.committed:
+            self.in_flight_write_request = None
+            w = get_boss().window_id_map.get(self.window_id)
+            if w is not None:
+                w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='DONE'))
 
     def parse_osc_52(self, data: memoryview, is_partial: bool = False) -> None:
         idx = find_in_memoryview(data, ord(b';'))
@@ -385,18 +435,22 @@ class ClipboardRequestManager:
         else:
             where = str(data, "utf-8", 'replace')
             data = data[len(data):]
+        destinations = {ClipboardType.from_osc52_where_field(where) for where in where or 's0'}
+        destinations.discard(ClipboardType.unknown)
         if len(data) == 1 and data.tobytes() == b'?':
-            rr = ReadRequest(is_primary_selection=ClipboardType.from_osc52_where_field(where) is ClipboardType.primary_selection)
-            self.handle_read_request(rr)
+            for d in destinations:
+                rr = ReadRequest(is_primary_selection=d is ClipboardType.primary_selection)
+                self.handle_read_request(rr)
         else:
-            wr = self.in_flight_write_request
-            if wr is None:
-                wr = self.in_flight_write_request = WriteRequest(ClipboardType.from_osc52_where_field(where) is ClipboardType.primary_selection)
-            wr.add_base64_data(data)
-            if is_partial:
-                return
-            self.in_flight_write_request = None
-            self.handle_write_request(wr)
+            for d in destinations:
+                wr = self.osc52_in_flight_write_requests.get(d)
+                if wr is None:
+                    wr = self.osc52_in_flight_write_requests[d] = WriteRequest(d is ClipboardType.primary_selection)
+                wr.add_base64_data(data)
+                if is_partial:
+                    return
+                self.osc52_in_flight_write_requests.pop(d, None)
+                self.handle_write_request(wr)
 
     def handle_write_request(self, wr: WriteRequest) -> None:
         wr.flush_base64_data()
@@ -405,15 +459,83 @@ class ClipboardRequestManager:
         self.fulfill_write_request(wr, allowed)
 
     def fulfill_write_request(self, wr: WriteRequest, allowed: bool = True) -> None:
+        wr.permission_pending = not allowed
         if wr.protocol_type is ProtocolType.osc_52:
             self.fulfill_legacy_write_request(wr, allowed)
             return
-        w = get_boss().window_id_map.get(self.window_id)
         cp = get_boss().primary_selection if wr.is_primary_selection else get_boss().clipboard
-        if not allowed or not cp.enabled:
+        w = get_boss().window_id_map.get(self.window_id)
+        if w is None:
             self.in_flight_write_request = None
-            if w is not None:
-                w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='EPERM' if not allowed else 'ENOSYS'))
+            return
+        if not cp.enabled:
+            self.in_flight_write_request = None
+            w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='ENOSYS'))
+            return
+        if not allowed:
+            if wr.password and wr.human_name:
+                if self.password_is_allowed_already(wr.password, for_write=True):
+                    wr.permission_pending = False
+                else:
+                    wid = w.id
+                    def callback(granted: bool) -> None:
+                        if wr is not self.in_flight_write_request:
+                            return
+                        if granted:
+                            wr.permission_pending = False
+                            if wr.commit_pending:
+                                self.commit_write_request(wr, needs_flush=False)
+                        else:
+                            w = get_boss().window_id_map.get(wid)
+                            if w is not None:
+                                w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='EPERM'))
+                        self.in_flight_write_request = None
+
+                    self.request_permission(w, wr.human_name, wr.password, callback, for_write=True)
+            else:
+                self.in_flight_write_request = None
+                w.screen.send_escape_code_to_child(ESC_OSC, wr.encode_response(status='EPERM'))
+
+    def request_permission(self, window: WindowType, human_name: str, password: str, callback: Callable[[bool], None], for_write: bool = False) -> None:
+        if (gp := self.granted_passwords.get(password)) and (gp.write_ban if for_write else gp.read_ban):
+            callback(False)
+            return
+
+        def cb(q: str) -> None:
+            p = self.granted_passwords.get(password)
+            if p is None:
+                p = self.granted_passwords[password] = GrantedPermission()
+            callback(q in ('a', 'w'))
+            match q:
+                case 'w':
+                    if for_write:
+                        p.write = True
+                    else:
+                        p.read = True
+                case 'b':
+                    if for_write:
+                        p.write = False
+                        p.write_ban = True
+                    else:
+                        p.read = False
+                        p.read_ban = True
+        if for_write:
+            msg = _('The program {0} running in this window wants to write to the system clipboard.')
+        else:
+            msg = _('The program {0} running in this window wants to read from the system clipboard.')
+        msg += '\n\n' + ('If you choose "Always" similar requests from this program will be automatically allowed for the rest of this session.')
+        msg += '\n\n' + ('If you choose "Ban" similar requests from this program will be automatically dis-allowed for the rest of this session.')
+        from kittens.tui.operations import styled
+        get_boss().choose(msg.format(styled(human_name, fg='yellow')), cb, 'a;green:Allow', 'w;yellow:Always', 'd;red:Deny', 'b;red:Ban',
+                          default='d', window=window, title=_('A program wants to access the clipboard'))
+
+    def password_is_allowed_already(self, password: str, for_write: bool = False) -> bool:
+        q = self.granted_passwords.get(password)
+        if q is not None:
+            if q.one_time:
+                self.granted_passwords.pop(password, None)
+            return q.write if for_write else q.read
+        return False
 
     def fulfill_legacy_write_request(self, wr: WriteRequest, allowed: bool = True) -> None:
         cp = get_boss().primary_selection if wr.is_primary_selection else get_boss().clipboard
@@ -433,6 +555,14 @@ class ClipboardRequestManager:
             self.ask_to_read_clipboard(rr)
         else:
             self.fulfill_read_request(rr, allowed=allowed)
+
+    def send_paste_event(self, is_primary_selection: bool) -> None:
+        from kitty.short_uuid import uuid4
+        pw = uuid4()
+        self.granted_passwords[pw] = GrantedPermission(read=True, one_time=True)
+        rr = ReadRequest(is_primary_selection=is_primary_selection, mime_types=(TARGETS_MIME,), protocol_type=ProtocolType.osc_5522)
+        rr = rr._replace(otp_for_response=pw)
+        self.fulfill_read_request(rr)
 
     def fulfill_read_request(self, rr: ReadRequest, allowed: bool = True) -> None:
         if rr.protocol_type is ProtocolType.osc_52:
@@ -455,8 +585,8 @@ class ClipboardRequestManager:
             assert w is not None
             mv = memoryview(data)
             while mv:
-                w.screen.send_escape_code_to_child(ESC_OSC, rr.encode_response(payload=mv[:4096], mime=current_mime))
-                mv = mv[4096:]
+                w.screen.send_escape_code_to_child(ESC_OSC, rr.encode_response(payload=mv[:READ_RESPONSE_CHUNK_SIZE], mime=current_mime))
+                mv = mv[READ_RESPONSE_CHUNK_SIZE:]
 
         for mime in rr.mime_types:
             current_mime = mime
@@ -499,11 +629,24 @@ class ClipboardRequestManager:
         w = get_boss().window_id_map.get(self.window_id)
         if w is not None:
             self.currently_asking_permission_for = rr
-            get_boss().confirm(_(
-                'A program running in this window wants to read from the system clipboard.'
-                ' Allow it to do so, once?'),
-                self.handle_clipboard_confirmation, window=w,
-            )
+            if rr.password and rr.human_name:
+                if self.password_is_allowed_already(rr.password):
+                    self.handle_clipboard_confirmation(True)
+                    return
+                if (p := self.granted_passwords.get(rr.password)) and p.read_ban:
+                    self.handle_clipboard_confirmation(False)
+                    return
+                self.request_permission(w, rr.human_name, rr.password, self.handle_clipboard_confirmation)
+            else:
+                if rr.human_name:
+                    msg = _(
+                    'The program {} running in this window wants to read from the system clipboard.'
+                    ' Allow it to do so, once?').format(rr.human_name)
+                else:
+                    msg = _(
+                    'A program running in this window wants to read from the system clipboard.'
+                    ' Allow it to do so, once?')
+                get_boss().confirm(msg, self.handle_clipboard_confirmation, window=w)
 
     def handle_clipboard_confirmation(self, confirmed: bool) -> None:
         rr = self.currently_asking_permission_for
@@ -514,3 +657,4 @@ class ClipboardRequestManager:
     def close(self) -> None:
         if self.in_flight_write_request is not None:
             self.in_flight_write_request = None
+        self.osc52_in_flight_write_requests.clear()

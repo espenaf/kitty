@@ -9,8 +9,7 @@
 #include <hb.h>
 #include <hb-ft.h>
 #include "charsets.h"
-#include "unicode-data.h"
-#include "wcwidth-std.h"
+#include "char-props.h"
 #include "wcswidth.h"
 #include FT_BITMAP_H
 #define ELLIPSIS 0x2026
@@ -25,7 +24,7 @@ typedef struct Face {
     hb_font_t *hb;
     FT_UInt pixel_size;
     int hinting, hintstyle;
-    struct Face *fallbacks;
+    struct Face **fallbacks;
     size_t count, capacity;
 } Face;
 
@@ -61,7 +60,7 @@ static void
 free_face(Face *face) {
     if (face->freetype) FT_Done_Face(face->freetype);
     if (face->hb) hb_font_destroy(face->hb);
-    for (size_t i = 0; i < face->count; i++) free_face(face->fallbacks + i);
+    for (size_t i = 0; i < face->count; i++) { free_face(face->fallbacks[i]); free(face->fallbacks[i]); }
     free(face->fallbacks);
     memset(face, 0, sizeof(Face));
 }
@@ -263,19 +262,21 @@ static Face*
 find_fallback_font_for(RenderCtx *ctx, char_type codep, char_type next_codep) {
     if (glyph_id_for_codepoint(&main_face, codep) > 0) return &main_face;
     for (size_t i = 0; i < main_face.count; i++) {
-        if (glyph_id_for_codepoint(main_face.fallbacks + i, codep) > 0) return main_face.fallbacks + i;
+        if (glyph_id_for_codepoint(main_face.fallbacks[i], codep) > 0) return main_face.fallbacks[i];
     }
     FontConfigFace q;
     bool prefer_color = false;
     char_type string[3] = {codep, next_codep, 0};
-    if (wcswidth_string(string) >= 2 && is_emoji_presentation_base(codep)) prefer_color = true;
+    if (wcswidth_string(string) >= 2 && char_props_for(codep).is_emoji_presentation_base) prefer_color = true;
     if (!fallback_font(codep, main_face_family.name, main_face_family.bold, main_face_family.italic, prefer_color, &q)) return NULL;
     ensure_space_for(&main_face, fallbacks, Face, main_face.count + 1, capacity, 8, true);
-    Face *ans = main_face.fallbacks + main_face.count;
+    Face *ans = calloc(1, sizeof(Face));
+    if (!ans) fatal("Out of memory");
     bool ok = load_font(&q, ans);
     if (PyErr_Occurred()) PyErr_Print();
     free(q.path);
-    if (!ok) return NULL;
+    if (!ok) { free(ans); return NULL; }
+    main_face.fallbacks[main_face.count] = ans;
     main_face.count++;
     return ans;
 }
@@ -409,7 +410,7 @@ static bool
 process_codepoint(RenderCtx *ctx, RenderState *rs, char_type codep, char_type next_codep) {
     bool add_to_current_buffer = false;
     Face *fallback_font = NULL;
-    if (is_combining_char(codep)) {
+    if (char_props_for(codep).is_combining_char) {
         add_to_current_buffer = true;
     } else if (glyph_id_for_codepoint(&main_face, codep) > 0) {
         add_to_current_buffer = rs->current_face == &main_face;
@@ -521,15 +522,16 @@ uint8_t*
 render_single_ascii_char_as_mask(FreeTypeRenderCtx ctx_, const char ch, size_t *result_width, size_t *result_height) {
     RenderCtx *ctx = (RenderCtx*)ctx_;
     if (!ctx->created) { PyErr_SetString(PyExc_RuntimeError, "freetype render ctx not created"); return NULL; }
-    RAII_TempFontData(temp);
+    size_t avail_height = *result_height;
+    if (avail_height < 4) { PyErr_Format(PyExc_ValueError, "Invalid available height: %zu", avail_height); return NULL; }
     Face *face = &main_face;
+    RAII_TempFontData(temp);
+    temp.face = face; temp.orig_sz = face->pixel_size;
+    set_pixel_size(ctx, face, avail_height, false);
     int glyph_index = FT_Get_Char_Index(face->freetype, ch);
     if (!glyph_index) { PyErr_Format(PyExc_KeyError, "character %c not found in font", ch); return NULL; }
     unsigned int height = font_units_to_pixels_y(face->freetype, face->freetype->height);
-    size_t avail_height = *result_height;
-    if (avail_height < 4) { PyErr_Format(PyExc_ValueError, "Invalid available height: %zu", avail_height); return NULL; }
     float ratio = ((float)height) / avail_height;
-    temp.face = face; temp.orig_sz = face->pixel_size;
     face->pixel_size = (FT_UInt)(face->pixel_size / ratio);
     if (face->pixel_size != temp.orig_sz) FT_Set_Pixel_Sizes(face->freetype, avail_height, avail_height);
     int error = FT_Load_Glyph(face->freetype, glyph_index, get_load_flags(face->hinting, face->hintstyle, FT_LOAD_DEFAULT));
@@ -552,7 +554,6 @@ render_single_ascii_char_as_mask(FreeTypeRenderCtx ctx_, const char ch, size_t *
             break;
         default:
             PyErr_Format(PyExc_TypeError, "Unknown FreeType bitmap type: 0x%x", face->freetype->glyph->bitmap.pixel_mode);
-            return false;
             break;
     }
     return rendered;

@@ -30,10 +30,8 @@
 #include <Carbon/Carbon.h>
 #if defined(__OBJC__)
 #import <Cocoa/Cocoa.h>
-#import <CoreVideo/CoreVideo.h>
 #else
 typedef void* id;
-typedef void* CVDisplayLinkRef;
 #endif
 
 // NOTE: Many Cocoa enum values have been renamed and we need to build across
@@ -69,7 +67,7 @@ typedef void* CVDisplayLinkRef;
 typedef int (* GLFWcocoatextinputfilterfun)(int,int,unsigned int, unsigned long);
 typedef bool (* GLFWapplicationshouldhandlereopenfun)(int);
 typedef bool (* GLFWhandleurlopen)(const char*);
-typedef void (* GLFWapplicationwillfinishlaunchingfun)(void);
+typedef void (* GLFWapplicationwillfinishlaunchingfun)(bool);
 typedef bool (* GLFWcocoatogglefullscreenfun)(GLFWwindow*);
 typedef void (* GLFWcocoarenderframefun)(GLFWwindow*);
 
@@ -118,6 +116,13 @@ typedef void* (*PFN_TISGetInputSourceProperty)(TISInputSourceRef,CFStringRef);
 typedef UInt8 (*PFN_LMGetKbdType)(void);
 #define LMGetKbdType _glfw.ns.tis.GetKbdType
 
+typedef struct _GLFWDropData {
+    const char **mimes;
+    size_t mimes_count;
+    id pasteboard;
+    id data_mapping;
+    id file_promise_mapping;
+} _GLFWDropData;
 
 // Cocoa-specific per-window data
 //
@@ -140,6 +145,10 @@ typedef struct _GLFWwindowNS
     int             fbWidth, fbHeight;
     float           xscale, yscale;
     int             blur_radius;
+    bool live_resize_in_progress;
+    struct {
+        struct { CGFloat red, green, blue, alpha; bool was_set; } color; bool transparent;
+    } last_applied_titlebar_settings;
 
     // The total sum of the distances the cursor has been warped
     // since the last cursor motion event was processed
@@ -152,20 +161,30 @@ typedef struct _GLFWwindowNS
     GLFWcocoatogglefullscreenfun toggleFullscreenCallback;
     // Dead key state
     UInt32 deadKeyState;
+
+    // Layer shell windows
+    struct {
+        bool is_active;
+        GLFWLayerShellConfig config;
+    } layer_shell;
+
     // Whether a render frame has been requested for this window
     bool renderFrameRequested;
     GLFWcocoarenderframefun renderFrameCallback;
     // update cursor after switching desktops with Mission Control
     bool delayed_cursor_update_requested;
     GLFWcocoarenderframefun resizeCallback;
-} _GLFWwindowNS;
 
-typedef struct _GLFWDisplayLinkNS
-{
-    CVDisplayLinkRef displayLink;
-    CGDirectDisplayID displayID;
-    monotonic_t lastRenderFrameRequestedAt, first_unserviced_render_frame_request_at;
-} _GLFWDisplayLinkNS;
+    // Cached MIME types from drag enter (for move events)
+    _GLFWDropData drop_data;
+
+    // Pending drag source data requests (for cleanup on cancellation)
+    // Current drag operation type for NSDraggingSource
+    int dragOperations;  // Bitfield of GLFWDragOperationType
+    GLFWDragSourceData** pendingDragSourceData;
+    int pendingDragSourceDataCount;
+    int pendingDragSourceDataCapacity;
+} _GLFWwindowNS;
 
 // Cocoa-specific global data
 //
@@ -190,6 +209,7 @@ typedef struct _GLFWlibraryNS
     double              restoreCursorPosX, restoreCursorPosY;
     // The window whose disabled cursor mode is active
     _GLFWwindow*        disabledCursorWindow;
+    pid_t           previous_front_most_application;
 
     struct {
         CFBundleRef     bundle;
@@ -199,10 +219,6 @@ typedef struct _GLFWlibraryNS
         CFStringRef     kPropertyUnicodeKeyLayoutData;
     } tis;
 
-    struct {
-        _GLFWDisplayLinkNS entries[256];
-        size_t count;
-    } displayLinks;
     // the callback to handle url open events
     GLFWhandleurlopen url_open_callback;
 
@@ -244,12 +260,15 @@ float _glfwTransformYNS(float y);
 
 void* _glfwLoadLocalVulkanLoaderNS(void);
 
+
+// display links
 void _glfwClearDisplayLinks(void);
 void _glfwRestartDisplayLinks(void);
+unsigned _glfwCreateDisplayLink(CGDirectDisplayID);
+void _glfwRequestRenderFrame(_GLFWwindow *w);
+
+// event loop
 void _glfwDispatchTickCallback(void);
-void _glfwDispatchRenderFrame(CGDirectDisplayID);
-void _glfwShutdownCVDisplayLink(unsigned long long, void*);
 void _glfwCocoaPostEmptyEvent(void);
-void _glfw_create_cv_display_link(_GLFWDisplayLinkNS *entry);
-_GLFWDisplayLinkNS* _glfw_create_display_link(CGDirectDisplayID);
+
 uint32_t vk_to_unicode_key_with_current_layout(uint16_t keycode);

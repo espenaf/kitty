@@ -58,6 +58,36 @@ window_title_in(PyObject *title_in) {
     return ALL;
 }
 
+static inline ScrollbarVisibilityPolicy
+scrollbar(PyObject *src) {
+    const char *q = PyUnicode_AsUTF8(src);
+    switch (q[0]) {
+        case 'a': return SCROLLBAR_ALWAYS;
+        case 'n': return SCROLLBAR_NEVER;
+        case 'h': return SCROLLBAR_ON_HOVERED;
+        case 's':
+            return strcmp(q, "scrolled") == 0 ? SCROLLBAR_ON_SCROLLED : SCROLLBAR_ON_SCROLL_AND_HOVER;
+    }
+    return SCROLLBAR_ON_SCROLLED;
+}
+
+static inline unsigned
+undercurl_style(PyObject *x) {
+    RAII_PyObject(thick, PyUnicode_FromString("thick"));
+    RAII_PyObject(dense, PyUnicode_FromString("dense"));
+    unsigned ans = 0;
+    int ret;
+    switch ((ret = PyUnicode_Find(x, dense, 0, PyUnicode_GET_LENGTH(x), 1))) {
+        case -2: PyErr_Clear(); case -1: break;
+        default: ans |= 1;
+    }
+    switch ((ret = PyUnicode_Find(x, thick, 0, PyUnicode_GET_LENGTH(x), 1))) {
+        case -2: PyErr_Clear(); case -1: break;
+        default: ans |= 2;
+    }
+    return ans;
+}
+
 static inline UnderlineHyperlinks
 underline_hyperlinks(PyObject *x) {
     const char *in = PyUnicode_AsUTF8(x);
@@ -180,6 +210,28 @@ visual_bell_duration(PyObject *src, Options *opts) {
 
 #undef parse_animation
 
+static inline void
+mouse_hide_wait(PyObject *val, Options *opts) {
+    if (!PyTuple_Check(val) || PyTuple_GET_SIZE(val) != 4) {
+        PyErr_SetString(PyExc_TypeError, "mouse_hide_wait is not a 4-item tuple");
+        return;
+    }
+    opts->mouse_hide.hide_wait = parse_s_double_to_monotonic_t(PyTuple_GET_ITEM(val, 0));
+    opts->mouse_hide.unhide_wait = parse_s_double_to_monotonic_t(PyTuple_GET_ITEM(val, 1));
+    opts->mouse_hide.unhide_threshold = PyLong_AsLong(PyTuple_GET_ITEM(val, 2));
+    opts->mouse_hide.scroll_unhide = PyObject_IsTrue(PyTuple_GET_ITEM(val, 3));
+}
+
+static inline void
+cursor_trail_decay(PyObject *src, Options *opts) {
+    opts->cursor_trail_decay_fast = PyFloat_AsFloat(PyTuple_GET_ITEM(src, 0));
+    opts->cursor_trail_decay_slow = PyFloat_AsFloat(PyTuple_GET_ITEM(src, 1));
+}
+
+static inline void
+cursor_trail_color(PyObject *src, Options *opts) {
+    opts->cursor_trail_color = color_or_none_as_int(src);
+}
 
 static void
 parse_font_mod_size(PyObject *val, float *sz, AdjustmentUnit *unit) {
@@ -193,7 +245,7 @@ parse_font_mod_size(PyObject *val, float *sz, AdjustmentUnit *unit) {
 
 static inline void
 modify_font(PyObject *mf, Options *opts) {
-#define S(which) { PyObject *v = PyDict_GetItemString(mf, #which); if (v) parse_font_mod_size(v, &opts->which.val, &opts->which.unit); }
+#define S(which) { PyObject *v = PyDict_GetItemString(mf, #which); if (v) parse_font_mod_size(v, &opts->which.val, &opts->which.unit); else zero_at_ptr(&opts->which); }
     S(underline_position); S(underline_thickness); S(strikethrough_thickness); S(strikethrough_position);
     S(cell_height); S(cell_width); S(baseline);
 #undef S
@@ -278,6 +330,12 @@ pointer_shape(PyObject *shape_name) {
     return TEXT_POINTER;
 }
 
+static inline void
+dragging_pointer_shape(PyObject *parts, Options *opts) {
+    opts->pointer_shape_when_dragging = pointer_shape(PyTuple_GET_ITEM(parts, 0));
+    opts->pointer_shape_when_dragging_rectangle = pointer_shape(PyTuple_GET_ITEM(parts, 1));
+}
+
 static inline int
 macos_colorspace(PyObject *csname) {
     if (PyUnicode_CompareWithASCIIString(csname, "srgb") == 0) return 1;
@@ -359,8 +417,25 @@ menu_map(PyObject *entry_dict, Options *opts) {
 }
 
 static inline void
+underline_exclusion(PyObject *val, Options *opts) {
+    if (!PyTuple_Check(val)) { PyErr_SetString(PyExc_TypeError, "underline_exclusion must be a tuple"); return; }
+    opts->underline_exclusion.thickness = PyFloat_AsFloat(PyTuple_GET_ITEM(val, 0));
+    if (!PyUnicode_GET_LENGTH(PyTuple_GET_ITEM(val, 1))) opts->underline_exclusion.unit = 0;
+    else if (PyUnicode_CompareWithASCIIString(PyTuple_GET_ITEM(val, 1), "px")) opts->underline_exclusion.unit = 1;
+    else if (PyUnicode_CompareWithASCIIString(PyTuple_GET_ITEM(val, 1), "pt")) opts->underline_exclusion.unit = 2;
+    else opts->underline_exclusion.unit = 0;
+}
+
+static inline void
+box_drawing_scale(PyObject *val, Options *opts) {
+    for (unsigned i = 0; i < MIN(arraysz(opts->box_drawing_scale), (size_t)PyTuple_GET_SIZE(val)); i++) {
+        opts->box_drawing_scale[i] = PyFloat_AsFloat(PyTuple_GET_ITEM(val, i));
+    }
+}
+
+static inline void
 text_composition_strategy(PyObject *val, Options *opts) {
-    if (!PyUnicode_Check(val)) { PyErr_SetString(PyExc_TypeError, "text_rendering_strategy must be a string"); return; }
+    if (!PyUnicode_Check(val)) { PyErr_SetString(PyExc_TypeError, "text_composition_strategy must be a string"); return; }
     opts->text_old_gamma = false;
     opts->text_gamma_adjustment = 1.0f; opts->text_contrast = 0.f;
     if (PyUnicode_CompareWithASCIIString(val, "platform") == 0) {
@@ -373,7 +448,7 @@ text_composition_strategy(PyObject *val, Options *opts) {
     } else {
         RAII_PyObject(parts, PyUnicode_Split(val, NULL, 2));
         int size = PyList_GET_SIZE(parts);
-        if (size < 1 || 2 < size) { PyErr_SetString(PyExc_ValueError, "text_rendering_strategy must be of the form number:[number]"); return; }
+        if (size < 1 || 2 < size) { PyErr_SetString(PyExc_ValueError, "text_composition_strategy must be of the form 'number [number]'"); return; }
 
         if (size > 0) {
             RAII_PyObject(ga, PyFloat_FromString(PyList_GET_ITEM(parts, 0)));
@@ -435,7 +510,7 @@ tab_bar_margin_height(PyObject *val, Options *opts) {
     opts->tab_bar_margin_height.inner = PyFloat_AsDouble(PyTuple_GET_ITEM(val, 1));
 }
 
-static void
+static inline void
 window_logo_scale(PyObject *src, Options *opts) {
     opts->window_logo_scale.width = PyFloat_AsFloat(PyTuple_GET_ITEM(src, 0));
     opts->window_logo_scale.height = PyFloat_AsFloat(PyTuple_GET_ITEM(src, 1));

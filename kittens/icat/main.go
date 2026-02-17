@@ -4,20 +4,22 @@ package icat
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"kitty/tools/cli"
-	"kitty/tools/tty"
-	"kitty/tools/tui"
-	"kitty/tools/tui/graphics"
-	"kitty/tools/utils"
-	"kitty/tools/utils/images"
-	"kitty/tools/utils/style"
+	"github.com/kovidgoyal/imaging"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/graphics"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,7 +33,7 @@ type Place struct {
 var opts *Options
 var place *Place
 var z_index int32
-var remove_alpha *images.NRGBColor
+var remove_alpha *imaging.NRGBColor
 var flip, flop bool
 
 type transfer_mode int
@@ -42,6 +44,15 @@ const (
 	supported
 )
 
+type fit_t int
+
+const (
+	fit_none fit_t = iota
+	fit_width
+	fit_height
+	fit_both
+)
+
 var transfer_by_file, transfer_by_memory transfer_mode
 
 var files_channel chan input_arg
@@ -49,6 +60,7 @@ var output_channel chan *image_data
 var num_of_items int
 var keep_going *atomic.Bool
 var screen_size *unix.Winsize
+var fit_mode fit_t
 
 func send_output(imgd *image_data) {
 	output_channel <- imgd
@@ -68,7 +80,7 @@ func parse_background() (err error) {
 	if err != nil {
 		return fmt.Errorf("Invalid value for --background: %w", err)
 	}
-	remove_alpha = &images.NRGBColor{R: col.Red, G: col.Green, B: col.Blue}
+	remove_alpha = &imaging.NRGBColor{R: col.Red, G: col.Green, B: col.Blue}
 	return
 }
 
@@ -85,6 +97,22 @@ func parse_z_index() (err error) {
 	}
 	z_index = int32(i) + origin
 	return
+}
+
+func parse_fit() (err error) {
+	switch strings.ToLower(opts.Fit) {
+	case "width":
+		fit_mode = fit_width
+	case "height":
+		fit_mode = fit_height
+	case "none", "neither":
+		fit_mode = fit_none
+	case "both":
+		fit_mode = fit_both
+	default:
+		return fmt.Errorf("unknown fit specification: %#v", opts.Fit)
+	}
+	return nil
 }
 
 func parse_place() (err error) {
@@ -130,8 +158,10 @@ func print_error(format string, args ...any) {
 
 func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 	opts = o
-	err = parse_place()
-	if err != nil {
+	if err = parse_place(); err != nil {
+		return 1, err
+	}
+	if err = parse_fit(); err != nil {
 		return 1, err
 	}
 	err = parse_z_index()
@@ -162,23 +192,23 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 	} else {
 		parts := strings.SplitN(opts.UseWindowSize, ",", 4)
 		if len(parts) != 4 {
-			return 1, fmt.Errorf("Invalid size specification: " + opts.UseWindowSize)
+			return 1, fmt.Errorf("Invalid size specification: %s", opts.UseWindowSize)
 		}
 		screen_size = &unix.Winsize{}
-		t := 0
-		if t, err = strconv.Atoi(parts[0]); err != nil || t < 1 {
+		var t uint64
+		if t, err = strconv.ParseUint(parts[0], 10, 16); err != nil || t < 1 {
 			return 1, fmt.Errorf("Invalid size specification: %s with error: %w", opts.UseWindowSize, err)
 		}
 		screen_size.Col = uint16(t)
-		if t, err = strconv.Atoi(parts[1]); err != nil || t < 1 {
+		if t, err = strconv.ParseUint(parts[1], 10, 16); err != nil || t < 1 {
 			return 1, fmt.Errorf("Invalid size specification: %s with error: %w", opts.UseWindowSize, err)
 		}
 		screen_size.Row = uint16(t)
-		if t, err = strconv.Atoi(parts[2]); err != nil || t < 1 {
+		if t, err = strconv.ParseUint(parts[2], 10, 16); err != nil || t < 1 {
 			return 1, fmt.Errorf("Invalid size specification: %s with error: %w", opts.UseWindowSize, err)
 		}
 		screen_size.Xpixel = uint16(t)
-		if t, err = strconv.Atoi(parts[3]); err != nil || t < 1 {
+		if t, err = strconv.ParseUint(parts[3], 10, 16); err != nil || t < 1 {
 			return 1, fmt.Errorf("Invalid size specification: %s with error: %w", opts.UseWindowSize, err)
 		}
 		screen_size.Ypixel = uint16(t)
@@ -201,6 +231,20 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 			return 1, err
 		}
 	}
+	switch {
+	case opts.ClearAll:
+		cc := &graphics.GraphicsCommand{}
+		cc.SetAction(graphics.GRT_action_delete).SetDelete(graphics.GRT_free_by_range).SetLeftEdge(0).SetTopEdge(math.MaxUint32)
+		if err = cc.WriteWithPayloadTo(os.Stdout, nil); err != nil {
+			return 1, err
+		}
+	case opts.Clear:
+		cc := &graphics.GraphicsCommand{}
+		cc.SetAction(graphics.GRT_action_delete).SetDelete(graphics.GRT_free_visible)
+		if err = cc.WriteWithPayloadTo(os.Stdout, nil); err != nil {
+			return 1, err
+		}
+	}
 	if screen_size.Xpixel == 0 || screen_size.Ypixel == 0 {
 		return 1, fmt.Errorf("Terminal does not support reporting screen sizes in pixels, use a terminal such as kitty, WezTerm, Konsole, etc. that does.")
 	}
@@ -213,7 +257,8 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 		return 1, fmt.Errorf("The --place option can only be used with a single image, not %d", len(items))
 	}
 	files_channel = make(chan input_arg, len(items))
-	for _, ia := range items {
+	for i, ia := range items {
+		ia.index = i
 		files_channel <- ia
 	}
 	num_of_items = len(items)
@@ -222,7 +267,7 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 	keep_going.Store(true)
 	if !opts.DetectSupport && num_of_items > 0 {
 		num_workers := utils.Max(1, utils.Min(num_of_items, runtime.NumCPU()))
-		for i := 0; i < num_workers; i++ {
+		for range num_workers {
 			go run_worker()
 		}
 	}
@@ -277,8 +322,11 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 		use_unicode_placeholder = true
 	}
 	base_id := uint32(opts.ImageId)
-	for num_of_items > 0 {
-		imgd := <-output_channel
+	expecting_input_sequence_number := 0
+	pending := make([]*image_data, 0, num_of_items)
+
+	do_one := func(imgd *image_data) {
+		expecting_input_sequence_number++
 		if base_id != 0 {
 			imgd.image_id = base_id
 			base_id++
@@ -288,7 +336,6 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 		}
 		imgd.use_unicode_placeholder = use_unicode_placeholder
 		imgd.passthrough_mode = passthrough_mode
-		num_of_items--
 		if imgd.err != nil {
 			print_error("Failed to process \x1b[31m%s\x1b[39m: %s\r\n", imgd.source_name, imgd.err)
 		} else {
@@ -297,6 +344,26 @@ func main(cmd *cli.Command, o *Options, args []string) (rc int, err error) {
 				print_error("Failed to transmit \x1b[31m%s\x1b[39m: %s\r\n", imgd.source_name, imgd.err)
 			}
 		}
+	}
+
+	for num_of_items > 0 {
+		imgd := <-output_channel
+		num_of_items--
+		if imgd.input_sequence_number == expecting_input_sequence_number {
+			do_one(imgd)
+		} else {
+			index, _ := slices.BinarySearchFunc(pending, imgd.input_sequence_number, func(x *image_data, n int) int {
+				return x.input_sequence_number - n
+			})
+			pending = slices.Insert(pending, index, imgd)
+		}
+		for len(pending) > 0 && pending[0].input_sequence_number == expecting_input_sequence_number {
+			do_one(pending[0])
+			pending = pending[1:]
+		}
+	}
+	for _, x := range pending {
+		do_one(x)
 	}
 	keep_going.Store(false)
 	if opts.Hold {

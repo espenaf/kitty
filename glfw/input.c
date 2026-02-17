@@ -31,6 +31,7 @@
 #include "../kitty/monotonic.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <float.h>
 #include <math.h>
 #include <stdlib.h>
@@ -353,10 +354,10 @@ void _glfwInputKeyboard(_GLFWwindow* window, GLFWkeyevent* ev)
 
 // Notifies shared code of a scroll event
 //
-void _glfwInputScroll(_GLFWwindow* window, double xoffset, double yoffset, int flags, int mods)
+void _glfwInputScroll(_GLFWwindow* window, const GLFWScrollEvent *ev)
 {
     if (window->callbacks.scroll)
-        window->callbacks.scroll((GLFWwindow*) window, xoffset, yoffset, flags, mods);
+        window->callbacks.scroll((GLFWwindow*) window, ev);
 }
 
 // Notifies shared code of a mouse button click event
@@ -401,13 +402,33 @@ void _glfwInputCursorEnter(_GLFWwindow* window, bool entered)
         window->callbacks.cursorEnter((GLFWwindow*) window, entered);
 }
 
-// Notifies shared code of files or directories dropped on a window
+// Notifies shared code of a drag event
 //
-int _glfwInputDrop(_GLFWwindow* window, const char *mime, const char *text, size_t sz)
+int _glfwInputDragEvent(_GLFWwindow* window, int event, double xpos, double ypos, const char** mime_types, int* mime_count)
 {
-    if (window->callbacks.drop)
-        return window->callbacks.drop((GLFWwindow*) window, mime, text, sz);
+    if (window->callbacks.drag)
+        return window->callbacks.drag((GLFWwindow*) window, event, xpos, ypos, mime_types, mime_count);
     return 0;
+}
+
+// Notifies shared code of a drop event
+size_t _glfwInputDropEvent(_GLFWwindow *window, GLFWDropEventType type, double xpos, double ypos, const char** mimes, size_t num_mimes, bool from_self) {
+    if (!window->callbacks.drop_event) return 0;
+    GLFWDropEvent ev = {
+        .mimes=mimes, .type=type, .xpos=xpos, .ypos=ypos, .num_mimes=num_mimes, .from_self=from_self,
+        .read_data=type == GLFW_DROP_DATA_AVAILABLE ? _glfwPlatformReadAvailableDropData : NULL,
+        .finish_drop=type == GLFW_DROP_DATA_AVAILABLE || type == GLFW_DROP_DROP ? _glfwPlatformEndDrop : NULL,
+    };
+    window->callbacks.drop_event((GLFWwindow*)window, &ev);
+    return ev.num_mimes;
+}
+
+// Notifies shared code that the OS wants data for a MIME type from the drag source
+//
+void _glfwInputDragSourceRequest(_GLFWwindow* window, const char* mime_type, GLFWDragSourceData* source_data)
+{
+    if (window->callbacks.dragSource)
+        window->callbacks.dragSource((GLFWwindow*) window, mime_type, source_data);
 }
 
 // Notifies shared code of a joystick connection or disconnection
@@ -448,10 +469,15 @@ void _glfwInputJoystickHat(_GLFWjoystick* js, int hat, char value)
     js->hats[hat] = value;
 }
 
-void _glfwInputColorScheme(GLFWColorScheme value) {
+void _glfwInputColorScheme(GLFWColorScheme value, bool is_initial_value) {
     _glfwPlatformInputColorScheme(value);
-    if (_glfw.callbacks.system_color_theme_change) _glfw.callbacks.system_color_theme_change(value);
+    if (_glfw.callbacks.system_color_theme_change) _glfw.callbacks.system_color_theme_change(value, is_initial_value);
 }
+
+void _glfwInputClipboardLost(GLFWClipboardType which) {
+    if (_glfw.callbacks.clipboard_lost) _glfw.callbacks.clipboard_lost(which);
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 //////                       GLFW internal API                      //////
@@ -671,12 +697,31 @@ void _glfwCenterCursorInContentArea(_GLFWwindow* window)
 //////                        GLFW public API                       //////
 //////////////////////////////////////////////////////////////////////////
 
+GLFWAPI int glfwRequestDropData(GLFWwindow *window, const char *mime) {
+    return _glfwPlatformRequestDropData((_GLFWwindow*)window, mime);
+}
+
+GLFWAPI void glfwEndDrop(GLFWwindow *window, GLFWDragOperationType op) {
+    _glfwPlatformEndDrop(window, op);
+}
+
+GLFWAPI void glfwRequestDropUpdate(GLFWwindow *window) {
+    _glfwPlatformRequestDropUpdate((_GLFWwindow*)window);
+}
+
 GLFWAPI bool glfwGetIgnoreOSKeyboardProcessing(void) {
     return _glfw.ignoreOSKeyboardProcessing;
 }
 
 GLFWAPI void glfwSetIgnoreOSKeyboardProcessing(bool enabled) {
     _glfw.ignoreOSKeyboardProcessing = enabled;
+}
+
+GLFWAPI bool glfwGrabKeyboard(int grab) {
+    if (grab == 0 || grab == 1) {
+        if (_glfwPlatformGrabKeyboard(grab)) _glfw.keyboard_grabbed = grab;
+    }
+    return _glfw.keyboard_grabbed;
 }
 
 GLFWAPI int glfwGetInputMode(GLFWwindow* handle, int mode)
@@ -728,9 +773,7 @@ GLFWAPI void glfwSetInputMode(GLFWwindow* handle, int mode, int value)
 
         window->cursorMode = value;
 
-        _glfwPlatformGetCursorPos(window,
-                                  &window->virtualCursorPosX,
-                                  &window->virtualCursorPosY);
+        _glfwPlatformGetCursorPos(window, &window->virtualCursorPosX, &window->virtualCursorPosY);
         _glfwPlatformSetCursorMode(window, value);
     }
     else if (mode == GLFW_STICKY_KEYS)
@@ -1091,14 +1134,58 @@ GLFWAPI GLFWscrollfun glfwSetScrollCallback(GLFWwindow* handle,
     return cbfun;
 }
 
-GLFWAPI GLFWdropfun glfwSetDropCallback(GLFWwindow* handle, GLFWdropfun cbfun)
+GLFWAPI GLFWdragfun glfwSetDragCallback(GLFWwindow* handle, GLFWdragfun cbfun)
 {
     _GLFWwindow* window = (_GLFWwindow*) handle;
     assert(window != NULL);
 
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
-    _GLFW_SWAP_POINTERS(window->callbacks.drop, cbfun);
+    _GLFW_SWAP_POINTERS(window->callbacks.drag, cbfun);
     return cbfun;
+}
+
+GLFWAPI GLFWdropeventfun glfwSetDropEventCallback(GLFWwindow* handle, GLFWdropeventfun cbfun)
+{
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(window->callbacks.drop_event, cbfun);
+    return cbfun;
+}
+
+
+GLFWAPI GLFWdragsourcefun glfwSetDragSourceCallback(GLFWwindow* handle, GLFWdragsourcefun cbfun)
+{
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(window->callbacks.dragSource, cbfun);
+    return cbfun;
+}
+
+GLFWAPI int glfwStartDrag(GLFWwindow* handle, const char* const* mime_types, int mime_count, const GLFWimage* thumbnail, int operations)
+{
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(EINVAL);
+
+    // If no mime types, cancel any existing drag
+    if (!mime_types || mime_count <= 0) {
+        _glfwPlatformCancelDrag(window);
+        return 0;
+    }
+
+    return _glfwPlatformStartDrag(window, mime_types, mime_count, thumbnail, operations);
+}
+
+GLFWAPI ssize_t glfwSendDragData(GLFWDragSourceData* source_data, const void* data, size_t size)
+{
+    if (!source_data) return -EINVAL;
+    _GLFW_REQUIRE_INIT_OR_RETURN(-EINVAL);
+    return _glfwPlatformSendDragData(source_data, data, size);
 }
 
 GLFWAPI int glfwJoystickPresent(int jid)

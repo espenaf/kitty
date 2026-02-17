@@ -4,20 +4,21 @@ package config
 
 import (
 	"fmt"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 var _ = fmt.Print
 
 func ParseStrDict(val, record_sep, field_sep string) (map[string]string, error) {
 	ans := make(map[string]string)
-	for _, record := range strings.Split(val, record_sep) {
+	for record := range strings.SplitSeq(val, record_sep) {
 		key, val, found := strings.Cut(record, field_sep)
 		if found {
 			ans[key] = val
@@ -59,8 +60,9 @@ func StringLiteral(val string) (string, error) {
 	var state State
 	decode := func(base int) {
 		text := string(buf[:bufcount])
-		num, _ := strconv.ParseUint(text, base, 32)
-		ans.WriteRune(rune(num))
+		if num, err := strconv.ParseUint(text, base, 32); err == nil && num <= utf8.MaxRune {
+			ans.WriteRune(rune(num))
+		}
 		state = normal
 		bufcount = 0
 		buflimit = 0

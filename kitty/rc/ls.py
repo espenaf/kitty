@@ -2,7 +2,8 @@
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 import json
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from kitty.constants import appname
 
@@ -18,6 +19,7 @@ class LS(RemoteCommand):
     match/str: Window to change colors in
     match_tab/str: Tab to change colors in
     self/bool: Boolean indicating whether to list only the window the command is run in
+    output_format/str: Output in json or session format
     '''
 
     short_desc = 'List tabs/windows'
@@ -40,28 +42,42 @@ Show all environment variables in output, not just differing ones.
 --self
 type=bool-set
 Only list the window this command is run in.
+
+
+--output-format
+type=choices
+choices=json,session
+default=json
+Output in JSON or kitty session format
 ''' + '\n\n' + MATCH_WINDOW_OPTION + '\n\n' + MATCH_TAB_OPTION.replace('--match -m', '--match-tab -t', 1)
 
     def message_to_kitty(self, global_opts: RCOptions, opts: 'CLIOptions', args: ArgsType) -> PayloadType:
         return {'all_env_vars': opts.all_env_vars, 'match': opts.match, 'match_tab': opts.match_tab}
 
-    def response_from_kitty(self, boss: Boss, window: Optional[Window], payload_get: PayloadGetType) -> ResponseType:
-        tab_filter: Optional[Callable[[Tab], bool]] = None
-        window_filter: Optional[Callable[[Window], bool]] = None
+    def response_from_kitty(self, boss: Boss, window: Window | None, payload_get: PayloadGetType) -> ResponseType:
+        tab_filter: Callable[[Tab], bool] | None = None
+        window_filter: Callable[[Window], bool] | None = None
 
-        if payload_get('match') is not None or payload_get('match_tab') is not None:
+        if payload_get('self'):
+            def wf(w: Window) -> bool:
+                return w is window
+            window_filter = wf
+        elif payload_get('match') is not None or payload_get('match_tab') is not None:
             window_ids = frozenset(w.id for w in self.windows_for_payload(boss, window, payload_get, window_match_name='match'))
             def wf(w: Window) -> bool:
                 return w.id in window_ids
             window_filter = wf
+        elif payload_get('output_format') == 'session':
+            return "\n".join(boss.serialize_state_as_session())
+
         data = list(boss.list_os_windows(window, tab_filter, window_filter))
         if not payload_get('all_env_vars'):
-            all_env_blocks: List[Dict[str, str]] = []
-            common_env_vars: Set[Tuple[str, str]] = set()
+            all_env_blocks: list[dict[str, str]] = []
+            common_env_vars: set[tuple[str, str]] = set()
             for osw in data:
                 for tab in osw.get('tabs', ()):
                     for w in tab.get('windows', ()):
-                        env: Dict[str, str] = w.get('env', {})
+                        env: dict[str, str] = w.get('env', {})
                         frozen_env = set(env.items())
                         if all_env_blocks:
                             common_env_vars &= frozen_env

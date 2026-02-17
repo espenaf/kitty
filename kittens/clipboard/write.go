@@ -3,15 +3,17 @@
 package clipboard
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -37,16 +39,11 @@ func (self *Input) has_mime_matching(predicate func(string) bool) bool {
 	if predicate(self.mime_type) {
 		return true
 	}
-	for _, i := range self.extra_mime_types {
-		if predicate(i) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(self.extra_mime_types, predicate)
 }
 
 func write_loop(inputs []*Input, opts *Options) (err error) {
-	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking)
+	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking, loop.NoInBandResizeNotifications)
 	if err != nil {
 		return err
 	}
@@ -84,6 +81,14 @@ func write_loop(inputs []*Input, opts *Options) (err error) {
 		if mime != "" {
 			ans["mime"] = mime
 		}
+		if ptype == "write" {
+			if opts.Password != "" {
+				ans["pw"] = base64.StdEncoding.EncodeToString(utils.UnsafeStringToBytes(opts.Password))
+			}
+			if opts.HumanName != "" {
+				ans["name"] = base64.StdEncoding.EncodeToString(utils.UnsafeStringToBytes(opts.HumanName))
+			}
+		}
 		return ans
 	}
 
@@ -99,7 +104,7 @@ func write_loop(inputs []*Input, opts *Options) (err error) {
 		i := inputs[0]
 		n, err := i.src.Read(buf[:])
 		if n > 0 {
-			waiting_for_write = lp.QueueWriteString(encode_bytes(make_metadata("wdata", i.mime_type), buf[:n]))
+			waiting_for_write = lp.QueueWriteString(Encode_bytes(make_metadata("wdata", i.mime_type), buf[:n]))
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -222,8 +227,6 @@ func run_set_loop(opts *Options, args []string) (err error) {
 			return fmt.Errorf("Could not guess MIME type for %s use the --mime option to specify a MIME type", arg)
 		}
 		to_process[i] = inputs[i]
-		if to_process[i].is_stream {
-		}
 	}
 	return write_loop(to_process, opts)
 }

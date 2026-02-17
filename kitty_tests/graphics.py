@@ -137,10 +137,11 @@ def put_helpers(self, cw, ch, cols=10, lines=5):
         iid += 1
         imgid = kw.pop('id', None) or iid
         no_id = kw.pop('no_id', False)
+        a = kw.pop('a', 'T')
         if no_id:
-            cmd = 'a=T,f=24,s=%d,v=%d,%s' % (w, h, put_cmd(**kw))
+            cmd = f'a={a},f=24,s=%d,v=%d,%s' % (w, h, put_cmd(**kw))
         else:
-            cmd = 'a=T,f=24,i=%d,s=%d,v=%d,%s' % (imgid, w, h, put_cmd(**kw))
+            cmd = f'a={a},f=24,i=%d,s=%d,v=%d,%s' % (imgid, w, h, put_cmd(**kw))
         data = b'x' * w * h * 3
         res = send_command(screen, cmd, data)
         return imgid, parse_response(res)
@@ -252,7 +253,7 @@ class TestGraphics(BaseTest):
         self.assertEqual(dc.total_size, sum(map(len, data.values())))
         self.assertTrue(dc.wait_for_write())
         check_data()
-        sz = dc.size_on_disk()
+        sz = dc.end_of_data_offset()
         self.assertEqual(sz, sum(map(len, data.values())))
         self.assertFalse(dc.holes())
         holes = set()
@@ -261,9 +262,9 @@ class TestGraphics(BaseTest):
             holes.add(x)
             check_data()
             self.assertRaises(KeyError, dc.get, key_as_bytes(x))
-            self.assertEqual(sz, dc.size_on_disk())
+            self.assertEqual(sz, dc.end_of_data_offset())
             self.assertEqual(holes, {x[1] for x in dc.holes()})
-        self.assertEqual(sz, dc.size_on_disk())
+        self.assertEqual(sz, dc.end_of_data_offset())
         # fill holes largest first to ensure small one doesn't go into large accidentally causing fragmentation
         for i, x in enumerate(sorted(holes, reverse=True)):
             x = 'ABCDEFGH'[i] * x
@@ -272,13 +273,10 @@ class TestGraphics(BaseTest):
             check_data()
             holes.discard(len(x))
             self.assertEqual(holes, {x[1] for x in dc.holes()})
-            self.assertEqual(sz, dc.size_on_disk(), f'Disk cache has unexpectedly grown from {sz} to {dc.size_on_disk} with data: {x!r}')
+            self.assertEqual(sz, dc.end_of_data_offset(), f'Disk cache has unexpectedly grown from {sz} to {dc.end_of_data_offset()} with data: {x!r}')
         check_data()
         dc.clear()
-        st = time.monotonic()
-        while dc.size_on_disk() and time.monotonic() - st < 2:
-            time.sleep(0.001)
-        self.assertEqual(dc.size_on_disk(), 0)
+        self.assertEqual(dc.end_of_data_offset(), 0)
 
         data.clear()
         for i in range(25):
@@ -286,25 +284,25 @@ class TestGraphics(BaseTest):
         dc.wait_for_write()
         check_data()
 
-        before = dc.size_on_disk()
+        before = dc.end_of_data_offset()
         while dc.total_size > before // 3:
             key = random.choice(tuple(data))
             self.assertTrue(remove(key))
         check_data()
         add('trigger defrag', 'XXX')
         dc.wait_for_write()
-        self.assertLess(dc.size_on_disk(), before)
+        self.assertLess(dc.end_of_data_offset(), before)
         check_data()
         dc.clear()
 
         st = time.monotonic()
-        while dc.size_on_disk() and time.monotonic() - st < 20:
+        while dc.end_of_data_offset() and time.monotonic() - st < 20:
             time.sleep(0.01)
-        self.assertEqual(dc.size_on_disk(), 0)
+        self.assertEqual(dc.end_of_data_offset(), 0)
         for frame in range(32):
             add(f'1:{frame}', f'{frame:02d}' * 8)
         dc.wait_for_write()
-        self.assertEqual(dc.size_on_disk(), 32 * 16)
+        self.assertEqual(dc.end_of_data_offset(), 32 * 16)
         self.assertEqual(dc.num_cached_in_ram(), 0)
         num_in_ram = 0
         for frame in range(32):
@@ -325,18 +323,18 @@ class TestGraphics(BaseTest):
         self.assertIsNone(add(1, '1' * 1024))
         self.assertIsNone(add(2, '2' * 1024))
         dc.wait_for_write()
-        sz = dc.size_on_disk()
+        sz = dc.end_of_data_offset()
         remove(1)
-        self.ae(sz, dc.size_on_disk())
+        self.ae(sz, dc.end_of_data_offset())
         self.ae({x[1] for x in dc.holes()}, {1024})
         self.assertIsNone(add(3, '3' * 800))
         dc.wait_for_write()
         self.assertFalse(dc.holes())
-        self.ae(sz, dc.size_on_disk())
+        self.ae(sz, dc.end_of_data_offset())
         self.assertIsNone(add(4, '4' * 100))
         sz += 100
         dc.wait_for_write()
-        self.ae(sz, dc.size_on_disk())
+        self.ae(sz, dc.end_of_data_offset())
         check_data()
         self.assertFalse(dc.holes())
         remove(4)
@@ -344,7 +342,7 @@ class TestGraphics(BaseTest):
         self.assertIsNone(add(5, '5' * 10))
         sz += 10
         dc.wait_for_write()
-        self.ae(sz, dc.size_on_disk())
+        self.ae(sz, dc.end_of_data_offset())
 
         # test hole coalescing
         reset(defrag_factor=20)
@@ -409,6 +407,17 @@ class TestGraphics(BaseTest):
         self.ae(pl('mnop', m=0), 'OK')
         img = g.image_for_client_id(1)
         self.ae(img['data'], b'abcdefghijklmnop')
+
+        # Test interrupted and retried chunked load
+        self.assertIsNone(pl('abcd', s=2, v=2, m=1))
+        self.assertIsNone(pl('efgh', m=1))
+        send_command(s, 'a=d')  # delete command should clear partial transfer
+        self.assertIsNone(pl('abcd', s=2, v=2, m=1))
+        self.assertIsNone(pl('efgh', m=1))
+        self.assertIsNone(pl('ijkl', m=1))
+        self.ae(pl('1234', m=0), 'OK')
+        img = g.image_for_client_id(1)
+        self.ae(img['data'], b'abcdefghijkl1234')
 
         random_data = byte_block(32 * 1024)
         sl(
@@ -571,6 +580,16 @@ class TestGraphics(BaseTest):
         self.ae(s.grman.image_count, count - 1)
         delete(I=1)
         self.ae(s.grman.image_count, count - 2)
+        cn = 1117
+        li('abc', s=1, v=1, f=24, I=cn)
+        first_id = g.image_for_client_number(cn)['internal_id']
+        li('abc', s=1, v=1, f=24, I=cn)
+        second_id = g.image_for_client_number(cn)['internal_id']
+        self.assertNotEqual(first_id, second_id)
+        count = s.grman.image_count
+        delete(I=cn)
+        self.ae(g.image_for_client_number(cn)['internal_id'], first_id)
+        self.ae(s.grman.image_count, count - 1)
         s.reset()
         self.assertEqual(g.disk_cache.total_size, 0)
 
@@ -744,7 +763,7 @@ class TestGraphics(BaseTest):
         s.draw("\U0010EEEE\u0305\u0305\U0010EEEE\u0305\u030D")
         # These two characters will be two separate refs (not contiguous).
         s.draw("\U0010EEEE\u0305\u0305\U0010EEEE\u0305\u030E")
-        s.cursor_back(4)
+        s.cursor_move(4)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 3)
@@ -764,7 +783,7 @@ class TestGraphics(BaseTest):
         # The second image, 2x1
         s.apply_sgr("38;2;42;43;44")
         s.draw("\U0010EEEE\u0305\u030D\U0010EEEE\u0305\u030E")
-        s.cursor_back(2)
+        s.cursor_move(2)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 2)
@@ -782,7 +801,7 @@ class TestGraphics(BaseTest):
         s.draw("\U0010EEEE\u0305\u0305\U0010EEEE\u0305\U0010EEEE\U0010EEEE\u0305")
         # full row 1 of the first image
         s.draw("\U0010EEEE\u030D\U0010EEEE\U0010EEEE\U0010EEEE\u030D\u0310")
-        s.cursor_back(8)
+        s.cursor_move(8)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 2)
@@ -804,7 +823,7 @@ class TestGraphics(BaseTest):
         # This one will have id=43, which does not exist.
         s.apply_sgr("38;2;0;0;43")
         s.draw("\U0010EEEE\u0305\U0010EEEE\U0010EEEE\U0010EEEE")
-        s.cursor_back(4)
+        s.cursor_move(4)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 0)
@@ -820,7 +839,7 @@ class TestGraphics(BaseTest):
         s.draw("\U0010EEEE\u0305\u0305\u059C\U0010EEEE\u0305\u030D\u059C")
         # Check that we can continue by using implicit row/column specification.
         s.draw("\U0010EEEE\u0305\U0010EEEE")
-        s.cursor_back(6)
+        s.cursor_move(6)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 2)
@@ -834,7 +853,7 @@ class TestGraphics(BaseTest):
         s.draw("\U0010EEEE\u0305\u0305\u0305\U0010EEEE")
         s.apply_sgr("38;5;43")
         s.draw("\U0010EEEE\u0305\u0305\u059C\U0010EEEE\U0010EEEE\u0305\U0010EEEE")
-        s.cursor_back(6)
+        s.cursor_move(6)
         s.update_only_line_graphics_data()
         refs = layers(s)
         self.ae(len(refs), 2)
@@ -1030,10 +1049,25 @@ class TestGraphics(BaseTest):
                 cmd += ',' + ','.join(f'{k}={v}' for k, v in kw.items())
             send_command(s, cmd)
 
+        iid = put_image(s, cw, ch, a='t')[0]
+        self.ae(s.grman.image_count, 1)
+        delete('I', i=iid)
+        self.ae(s.grman.image_count, 0)
+        iid1 = put_image(s, cw, ch, a='t')[0]
+        iid2 = put_image(s, cw, ch, a='t')[0]
+        self.ae(s.grman.image_count, 2)
+        delete('R', x=iid1, y=iid2)
+        self.ae(s.grman.image_count, 0)
+
         put_image(s, cw, ch)
         delete()
         self.ae(s.grman.image_count, 1)
         self.ae(len(layers(s)), 0)
+        delete('A')
+        self.ae(s.grman.image_count, 1)
+        s.reset()
+        self.ae(s.grman.image_count, 0)
+        put_image(s, cw, ch)
         self.ae(s.grman.image_count, 1)
         delete('A')
         self.ae(s.grman.image_count, 0)
@@ -1082,6 +1116,18 @@ class TestGraphics(BaseTest):
         self.ae(put_ref(s, id=iid), (iid, ('ENOENT', f'i={iid}')))
         self.ae(s.grman.image_count, 0)
         self.assertEqual(s.grman.disk_cache.total_size, 0)
+
+        # test delete but not free
+        s.reset()
+        iid = 9999999
+        self.ae(put_image(s, cw, ch, id=iid), (iid, 'OK'))
+        self.ae(put_ref(s, id=iid), (iid, ('OK', f'i={iid}')))
+        self.ae(put_image(s, cw, ch, id=iid+1), (iid+1, 'OK'))
+        self.ae(put_ref(s, id=iid+1), (iid+1, ('OK', f'i={iid+1}')))
+        delete('i', i=iid)
+        self.ae(s.grman.image_count, 2)
+        delete('I', i=iid+1)
+        self.ae(s.grman.image_count, 1)
 
     def test_animation_frame_loading(self):
         s = self.create_screen()
@@ -1189,6 +1235,7 @@ class TestGraphics(BaseTest):
         self.assertIsNone(li(a='d', d='f', i=1))
         img = g.image_for_client_id(1)
         self.assertEqual(img['data'], b'5' * 36)
+        self.ae(g.image_count, 1)
         self.assertIsNone(li(a='d', d='F', i=1))
         self.ae(g.image_count, 0)
         self.assertEqual(g.disk_cache.total_size, 0)

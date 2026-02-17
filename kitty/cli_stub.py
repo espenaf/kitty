@@ -6,22 +6,24 @@ from collections.abc import Sequence
 
 
 class CLIOptions:
-    pass
+    def __repr__(self) -> str:
+        return repr(vars(self))
 
 
 LaunchCLIOptions = AskCLIOptions = ClipboardCLIOptions = DiffCLIOptions = CLIOptions
 HintsCLIOptions = IcatCLIOptions = PanelCLIOptions = ResizeCLIOptions = CLIOptions
 ErrorCLIOptions = UnicodeCLIOptions = RCOptions = RemoteFileCLIOptions = CLIOptions
-BroadcastCLIOptions = ShowKeyCLIOptions = CLIOptions
+BroadcastCLIOptions = ShowKeyCLIOptions = SaveAsSessionOptions = GotoSessionOptions = CLIOptions
 ThemesCLIOptions = TransferCLIOptions = LoadConfigRCOptions = ActionRCOptions = CLIOptions
 
 
 def generate_stub() -> None:
-    from .cli import as_type_stub, parse_option_spec
+    from .cli import as_type_stub
     from .conf.utils import save_type_stub
+    from .simple_cli_definitions import parse_option_spec
     text = 'import typing\n\n\n'
 
-    def do(otext=None, cls: str = 'CLIOptions', extra_fields: Sequence[str] = ()):
+    def do(otext: str | None = None, cls: str = 'CLIOptions', extra_fields: Sequence[str] = ()) -> None:
         nonlocal text
         text += as_type_stub(*parse_option_spec(otext), class_name=cls, extra_fields=extra_fields)
 
@@ -54,11 +56,11 @@ def generate_stub() -> None:
     from kittens.broadcast.main import OPTIONS
     do(OPTIONS(), 'BroadcastCLIOptions')
 
-    from kittens.icat.main import OPTIONS
-    do(OPTIONS, 'IcatCLIOptions')
+    from kittens.icat.main import OPTIONS as OS
+    do(OS, 'IcatCLIOptions')
 
-    from kittens.panel.main import OPTIONS
-    do(OPTIONS(), 'PanelCLIOptions')
+    from kittens.panel.main import panel_kitten_options_spec
+    do(panel_kitten_options_spec(), 'PanelCLIOptions')
 
     from kittens.resize_window.main import OPTIONS
     do(OPTIONS(), 'ResizeCLIOptions')
@@ -69,8 +71,12 @@ def generate_stub() -> None:
     from kittens.themes.main import OPTIONS
     do(OPTIONS(), 'ThemesCLIOptions')
 
-    from kittens.transfer.main import option_text as OPTIONS
-    do(OPTIONS(), 'TransferCLIOptions')
+    from kittens.transfer.main import option_text
+    do(option_text(), 'TransferCLIOptions')
+
+    from kitty.session import goto_session_options, save_as_session_options
+    do(save_as_session_options(), 'SaveAsSessionOptions')
+    do(goto_session_options(), 'GotoSessionOptions')
 
     from kitty.rc.base import all_command_names, command_for_name
     for cmd_name in all_command_names():

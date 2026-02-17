@@ -28,6 +28,7 @@ alpha-blending and text over graphics.
 Some applications that use the kitty graphics protocol:
 
 * `awrit <https://github.com/chase/awrit>`_ - Chromium-based web browser rendered in Kitty with mouse and keyboard support
+* `blackcat <https://github.com/j-c-m/blackcat>`_ - a modern compatible cat with image support
 * `broot <https://dystroy.org/broot/>`_ - a terminal file explorer and manager, with preview of images, SVG, PDF, etc.
 * `chafa <https://github.com/hpjansson/chafa>`_  - a terminal image viewer
 * :doc:`kitty-diff <kittens/diff>` - a side-by-side terminal diff program with support for images
@@ -40,6 +41,7 @@ Some applications that use the kitty graphics protocol:
 * `timg <https://github.com/hzeller/timg>`_ - a terminal image and video viewer
 * `tpix <https://github.com/jesvedberg/tpix>`_ - a statically compiled binary that can be used to display images and easily installed on remote servers without root access
 * `twitch-tui <https://github.com/Xithrius/twitch-tui>`_ - Twitch chat in the terminal
+* `vat <https://github.com/jzbrooks/vat>`_ - a terminal image viewer for vector graphics, including Android Vector Drawables
 * `viu <https://github.com/atanunq/viu>`_ - a terminal image viewer
 * `Yazi <https://github.com/sxyazi/yazi>`_ - Blazing fast terminal file manager written in Rust, based on async I/O
 
@@ -57,9 +59,13 @@ Libraries:
 
 Other terminals that have implemented the graphics protocol:
 
+* `Ghostty <https://ghostty.org>`_
 * `Konsole <https://invent.kde.org/utilities/konsole/-/merge_requests/594>`_
+* `st (with a patch) <https://st.suckless.org/patches/kitty-graphics-protocol>`_
+* `Warp <https://docs.warp.dev/getting-started/changelog#id-2025.03.26-v0.2025.03.26.08.10>`_
 * `wayst <https://github.com/91861/wayst>`_
 * `WezTerm <https://github.com/wez/wezterm/issues/986>`_
+* `iTerm2 <https://github.com/gnachman/iTerm2/commit/4fe5b2173193b6c3e45234b6b2ab7a144a5cfa01>`_
 
 
 Getting the window size
@@ -96,7 +102,7 @@ code to demonstrate its use
         buf = array.array('H', [0, 0, 0, 0])
         fcntl.ioctl(sys.stdout, termios.TIOCGWINSZ, buf)
         print((
-            'number of rows: {} number of columns: {}'
+            'number of rows: {} number of columns: {} '
             'screen width: {} screen height: {}').format(*buf))
 
 .. tab:: Go
@@ -127,19 +133,30 @@ code to demonstrate its use
         }
 
 
-.. tab:: Bash
+.. tab:: POSIX sh
 
     .. code-block:: sh
 
-        #!/bin/bash
+        #!/bin/sh
 
-        # This uses the kitten standalone binary from kitty to get the pixel sizes
-        # since we can't do IOCTLs directly. Fortunately, kitten is a static exe
-        # pre-built for every Unix like OS under the sun.
+        read rows cols <<EOF
+        $(command stty size)
+        EOF
 
-        builtin read -r rows cols < <(command stty size)
-        IFS=x builtin read -r width height < <(command kitten icat --print-window-size); builtin unset IFS
-        builtin echo "number of rows: $rows number of columns: $cols screen width: $width screen height: $height"
+        oldstty=$(command stty -g)
+        command stty raw -echo
+        printf "\033[14t"
+        response=""
+        while : ; do
+            char=$(command dd bs=1 count=1 2>/dev/null)
+            [ "$char" = "t" ] && break
+            response="${response}${char}"
+        done
+        command stty "$oldstty"
+        h=$(echo "$response" | cut -d';' -f2)
+        w=$(echo "$response" | cut -d';' -f3)
+        printf "number of rows: %d number of columns: %d" "$rows" "$cols"
+        printf " screen width: %d screen height: %d\n" "$w" "$h"
 
 
 Note that some terminals return ``0`` for the width and height values. Such
@@ -150,7 +167,9 @@ You can also use the *CSI t* escape code to get the screen size. Send
 ``<ESC>[14t`` to ``STDOUT`` and kitty will reply on ``STDIN`` with
 ``<ESC>[4;<height>;<width>t`` where ``height`` and ``width`` are the window
 size in pixels. This escape code is supported in many terminals, not just
-kitty.
+kitty. A more precise version of this escape code, which is however supported
+in less terminals is ``<ESC>[16t`` which causes the terminal to reply with the
+pixel dimensions of a single cell.
 
 A minimal example
 ------------------
@@ -158,61 +177,55 @@ A minimal example
 Some minimal code to display PNG images in kitty, using the most basic
 features of the graphics protocol:
 
-.. tab:: Bash
+.. tab:: POSIX sh
 
     .. code-block:: sh
 
-        #!/bin/bash
-        transmit_png() {
-            data=$(base64 "$1")
-            data="${data//[[:space:]]}"
-            builtin local pos=0
-            builtin local chunk_size=4096
-            while [ $pos -lt ${#data} ]; do
-                builtin printf "\e_G"
-                [ $pos = "0" ] && printf "a=T,f=100,"
-                builtin local chunk="${data:$pos:$chunk_size}"
-                pos=$(($pos+$chunk_size))
-                [ $pos -lt ${#data} ] && builtin printf "m=1"
-                [ ${#chunk} -gt 0 ] && builtin printf ";%s" "${chunk}"
-                builtin printf "\e\\"
+        #!/bin/sh
+
+        send_chunked() {
+            first="y"
+            while IFS= read -r chunk; do
+                metadata=""; [ "$first" = "y" ] && { metadata="a=T,f=100,"; first="n"; }
+                printf "\033_G%sm=1;%s\033\\" "${metadata}" "${chunk}"
             done
+            [ "$first" = "n" ] && { printf "\033_Gm=0;\033\\"; return 0; }
+            return 1
+        }
+
+        transmit_png() {
+            # Different systems have different or missing base64 executables.
+            # The sed command below adds a trailing newline which openssl
+            # base64 does not produce and is needed for reading via read -r
+            { command base64 -w 4096 "$1" 2>/dev/null | send_chunked; } || \
+            { command base64 -b 4096 "$1" 2>/dev/null | send_chunked; } || \
+            { command openssl base64 -e -A -in "$1" | command sed '$a\' | command fold -b -w 4096 | send_chunked; }
         }
 
         transmit_png "$1"
+
 
 .. tab:: Python
 
     .. code-block:: python
 
-        #!/usr/bin/python
+        #!/usr/bin/env python
         import sys
         from base64 import standard_b64encode
 
-        def serialize_gr_command(**cmd):
-            payload = cmd.pop('payload', None)
-            cmd = ','.join(f'{k}={v}' for k, v in cmd.items())
-            ans = []
-            w = ans.append
-            w(b'\033_G'), w(cmd.encode('ascii'))
-            if payload:
-                w(b';')
-                w(payload)
-            w(b'\033\\')
-            return b''.join(ans)
-
-        def write_chunked(**cmd):
-            data = standard_b64encode(cmd.pop('data'))
-            while data:
-                chunk, data = data[:4096], data[4096:]
-                m = 1 if data else 0
-                sys.stdout.buffer.write(serialize_gr_command(payload=chunk, m=m,
-                                                            **cmd))
-                sys.stdout.flush()
-                cmd.clear()
-
+        first, eof, buf = True, False, memoryview(bytearray(3 * 4096 // 4))
+        w = sys.stdout.buffer.write
         with open(sys.argv[-1], 'rb') as f:
-            write_chunked(a='T', f=100, data=f.read())
+            while not eof:
+                p = buf[:]
+                while p and not eof:
+                    n = f.readinto1(p)
+                    p, eof = p[n:], n == 0
+                encoded = standard_b64encode(buf[:len(buf)-len(p)])
+                metadata, first = "a=T,f=100," if first else "", False
+                w(f'\x1b_G{metadata}m={0 if eof else 1};'.encode('ascii'))
+                w(encoded)
+                w(b'\x1b\\')
 
 
 Save this script as :file:`send-png`, then you can use it to display any PNG
@@ -333,7 +346,7 @@ similar to reporting any other kind of I/O error. Since the file paths come
 from potentially untrusted sources, terminal emulators **must** refuse to read
 any device/socket/etc. special files. Only regular files are allowed.
 Additionally, terminal emulators may refuse to read files in *sensitive*
-parts of the filesystem, such as :file:`/proc`, :file:`/sys`, :file:`/dev/`, etc.
+parts of the filesystem, such as :file:`/proc`, :file:`/sys`, :file:`/dev`, etc.
 
 Local client
 ^^^^^^^^^^^^^^
@@ -351,7 +364,7 @@ Here we tell the terminal emulator to read compressed image data from
 the specified shared memory object.
 
 The client can also specify a size and offset to tell the terminal emulator
-to only read a part of the specified file. The is done using the ``S`` and ``O``
+to only read a part of the specified file. This is done using the ``S`` and ``O``
 keys respectively. For example::
 
     <ESC>_Gs=10,v=2,t=s,S=80,O=10;<encoded /some-shared-memory-name><ESC>\
@@ -415,9 +428,7 @@ use the *query action*, set ``a=q``. Then the terminal emulator will try to load
 the image and respond with either OK or an error, as above, but it will not
 replace an existing image with the same id, nor will it store the image.
 
-As of May 2023, kitty has a complete implementation of this protocol and
-WezTerm has a mostly complete implementation. Konsole and wayst have partial
-support. We intend that any terminal emulator that wishes to support it can do so. To
+We intend that any terminal emulator that wishes to support it can do so. To
 check if a terminal emulator supports the graphics protocol the best way is to
 send the above *query action* followed by a request for the `primary device
 attributes <https://vt100.net/docs/vt510-rm/DA1.html>`_. If you get back an
@@ -465,10 +476,11 @@ id. To do so add the ``p`` key with a number between ``1`` and ``4294967295``.
 When you specify a placement id, it will be added to the acknowledgement code
 above. Every placement is uniquely identified by the pair of the ``image id``
 and the ``placement id``. If you specify a placement id for an image that does
-not have an id (i.e. has id=0), it will be ignored. In particular this means
-there can exist multiple images with ``image id=0, placement id=0``. Not
-specifying a placement id or using ``p=0`` for multiple put commands (``a=p``)
-with the same non-zero image id results in multiple placements the image.
+not have an id (i.e. has id=0), it will be ignored, i.e. the placement will not
+get an id. In particular this means there can exist multiple images with
+``image id=0, placement id=0``. Not specifying a placement id or using ``p=0``
+for multiple put commands (``a=p``) with the same non-zero image id results in
+multiple placements the image.
 
 An example response::
 
@@ -477,6 +489,14 @@ An example response::
 If you send two placements with the same ``image id`` and ``placement id`` the
 second one will replace the first. This can be used to resize or move
 placements around the screen, without flicker.
+
+
+.. note::
+   When re-transmitting image data for a specific id, the existing image and
+   all its placements must be deleted. The new data replaces the old image data
+   but is not actually displayed until a placement for it is created. This is
+   to avoid divergent behavior in the case when unrelated programs happen to re-use
+   image ids in the same session.
 
 
 .. versionadded:: 0.19.3
@@ -754,6 +774,9 @@ deleted, if the capital letter form above is specified. Also, when the terminal
 is running out of quota space for new images, existing images without
 placements will be preferentially deleted.
 
+If an image is being loaded in chunks and the upload is not complete when any
+delete command is received, the partial upload must be aborted.
+
 Some examples::
 
     <ESC>_Ga=d<ESC>\              # delete all visible placements
@@ -881,12 +904,12 @@ on.
 Finally, while transferring frame data, the frame *gap* can also be specified
 using the ``z`` key. The gap is the number of milliseconds to wait before
 displaying the next frame when the animation is running. A value of ``z=0`` is
-ignored, ``z=positive number`` sets the gap to the specified number of
-milliseconds and ``z=negative number`` creates a *gapless* frame. Gapless
-frames are not displayed to the user since they are instantly skipped over,
-however they can be useful as the base data for subsequent frames. For example,
-for an animation where the background remains the same and a small object or two
-move.
+ignored (acts as though ``z`` was unspecified), ``z=positive number`` sets the
+gap to the specified number of milliseconds and ``z=negative number`` creates a
+*gapless* frame. Gapless frames are not displayed to the user since they are
+instantly skipped over, however they can be useful as the base data for
+subsequent frames. For example, for an animation where the background remains
+the same and a small object or two move.
 
 Controlling animations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -916,9 +939,9 @@ animation. ``s=2`` runs the animation, but in *loading* mode, in this mode when
 reaching the last frame, instead of looping, the terminal will wait for the
 arrival of more frames. ``s=3`` runs the animation normally, after the last
 frame, the terminal loops back to the first frame. The number of loops can be
-controlled by the ``v`` key. ``v=0`` is ignored, ``v=1`` is loop infinitely,
-and any other positive number is loop ``number - 1`` times. Note that stopping
-the animation resets the loop counter.
+controlled by the ``v`` key. ``v=0`` is ignored (acts as though ``v`` was not
+specified), ``v=1`` is loop infinitely, and any other positive number is loop
+``number - 1`` times. Note that stopping the animation resets the loop counter.
 
 Finally, the *gap* for frames can be set using the ``z`` key. This can be
 specified either when the frame is created as part of the transmit escape code
@@ -998,8 +1021,8 @@ take, and the default value they take when missing. All integers are 32-bit.
 Key      Value                 Default    Description
 =======  ====================  =========  =================
 ``a``    Single character.     ``t``      The overall action this graphics command is performing.
-         ``(a, c, d, f, ``                ``t`` - transmit data, ``T`` - transmit data and display image,
-         ``p, q, t, T)``                  ``q`` - query terminal, ``p`` - put (display) previous transmitted image,
+         ``(a, c, d, f,                   ``t`` - transmit data, ``T`` - transmit data and display image,
+         p, q, t, T)``                    ``q`` - query terminal, ``p`` - put (display) previous transmitted image,
                                           ``d`` - delete image, ``f`` - transmit data for animation frames,
                                           ``a`` - control animation, ``c`` - compose animation frames
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from gettext import gettext as _
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .constants import is_macos
 from .fast_data_types import (
@@ -17,13 +17,14 @@ from .fast_data_types import (
     SingleKey,
     get_boss,
     get_options,
+    grab_keyboard,
     is_modifier_key,
     ring_bell,
     set_ignore_os_keyboard_processing,
 )
 from .options.types import Options
 from .options.utils import KeyboardMode, KeyDefinition, KeyMap
-from .typing import ScreenType
+from .typing_compat import ScreenType
 
 if TYPE_CHECKING:
     from .window import Window
@@ -38,7 +39,7 @@ def keyboard_mode_name(screen: ScreenType) -> str:
     return 'application' if screen.cursor_key_mode else 'normal'
 
 
-def get_shortcut(keymap: KeyMap, ev: KeyEvent) -> Optional[list[KeyDefinition]]:
+def get_shortcut(keymap: KeyMap, ev: KeyEvent) -> list[KeyDefinition] | None:
     mods = ev.mods & mod_mask
     ans = keymap.get(SingleKey(mods, False, ev.key))
     if ans is None and ev.shifted_key and mods & GLFW_MOD_SHIFT:
@@ -64,7 +65,7 @@ class Mappings:
 
     ' Manage all keyboard mappings '
 
-    def __init__(self, global_shortcuts:Optional[dict[str, SingleKey]] = None, callback_on_mode_change: Callable[[], Any] = lambda: None) -> None:
+    def __init__(self, global_shortcuts:dict[str, SingleKey] | None = None, callback_on_mode_change: Callable[[], Any] = lambda: None) -> None:
         self.keyboard_mode_stack: list[KeyboardMode] = []
         self.update_keymap(global_shortcuts)
         self.callback_on_mode_change = callback_on_mode_change
@@ -73,7 +74,7 @@ class Mappings:
     def current_keyboard_mode_name(self) -> str:
         return self.keyboard_mode_stack[-1].name if self.keyboard_mode_stack else ''
 
-    def update_keymap(self, global_shortcuts:Optional[dict[str, SingleKey]] = None) -> None:
+    def update_keymap(self, global_shortcuts: dict[str, SingleKey] | None = None) -> None:
         if global_shortcuts is None:
             global_shortcuts = self.set_cocoa_global_shortcuts(self.get_options()) if is_macos else {}
         self.global_shortcuts_map: KeyMap = {v: [KeyDefinition(definition=k)] for k, v in global_shortcuts.items()}
@@ -148,7 +149,7 @@ class Mappings:
                     matches = matches[last_terminal_idx+1:]
             q = matches[-1].options.when_focus_on
             matches = [x for x in matches if x.options.when_focus_on == q]
-        else:
+        elif matches:
             matches = [matches[-1]]
         return matches
 
@@ -157,11 +158,15 @@ class Mappings:
         is_root_mode = not self.keyboard_mode_stack
         mode = self.keyboard_modes[''] if is_root_mode else self.keyboard_mode_stack[-1]
         key_action = get_shortcut(mode.keymap, ev)
+        if key_action is None and self.global_shortcuts_map and (global_key_action := get_shortcut(self.global_shortcuts_map, ev)) is not None:
+            if grab_keyboard(None):
+                # the shortcuts in the global menubar will have been bypassed so trigger them here
+                key_action = global_key_action
+            else:
+                return True
         if key_action is None:
             if is_modifier_key(ev.key):
                 return False
-            if self.global_shortcuts_map and get_shortcut(self.global_shortcuts_map, ev):
-                return True
             if not is_root_mode:
                 if mode.sequence_keys is not None:
                     self.pop_keyboard_mode()

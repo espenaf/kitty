@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"kitty/tools/utils"
-	"kitty/tools/utils/images"
+	"github.com/kovidgoyal/go-parallel"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -113,7 +113,7 @@ func (w *workspace_type) address_is_monotonic() bool {
 
 func (w *workspace_type) calc_score() (ans float64) {
 	distance, pos := 0, 0
-	for i := 0; i < len(w.positions); i++ {
+	for i := range len(w.positions) {
 		pos = w.position(i)
 		if i == 0 {
 			distance = pos + 1
@@ -135,7 +135,7 @@ func (w *workspace_type) calc_score() (ans float64) {
 
 func has_atleast_one_match(w *workspace_type) (found bool) {
 	p := -1
-	for i := 0; i < len(w.positions); i++ {
+	for i := range len(w.positions) {
 		if len(w.positions[i]) == 0 { // all chars of needle not in haystack
 			return false
 		}
@@ -159,9 +159,9 @@ func score_item(item string, idx int, needle []rune, opts *resolved_options_type
 	haystack := []rune(strings.ToLower(item))
 	orig_haystack := []rune(item)
 	w.initialize(len(orig_haystack), len(needle))
-	for i := 0; i < len(haystack); i++ {
+	for i := range len(haystack) {
 		level_factor_calculated := false
-		for j := 0; j < len(needle); j++ {
+		for j := range len(needle) {
 			if needle[j] == haystack[i] {
 				if !level_factor_calculated {
 					level_factor_calculated = true
@@ -202,10 +202,7 @@ func score_item(item string, idx int, needle []rune, opts *resolved_options_type
 }
 
 func ScoreItems(query string, items []string, opts Options) []*Match {
-	ctx := images.Context{}
-	ctx.SetNumberOfThreads(opts.NumberOfThreads)
 	ans := make([]*Match, len(items))
-	results := make(chan *Match, len(items))
 	nr := []rune(strings.ToLower(query))
 	if opts.Level1 == "" {
 		opts.Level1 = LEVEL1
@@ -219,15 +216,11 @@ func ScoreItems(query string, items []string, opts Options) []*Match {
 	ropts := resolved_options_type{
 		level1: []rune(opts.Level1), level2: []rune(opts.Level2), level3: []rune(opts.Level3),
 	}
-	ctx.Parallel(0, len(items), func(nums <-chan int) {
+	parallel.Run_in_parallel_over_range(opts.NumberOfThreads, func(start, limit int) {
 		w := workspace_type{}
-		for i := range nums {
-			results <- score_item(items[i], i, nr, &ropts, &w)
+		for i := start; i < limit; i++ {
+			ans[i] = score_item(items[i], i, nr, &ropts, &w)
 		}
-	})
-	close(results)
-	for x := range results {
-		ans[x.idx] = x
-	}
+	}, 0, len(items))
 	return ans
 }

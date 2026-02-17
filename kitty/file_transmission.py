@@ -2,6 +2,7 @@
 # License: GPLv3 Copyright: 2021, Kovid Goyal <kovid at kovidgoyal.net>
 
 import errno
+import inspect
 import io
 import json
 import os
@@ -10,7 +11,7 @@ import stat
 import tempfile
 from base64 import b85decode
 from collections import defaultdict, deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from dataclasses import Field, dataclass, field, fields
 from enum import Enum, auto
@@ -18,12 +19,12 @@ from functools import partial
 from gettext import gettext as _
 from itertools import count
 from time import time_ns
-from typing import IO, Any, Callable, DefaultDict, Deque, Optional, Union
+from typing import IO, Any, DefaultDict, Deque, Union
 
 from kittens.transfer.utils import IdentityCompressor, ZlibCompressor, abspath, expand_home, home_path
 from kitty.fast_data_types import ESC_OSC, FILE_TRANSFER_CODE, AES256GCMDecrypt, add_timer, base64_decode, base64_encode, get_boss, get_options, monotonic
 from kitty.types import run_once
-from kitty.typing import ReadableBuffer, WriteableBuffer
+from kitty.typing_compat import ReadableBuffer, WriteableBuffer
 
 from .utils import log_error
 
@@ -41,7 +42,7 @@ def safe_string(x: str) -> str:
     return safe_string_pat().sub('', x)
 
 
-def as_unicode(x: Union[str, bytes]) -> str:
+def as_unicode(x: str | bytes) -> str:
     if isinstance(x, bytes):
         x = x.decode('ascii')
     return x
@@ -54,7 +55,7 @@ def encode_bypass(request_id: str, bypass: str) -> str:
 
 
 def split_for_transfer(
-    data: Union[bytes, bytearray, memoryview],
+    data: bytes | bytearray | memoryview,
     session_id: str = '', file_id: str = '',
     mark_last: bool = False,
     chunk_size: int = 4096
@@ -76,7 +77,7 @@ def iter_file_metadata(file_specs: Iterable[tuple[str, str]]) -> Iterator[Union[
     def skey(sr: os.stat_result) -> tuple[int, int]:
         return sr.st_dev, sr.st_ino
 
-    def make_ftc(path: str, spec_id: str, sr: Optional[os.stat_result] = None, parent: str = '') -> FileTransmissionCommand:
+    def make_ftc(path: str, spec_id: str, sr: os.stat_result | None = None, parent: str = '') -> FileTransmissionCommand:
         if sr is None:
             sr = os.stat(path, follow_symlinks=False)
         if stat.S_ISLNK(sr.st_mode):
@@ -117,7 +118,7 @@ def iter_file_metadata(file_specs: Iterable[tuple[str, str]]) -> Iterator[Union[
             sr = os.stat(path, follow_symlinks=False)
             read_ok = os.access(path, os.R_OK, follow_symlinks=False)
         except OSError as err:
-            errname = errno.errorcode.get(err.errno, 'EFAIL')
+            errname = errno.errorcode.get(err.errno, 'EFAIL') if err.errno is not None else 'EFAIL'
             yield TransmissionError(file_id=spec_id, code=errname, msg='Failed to read spec')
             continue
         if not read_ok:
@@ -208,7 +209,7 @@ ErrorCode = Enum('ErrorCode', 'OK STARTED CANCELED PROGRESS EINVAL EPERM EISDIR 
 class TransmissionError(Exception):
 
     def __init__(
-        self, code: Union[ErrorCode, str] = ErrorCode.EINVAL,
+        self, code: ErrorCode | str = ErrorCode.EINVAL,
         msg: str = 'Generic error',
         transmit: bool = True,
         file_id: str = '',
@@ -243,8 +244,8 @@ def name_to_serialized_map() -> dict[str, str]:
 
 
 @run_once
-def serialized_to_field_map() -> dict[bytes, 'Field[Any]']:
-    ans: dict[bytes, 'Field[Any]'] = {}
+def serialized_to_field_map() -> dict[bytes | memoryview, 'Field[Any]']:
+    ans: dict[bytes | memoryview, 'Field[Any]'] = {}
     for k in fields(FileTransmissionCommand):
         ans[k.metadata.get('sname', k.name).encode('ascii')] = k
     return ans
@@ -267,7 +268,7 @@ class FileTransmissionCommand:
     name: str = field(default='', metadata={'base64': True, 'sname': 'n'})
     status: str = field(default='', metadata={'base64': True, 'sname': 'st'})
     parent: str = field(default='', metadata={'sname': 'pr'})
-    data: bytes = field(default=b'', repr=False, metadata={'sname': 'd'})
+    data: bytes | memoryview = field(default=b'', repr=False, metadata={'sname': 'd'})
 
     def __repr__(self) -> str:
         ans = []
@@ -281,18 +282,18 @@ class FileTransmissionCommand:
             ans.append(f'data={len(self.data)} bytes')
         return 'FTC(' + ', '.join(ans) + ')'
 
-    def asdict(self, keep_defaults: bool = False) -> dict[str, Union[str, int, bytes]]:
+    def asdict(self, keep_defaults: bool = False) -> dict[str, str | int | bytes]:
         ans = {}
         for k in fields(self):
             val = getattr(self, k.name)
             if not keep_defaults and val == k.default:
                 continue
-            if issubclass(k.type, Enum):
+            if inspect.isclass(k.type) and issubclass(k.type, Enum):
                 val = val.name
             ans[k.name] = val
         return ans
 
-    def get_serialized_fields(self, prefix_with_osc_code: bool = False) -> Iterator[Union[str, bytes]]:
+    def get_serialized_fields(self, prefix_with_osc_code: bool = False) -> Iterator[str | bytes]:
         nts = name_to_serialized_map()
         found = False
         if prefix_with_osc_code:
@@ -310,9 +311,9 @@ class FileTransmissionCommand:
                 found = True
             yield nts[name]
             yield '='
-            if issubclass(k.type, Enum):
+            if inspect.isclass(k.type) and issubclass(k.type, Enum):
                 yield val.name
-            elif k.type is bytes:
+            elif k.type == bytes | memoryview:
                 yield base64_encode(val)
             elif k.type is str:
                 if k.metadata.get('base64'):
@@ -328,7 +329,7 @@ class FileTransmissionCommand:
         return ''.join(map(as_unicode, self.get_serialized_fields(prefix_with_osc_code)))
 
     @classmethod
-    def deserialize(cls, data: Union[str, bytes, memoryview]) -> 'FileTransmissionCommand':
+    def deserialize(cls, data: str | bytes | memoryview) -> 'FileTransmissionCommand':
         ans = FileTransmissionCommand()
         fmap = serialized_to_field_map()
         from kittens.transfer.rsync import parse_ftc
@@ -337,9 +338,9 @@ class FileTransmissionCommand:
             field = fmap.get(key)
             if field is None:
                 return
-            if issubclass(field.type, Enum):
+            if inspect.isclass(field.type) and issubclass(field.type, Enum):
                 setattr(ans, field.name, field.type[str(val, "utf-8")])
-            elif field.type is bytes:
+            elif field.type == bytes | memoryview:
                 setattr(ans, field.name, base64_decode(val))
             elif field.type is int:
                 setattr(ans, field.name, int(val))
@@ -359,8 +360,8 @@ class FileTransmissionCommand:
 
 class IdentityDecompressor:
 
-    def __call__(self, data: bytes, is_last: bool = False) -> bytes:
-        return data
+    def __call__(self, data: bytes | memoryview, is_last: bool = False) -> bytes:
+        return bytes(data)
 
 
 class ZlibDecompressor:
@@ -369,7 +370,7 @@ class ZlibDecompressor:
         import zlib
         self.d = zlib.decompressobj(wbits=0)
 
-    def __call__(self, data: bytes, is_last: bool = False) -> bytes:
+    def __call__(self, data: bytes | memoryview, is_last: bool = False) -> bytes:
         ans = self.d.decompress(data)
         if is_last:
             ans += self.d.flush()
@@ -384,8 +385,8 @@ class PatchFile:
         self.block_buffer = memoryview(bytearray(self.patcher.block_size))
         self.path = path
         self.signature_done = False
-        self.src_file: Optional[io.BufferedReader] = None
-        self._dest_file: Optional[IO[bytes]] = None
+        self.src_file: io.BufferedReader | None = None
+        self._dest_file: IO[bytes] | None = None
         self.closed = False
 
     @property
@@ -449,7 +450,7 @@ class DestFile:
             if not os.path.isabs(self.name):
                 self.name = abspath(self.name, use_home=True)
         try:
-            self.existing_stat: Optional[os.stat_result] = os.stat(self.name, follow_symlinks=False)
+            self.existing_stat: os.stat_result | None = os.stat(self.name, follow_symlinks=False)
         except OSError:
             self.existing_stat = None
         self.needs_unlink = self.existing_stat is not None and (self.existing_stat.st_nlink > 1 or stat.S_ISLNK(self.existing_stat.st_mode))
@@ -462,9 +463,9 @@ class DestFile:
         self.ttype = ftc.ttype
         self.link_target = b''
         self.needs_data_sent = self.ttype is not TransmissionType.simple
-        self.decompressor: Union[ZlibDecompressor, IdentityDecompressor] = ZlibDecompressor() if ftc.compression is Compression.zlib else IdentityDecompressor()
+        self.decompressor: ZlibDecompressor | IdentityDecompressor = ZlibDecompressor() if ftc.compression is Compression.zlib else IdentityDecompressor()
         self.closed = self.ftype is FileType.directory
-        self.actual_file: Union[PatchFile, IO[bytes], None] = None
+        self.actual_file: PatchFile | IO[bytes] | None = None
         self.failed = False
         self.bytes_written = 0
 
@@ -509,7 +510,7 @@ class DestFile:
             self.existing_stat = None
             self.needs_unlink = False
 
-    def write_data(self, all_files: dict[str, 'DestFile'], data: bytes, is_last: bool) -> None:
+    def write_data(self, all_files: dict[str, 'DestFile'], data: bytes | memoryview, is_last: bool) -> None:
         if self.ftype is FileType.directory:
             raise TransmissionError(code=ErrorCode.EISDIR, file_id=self.file_id, msg='Cannot write data to a directory entry')
         if self.closed:
@@ -589,7 +590,7 @@ class ActiveReceive:
 
     def __init__(self, request_id: str, quiet: int, bypass: str) -> None:
         self.id = request_id
-        self.bypass_ok: Optional[bool] = None
+        self.bypass_ok: bool | None = None
         if bypass:
             byp = get_options().file_transfer_confirmation_bypass
             self.bypass_ok = check_bypass(byp, request_id, bypass)
@@ -657,9 +658,9 @@ class SourceFile:
         self.stat = os.stat(self.path, follow_symlinks=False)
         if stat.S_ISDIR(self.stat.st_mode):
             raise TransmissionError(ErrorCode.EINVAL, msg='Cannot send a directory', file_id=self.file_id)
-        self.compressor: Union[ZlibCompressor, IdentityCompressor] = IdentityCompressor()
+        self.compressor: ZlibCompressor | IdentityCompressor = IdentityCompressor()
         self.target = b''
-        self.open_file: Optional[io.BufferedReader] = None
+        self.open_file: io.BufferedReader | None = None
         if stat.S_ISLNK(self.stat.st_mode):
             self.target = os.readlink(self.path).encode('utf-8')
         else:
@@ -686,6 +687,7 @@ class SourceFile:
         self.differ = None
 
     def next_chunk(self, sz: int = 1024 * 1024) -> tuple[bytes, int]:
+        data: bytes | memoryview = b''
         if self.target:
             self.transmitted = True
             data = self.target
@@ -718,7 +720,7 @@ class ActiveSend:
     def __init__(self, request_id: str, quiet: int, bypass: str, num_of_args: int) -> None:
         self.id = request_id
         self.expected_num_of_args = num_of_args
-        self.bypass_ok: Optional[bool] = None
+        self.bypass_ok: bool | None = None
         if bypass:
             byp = get_options().file_transfer_confirmation_bypass
             self.bypass_ok = check_bypass(byp, request_id, bypass)
@@ -729,7 +731,7 @@ class ActiveSend:
         self.last_activity_at = monotonic()
         self.file_specs: list[tuple[str, str]] = []
         self.queued_files_map: dict[str, SourceFile] = {}
-        self.active_file: Optional[SourceFile] = None
+        self.active_file: SourceFile | None = None
         self.pending_chunks: Deque[FileTransmissionCommand] = deque()
         self.metadata_sent = False
 
@@ -771,7 +773,7 @@ class ActiveSend:
             self.active_file.close()
             self.active_file = None
 
-    def next_chunk(self) -> Optional[FileTransmissionCommand]:
+    def next_chunk(self) -> FileTransmissionCommand | None:
         self.last_activity_at = monotonic()
         if self.pending_chunks:
             return self.pending_chunks.popleft()
@@ -809,16 +811,16 @@ class FileTransmission:
         self.active_receives: dict[str, ActiveReceive] = {}
         self.active_sends: dict[str, ActiveSend] = {}
         self.pending_receive_responses: Deque[FileTransmissionCommand] = deque()
-        self.pending_timer: Optional[int] = None
+        self.pending_timer: int | None = None
 
-    def callback_after(self, callback: Callable[[Optional[int]], None], timeout: float = 0) -> Optional[int]:
+    def callback_after(self, callback: Callable[[int | None], None], timeout: float = 0) -> int | None:
         return add_timer(callback, timeout, False)
 
     def start_pending_timer(self) -> None:
         if self.pending_timer is None:
             self.pending_timer = self.callback_after(self.try_pending, 0.2)
 
-    def try_pending(self, timer_id: Optional[int]) -> None:
+    def try_pending(self, timer_id: int | None) -> None:
         self.pending_timer = None
         while self.pending_receive_responses:
             payload = self.pending_receive_responses.popleft()
@@ -972,7 +974,7 @@ class FileTransmission:
                 self.callback_after(self.pump_sends, 0.05)
                 break
 
-    def pump_sends(self, timer_id: Optional[int]) -> None:
+    def pump_sends(self, timer_id: int | None) -> None:
         for asd in self.active_sends.values():
             if asd.metadata_sent:
                 self.pump_send_chunks(asd)
@@ -1080,7 +1082,7 @@ class FileTransmission:
         else:
             log_error(f'Transmission receive command with unknown action: {cmd.action}, ignoring')
 
-    def transmit_rsync_signature(self, receive_id: str, timer_id: Optional[int] = None) -> None:
+    def transmit_rsync_signature(self, receive_id: str, timer_id: int | None = None) -> None:
         q = self.active_receives.get(receive_id)
         if q is None:
             return
@@ -1131,7 +1133,7 @@ class FileTransmission:
         self.callback_after(partial(self.transmit_rsync_signature, receive_id))
 
     def send_status_response(
-        self, code: Union[ErrorCode, str] = ErrorCode.EINVAL,
+        self, code: ErrorCode | str = ErrorCode.EINVAL,
         request_id: str = '', file_id: str = '', msg: str = '',
         name: str = '', size: int = -1,
         ttype: TransmissionType = TransmissionType.simple,
@@ -1218,10 +1220,10 @@ class FileTransmission:
             if ar.send_errors:
                 self.send_status_response(code=ErrorCode.EPERM, request_id=ar.id, msg='User refused the transfer')
 
-    def send_fail_on_os_error(self, err: OSError, msg: str, ar: Union[ActiveSend, ActiveReceive], file_id: str = '') -> None:
+    def send_fail_on_os_error(self, err: OSError, msg: str, ar: ActiveSend | ActiveReceive, file_id: str = '') -> None:
         if not ar.send_errors:
             return
-        errname = errno.errorcode.get(err.errno, 'EFAIL')
+        errname = errno.errorcode.get(err.errno, 'EFAIL') if err.errno is not None else 'EFAIL'
         self.send_status_response(code=errname, msg=msg, request_id=ar.id, file_id=file_id)
 
     def active_file(self, rid: str = '', file_id: str = '') -> DestFile:
@@ -1232,7 +1234,7 @@ class TestFileTransmission(FileTransmission):
 
     def __init__(self, allow: bool = True) -> None:
         super().__init__(0)
-        self.test_responses: list[dict[str, Union[str, int, bytes]]] = []
+        self.test_responses: list[dict[str, str | int | bytes]] = []
         self.allow = allow
 
     def write_ftc_to_child(self, payload: FileTransmissionCommand, appendleft: bool = False, use_pending: bool = True) -> bool:
@@ -1245,6 +1247,6 @@ class TestFileTransmission(FileTransmission):
     def start_send(self, aid: str) -> None:
         self.handle_receive_confirmation(self.allow, aid)
 
-    def callback_after(self, callback: Callable[[Optional[int]], None], timeout: float = 0) -> Optional[int]:
+    def callback_after(self, callback: Callable[[int | None], None], timeout: float = 0) -> int | None:
         callback(None)
         return None

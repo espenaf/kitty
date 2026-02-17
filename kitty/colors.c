@@ -8,6 +8,11 @@
 #include "state.h"
 #include <structmember.h>
 #include "colors.h"
+#include "color-names.h"
+#ifdef __APPLE__
+// Needed for strod_l
+#include <xlocale.h>
+#endif
 
 
 static uint32_t FG_BG_256[256] = {
@@ -60,6 +65,17 @@ create_256_color_table(void) {
     return ans;
 }
 
+static void
+set_transparent_background_colors(TransparentDynamicColor *dest, PyObject *src) {
+    memset(dest, 0, sizeof(((ColorProfile*)0)->configured_transparent_colors));
+    for (Py_ssize_t i = 0; i < MIN(PyTuple_GET_SIZE(src), (Py_ssize_t)arraysz(((ColorProfile*)0)->configured_transparent_colors)); i++) {
+        PyObject *e = PyTuple_GET_ITEM(src, i);
+        dest[i].color = ((Color*)(PyTuple_GET_ITEM(e, 0)))->color.val & 0xffffff;
+        dest[i].opacity = (float)PyFloat_AsDouble(PyTuple_GET_ITEM(e, 1));
+        dest[i].is_set = true;
+    }
+}
+
 static bool
 set_configured_colors(ColorProfile *self, PyObject *opts) {
 #define n(which, attr) { \
@@ -80,9 +96,12 @@ set_configured_colors(ColorProfile *self, PyObject *opts) {
     n(default_fg, foreground); n(default_bg, background);
     n(cursor_color, cursor); n(cursor_text_color, cursor_text_color);
     n(highlight_fg, selection_foreground); n(highlight_bg, selection_background);
-    n(visual_bell_color, visual_bell_color); n(second_transparent_bg, second_transparent_bg);
+    n(visual_bell_color, visual_bell_color);
 #undef n
-    return true;
+    RAII_PyObject(src, PyObject_GetAttrString(opts, "transparent_background_colors"));
+    if (!src) { PyErr_SetString(PyExc_TypeError, "No transparent_background_colors on opts object"); return false; }
+    set_transparent_background_colors(self->configured_transparent_colors, src);
+    return PyErr_Occurred() ? false : true;
 }
 
 static bool
@@ -162,6 +181,8 @@ copy_color_profile(ColorProfile *dest, ColorProfile *src) {
     memcpy(dest->orig_color_table, src->orig_color_table, sizeof(dest->color_table));
     memcpy(&dest->configured, &src->configured, sizeof(dest->configured));
     memcpy(&dest->overridden, &src->overridden, sizeof(dest->overridden));
+    memcpy(dest->overriden_transparent_colors, src->overriden_transparent_colors, sizeof(dest->overriden_transparent_colors));
+    memcpy(dest->configured_transparent_colors, src->configured_transparent_colors, sizeof(dest->configured_transparent_colors));
     dest->dirty = true;
 }
 
@@ -193,8 +214,8 @@ patch_color_table(const char *key, PyObject *profiles, PyObject *spec, size_t wh
 
 static PyObject*
 patch_color_profiles(PyObject *module UNUSED, PyObject *args) {
-    PyObject *spec, *profiles, *v; ColorProfile *self; int change_configured;
-    if (!PyArg_ParseTuple(args, "O!O!p", &PyDict_Type, &spec, &PyTuple_Type, &profiles, &change_configured)) return NULL;
+    PyObject *spec, *transparent_background_colors, *profiles, *v; ColorProfile *self; int change_configured;
+    if (!PyArg_ParseTuple(args, "O!O!O!p", &PyDict_Type, &spec, &PyTuple_Type, &transparent_background_colors, &PyTuple_Type, &profiles, &change_configured)) return NULL;
     char key[32] = {0};
     for (size_t i = 0; i < arraysz(FG_BG_256); i++) {
         snprintf(key, sizeof(key) - 1, "color%zu", i);
@@ -226,10 +247,33 @@ patch_color_profiles(PyObject *module UNUSED, PyObject *args) {
         S(foreground, default_fg); S(background, default_bg); S(cursor, cursor_color);
         S(selection_foreground, highlight_fg); S(selection_background, highlight_bg);
         S(cursor_text_color, cursor_text_color); S(visual_bell_color, visual_bell_color);
-        S(second_transparent_bg, second_transparent_bg);
 #undef SI
 #undef S
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(profiles); i++) {
+        self = (ColorProfile*)PyTuple_GET_ITEM(profiles, i);
+        set_transparent_background_colors(self->overriden_transparent_colors, transparent_background_colors);
+        if (change_configured) set_transparent_background_colors(self->configured_transparent_colors, transparent_background_colors);
+    }
+    if (PyErr_Occurred()) return NULL;
     Py_RETURN_NONE;
+}
+
+bool
+colorprofile_to_transparent_color(const ColorProfile *self, unsigned index, color_type *color, float *opacity) {
+    *color = UINT32_MAX; *opacity = 1.0;
+    if (index < arraysz(self->configured_transparent_colors)) {
+        if (self->overriden_transparent_colors[index].is_set) {
+            *color = self->overriden_transparent_colors[index].color; *opacity = self->overriden_transparent_colors[index].opacity;
+            if (*opacity < 0) *opacity = OPT(background_opacity);
+            return true;
+        }
+        if (self->configured_transparent_colors[index].is_set) {
+            *color = self->configured_transparent_colors[index].color; *opacity = self->configured_transparent_colors[index].opacity;
+            if (*opacity < 0) *opacity = OPT(background_opacity);
+            return true;
+        }
+    }
+    return false;
 }
 
 DynamicColor
@@ -264,41 +308,81 @@ colorprofile_to_color_with_fallback(ColorProfile *self, DynamicColor entry, Dyna
     }
     return entry.rgb;
 }
+static Color* alloc_color(unsigned char r, unsigned char g, unsigned char b, unsigned a);
+
+static bool
+colortable_colors_into_dict(ColorProfile *self, unsigned start, unsigned limit, PyObject *ans) {
+    static char buf[32] = {'c', 'o', 'l', 'o', 'r', 0};
+    for (unsigned i = start; i < limit; i++) {
+        snprintf(buf + 5, sizeof(buf) - 6, "%u", i);
+        PyObject *val = PyLong_FromUnsignedLong(self->color_table[i]);
+        if (!val) return false;
+        int ret = PyDict_SetItemString(ans, buf, val);
+        Py_DECREF(val);
+        if (ret != 0) return false;
+    }
+    return true;
+}
+
+static PyObject*
+basic_colors(ColorProfile *self, PyObject *args UNUSED) {
+#define basic_colors_doc "Return the basic colors as a dictionary of color_name to integer or None (names are the same as used in kitty.conf)"
+    RAII_PyObject(ans, PyDict_New()); if (ans == NULL) return NULL;
+    if (!colortable_colors_into_dict(self, 0, 16, ans)) return NULL;
+
+#define D(attr, name) { \
+    unsigned long c = colorprofile_to_color(self, self->overridden.attr, self->configured.attr).rgb; \
+    PyObject *val = PyLong_FromUnsignedLong(c); if (!val) return NULL; \
+    int ret = PyDict_SetItemString(ans, #name, val); Py_DECREF(val); \
+    if (ret != 0) return NULL; \
+}
+
+    D(default_fg, foreground); D(default_bg, background);
+#undef D
+    return Py_NewRef(ans);
+}
 
 static PyObject*
 as_dict(ColorProfile *self, PyObject *args UNUSED) {
 #define as_dict_doc "Return all colors as a dictionary of color_name to integer or None (names are the same as used in kitty.conf)"
-    PyObject *ans = PyDict_New();
-    if (ans == NULL) return PyErr_NoMemory();
-    for (unsigned i = 0; i < arraysz(self->color_table); i++) {
-        static char buf[32] = {0};
-        snprintf(buf, sizeof(buf) - 1, "color%u", i);
-        PyObject *val = PyLong_FromUnsignedLong(self->color_table[i]);
-        if (!val) { Py_CLEAR(ans); return PyErr_NoMemory(); }
-        int ret = PyDict_SetItemString(ans, buf, val);
-        Py_CLEAR(val);
-        if (ret != 0) { Py_CLEAR(ans); return NULL; }
-    }
+    RAII_PyObject(ans, PyDict_New()); if (ans == NULL) return NULL;
+    if (!colortable_colors_into_dict(self, 0, arraysz(self->color_table), ans)) return NULL;
 #define D(attr, name) { \
     if (self->overridden.attr.type != COLOR_NOT_SET) { \
         int ret; PyObject *val; \
         if (self->overridden.attr.type == COLOR_IS_SPECIAL) { \
-            val = Py_None; Py_INCREF(val); \
+            val = Py_NewRef(Py_None); \
         } else { \
-            color_type c = colorprofile_to_color(self, self->overridden.attr, self->configured.attr).rgb; \
+            unsigned long c = colorprofile_to_color(self, self->overridden.attr, self->configured.attr).rgb; \
             val = PyLong_FromUnsignedLong(c); \
         } \
-        if (!val) { Py_CLEAR(ans); return NULL; } \
+        if (!val) { return NULL; } \
         ret = PyDict_SetItemString(ans, #name, val); \
-        Py_CLEAR(val); \
-        if (ret != 0) { Py_CLEAR(ans); return NULL; } \
+        Py_DECREF(val); \
+        if (ret != 0) { return NULL; } \
     }}
     D(default_fg, foreground); D(default_bg, background);
     D(cursor_color, cursor); D(cursor_text_color, cursor_text); D(highlight_fg, selection_foreground);
-    D(highlight_bg, selection_background); D(visual_bell_color, visual_bell_color); D(second_transparent_bg, second_transparent_bg);
-
+    D(highlight_bg, selection_background); D(visual_bell_color, visual_bell_color);
+    RAII_PyObject(transparent_background_colors, PyList_New(0));
+    if (!transparent_background_colors) return NULL;
+    for (size_t i = 0; i < arraysz(self->overriden_transparent_colors); i++) {
+        TransparentDynamicColor *c = NULL;
+        if (self->overriden_transparent_colors[i].is_set) c = self->overriden_transparent_colors + i;
+        else if (self->configured_transparent_colors[i].is_set) c = self->configured_transparent_colors + i;
+        if (c) {
+            RAII_PyObject(t, Py_BuildValue("Nf", alloc_color((c->color >> 16) & 0xff, (c->color >> 8) & 0xff, c->color & 0xff, 0), c->opacity));
+            if (!t) return NULL;
+            if (PyList_Append(transparent_background_colors, t) != 0) return NULL;
+        }
+    }
+    if (PyList_GET_SIZE(transparent_background_colors)) {
+        RAII_PyObject(t, PyList_AsTuple(transparent_background_colors));
+        if (!t) return NULL;
+        if (PyDict_SetItemString(ans, "transparent_background_colors", t) != 0) return NULL;
+    }
 #undef D
-    return ans;
+    return Py_NewRef(ans);
 }
 
 static PyObject*
@@ -374,6 +458,8 @@ copy_color_table_to_buffer(ColorProfile *self, color_type *buf, int offset, size
 static void
 push_onto_color_stack_at(ColorProfile *self, unsigned int i) {
     self->color_stack[i].dynamic_colors = self->overridden;
+    memcpy(self->color_stack[i].transparent_colors, self->overriden_transparent_colors, sizeof(self->overriden_transparent_colors));
+    self->color_stack[i].dynamic_colors = self->overridden;
     memcpy(self->color_stack[i].color_table, self->color_table, sizeof(self->color_stack->color_table));
 }
 
@@ -381,6 +467,7 @@ static void
 copy_from_color_stack_at(ColorProfile *self, unsigned int i) {
     self->overridden = self->color_stack[i].dynamic_colors;
     memcpy(self->color_table, self->color_stack[i].color_table, sizeof(self->color_table));
+    memcpy(self->overriden_transparent_colors, self->color_stack[i].transparent_colors, sizeof(self->overriden_transparent_colors));
 }
 
 bool
@@ -408,6 +495,20 @@ colorprofile_push_colors(ColorProfile *self, unsigned int idx) {
         return true;
     }
     return false;
+}
+
+void
+colorprofile_reset(ColorProfile *self) {
+    memcpy(self->color_table, self->orig_color_table, sizeof(FG_BG_256));
+    self->dirty = true;
+    self->color_stack_idx = 0;
+    zero_at_ptr(&self->overridden);
+    for (unsigned i = 0; i < arraysz(self->overriden_transparent_colors); i++) {
+        zero_at_ptr(self->overriden_transparent_colors + i);
+    }
+    for (unsigned i = 0; i < self->color_stack_sz; i++) {
+        zero_at_ptr(self->color_stack + i);
+    }
 }
 
 bool
@@ -445,7 +546,6 @@ default_color_table(PyObject *self UNUSED, PyObject *args UNUSED) {
 
 // Boilerplate {{{
 
-static Color* alloc_color(unsigned char r, unsigned char g, unsigned char b, unsigned a);
 #define CGETSET(name, nullable) \
     static PyObject* name##_get(ColorProfile *self, void UNUSED *closure) {  \
         DynamicColor ans = colorprofile_to_color(self, self->overridden.name, self->configured.name);  \
@@ -477,7 +577,6 @@ CGETSET(cursor_text_color, true)
 CGETSET(highlight_fg, true)
 CGETSET(highlight_bg, true)
 CGETSET(visual_bell_color, true)
-CGETSET(second_transparent_bg, true)
 #undef CGETSET
 
 static PyGetSetDef cp_getsetters[] = {
@@ -488,7 +587,6 @@ static PyGetSetDef cp_getsetters[] = {
     GETSET(highlight_fg)
     GETSET(highlight_bg)
     GETSET(visual_bell_color)
-    GETSET(second_transparent_bg)
     {NULL}  /* Sentinel */
 };
 
@@ -508,14 +606,47 @@ reload_from_opts(ColorProfile *self, PyObject *args UNUSED) {
     Py_RETURN_NONE;
 }
 
+static PyObject*
+get_transparent_background_color(ColorProfile *self, PyObject *index) {
+    if (!PyLong_Check(index)) { PyErr_SetString(PyExc_TypeError, "index must be an int"); return NULL; }
+    unsigned long idx = PyLong_AsUnsignedLong(index);
+    if (PyErr_Occurred()) return NULL;
+    if (idx >= arraysz(self->configured_transparent_colors)) Py_RETURN_NONE;
+    TransparentDynamicColor *c = self->overriden_transparent_colors[idx].is_set ? self->overriden_transparent_colors + idx : self->configured_transparent_colors + idx;
+    if (!c->is_set) Py_RETURN_NONE;
+    float opacity = c->opacity >= 0 ? c->opacity : OPT(background_opacity);
+    return (PyObject*)alloc_color((c->color >> 16) & 0xff, (c->color >> 8) & 0xff, c->color & 0xff, (unsigned)(255.f * opacity));
+}
+
+static PyObject*
+set_transparent_background_color(ColorProfile *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs < 1) { PyErr_SetString(PyExc_TypeError, "must specify index"); return NULL; }
+    if (!PyLong_Check(args[0])) { PyErr_SetString(PyExc_TypeError, "index must be an int"); return NULL; }
+    unsigned long idx = PyLong_AsUnsignedLong(args[0]);
+    if (PyErr_Occurred()) return NULL;
+    if (idx >= arraysz(self->configured_transparent_colors)) Py_RETURN_NONE;
+    if (nargs < 2) { self->overriden_transparent_colors[idx].is_set = false; Py_RETURN_NONE; }
+    if (!PyObject_TypeCheck(args[1], &Color_Type)) { PyErr_SetString(PyExc_TypeError, "color must be Color object"); return NULL; }
+    Color *c = (Color*)args[1];
+    float opacity = (float)(c->color.alpha) / 255.f;
+    if (nargs > 2 && PyFloat_Check(args[2])) opacity = (float)PyFloat_AsDouble(args[2]);
+    self->overriden_transparent_colors[idx].is_set = true;
+    self->overriden_transparent_colors[idx].color = c->color.rgb;
+    self->overriden_transparent_colors[idx].opacity = MAX(-1.f, MIN(opacity, 1.f));
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef cp_methods[] = {
     METHOD(reset_color_table, METH_NOARGS)
     METHOD(as_dict, METH_NOARGS)
+    METHOD(basic_colors, METH_NOARGS)
     METHOD(color_table_address, METH_NOARGS)
     METHOD(as_color, METH_O)
     METHOD(reset_color, METH_O)
     METHOD(set_color, METH_VARARGS)
+    METHODB(get_transparent_background_color, METH_O),
     METHODB(reload_from_opts, METH_VARARGS),
+    {"set_transparent_background_color", (PyCFunction)(void(*)(void))set_transparent_background_color, METH_FASTCALL, ""},
     {NULL}  /* Sentinel */
 };
 
@@ -552,7 +683,7 @@ new_color(PyTypeObject *type UNUSED, PyObject *args, PyObject *kwds) {
 }
 
 static PyObject*
-color_as_int(Color *self) {
+Color_as_int(Color *self) {
     return PyLong_FromUnsignedLong(self->color.val);
 }
 
@@ -566,7 +697,7 @@ color_truediv(Color *self, PyObject *divisor) {
 }
 
 static PyNumberMethods color_number_methods = {
-    .nb_int = (unaryfunc)color_as_int,
+    .nb_int = (unaryfunc)Color_as_int,
     .nb_true_divide = (binaryfunc)color_truediv,
 };
 
@@ -585,7 +716,13 @@ rgb_get(Color *self, void *closure UNUSED) {
 
 static PyObject*
 luminance_get(Color *self, void *closure UNUSED) {
-    return PyFloat_FromDouble(rgb_luminance(self->color));
+    return PyFloat_FromDouble(rgb_luminance(self->color) / 255.0);
+}
+
+static PyObject*
+is_dark_get(Color *self, void *closure UNUSED) {
+    if (rgb_luminance(self->color) / 255.0 < 0.5) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
 }
 
 static PyObject*
@@ -633,6 +770,7 @@ static PyGetSetDef color_getsetters[] = {
     {"luminance", (getter) luminance_get, NULL, "luminance", NULL},
     {"as_sgr", (getter) sgr_get, NULL, "as_sgr", NULL},
     {"as_sharp", (getter) sharp_get, NULL, "as_sharp", NULL},
+    {"is_dark", (getter) is_dark_get, NULL, "is_dark", NULL},
     {NULL}  /* Sentinel */
 };
 
@@ -643,8 +781,346 @@ contrast(Color* self, PyObject *o) {
     return PyFloat_FromDouble(rgb_contrast(self->color, other->color));
 }
 
+static int
+hexchar_to_int(char c) {
+    switch (c) {
+        START_ALLOW_CASE_RANGE
+        case '0' ... '9': return c - '0';
+        case 'a' ... 'f': return c - 'a' + 10;
+        case 'A' ... 'F': return c - 'A' + 10;
+        END_ALLOW_CASE_RANGE
+    }
+    return -1;
+}
+
+static bool
+parse_base16_uchar(const char *hex, unsigned char *out) {
+    const int hi = hexchar_to_int(hex[0]);
+    const int lo = hexchar_to_int(hex[1]);
+    if (hi < 0 || lo < 0) return false;
+    *out = (unsigned char)((hi << 4) | lo);
+    return true;
+}
+
+static bool
+parse_double(const char *src, double *out) {
+    char *endptr;
+    errno = 0;
+    *out = strtod_l(src, &endptr, get_c_locale());
+    return endptr != src && *endptr == 0 && errno == 0;
+}
+
+static bool
+parse_single_color(const char *c, size_t len, unsigned char *out) {
+    char buf[2];
+    if (len == 1) { buf[0] = c[0]; buf[1] = c[0]; c = buf; }
+    return parse_base16_uchar(c, out);
+}
+
+static PyObject*
+parse_sharp(const char *spec, size_t len) {
+    unsigned char r, g, b;
+    switch(len) {
+        case 3:
+            if (!parse_single_color(spec, 1, &r) || !parse_single_color(spec + 1, 1, &g) || !parse_single_color(spec + 2, 1, &b)) Py_RETURN_NONE;
+            break;
+        case 6: case 9: case 12:
+            if (!parse_single_color(spec, 2, &r) || !parse_single_color(spec + len/3, 2, &g) || !parse_single_color(spec + 2 * len / 3, 2, &b)) Py_RETURN_NONE;
+            break;
+        default:
+            Py_RETURN_NONE;
+    }
+    return (PyObject*)alloc_color(r, g, b, 0);
+}
+
+static PyObject*
+parse_rgb(const char *spec, size_t len) {
+    char buf[32];
+    if (len >= sizeof(buf)) Py_RETURN_NONE;
+    memcpy(buf, spec, len); buf[len] = 0;
+    unsigned char r, g, b; char *tok;
+#define p(buf, out) if (!(tok = strtok(buf, "/")) || !parse_single_color(tok, strlen(tok), &out)) Py_RETURN_NONE;
+    p(buf, r); p(NULL, g); p(NULL, b);
+#undef p
+    return (PyObject*)alloc_color(r, g, b, 0);
+}
+
+static unsigned char as8bit(double f) { return (unsigned char)(round(f * 255.)); }
+
+static bool
+parse_single_intensity(const char *s, unsigned char *out) {
+    double f; if (!parse_double(s, &f)) return false;
+    *out = as8bit(f);
+    return true;
+}
+
+static PyObject*
+parse_rgbi(const char *spec, size_t len) {
+    char buf[256];
+    if (len >= sizeof(buf)) Py_RETURN_NONE;
+    memcpy(buf, spec, len); buf[len] = 0;
+    unsigned char r, g, b; char *tok;
+#define p(buf, out) if (!(tok = strtok(buf, "/")) || !parse_single_intensity(tok, &out)) Py_RETURN_NONE;
+    p(buf, r); p(NULL, g); p(NULL, b);
+#undef p
+    return (PyObject*)alloc_color(r, g, b, 0);
+}
+
+static bool
+parse_double_intensity(char *s, double *out, double percentage_divider) {
+    size_t l = strlen(s);
+    if (l == 0) return false;
+    double divisor = 1;
+    if (s[l-1] == '%') { s[l-1] = 0; divisor = percentage_divider; }
+    if (!parse_double(s, out)) return false;
+    *out /= divisor;
+    return true;
+}
+
+static double clamp(const double f) { return MAX(0, MIN(f, 1)); }
+
+static double
+linear_to_srgb(double c) { return c <= 0.0031308 ? c * 12.92 : (1.055 * pow(c, (1 / 2.4)) - 0.055); }
+
+static double degrees_to_radians(double degrees) { return degrees * (M_PI / 180); }
+static double radians_to_degrees(double radians) { return 180 * radians / M_PI; }
+
+static void
+oklch_to_srgb(double l, double c, double h, double *r, double *g, double *b) {
+    // Convert OKLCH to OKLab
+    const double h_rad = degrees_to_radians(h);
+    const double a = c * cos(h_rad);
+    const double lb = c * sin(h_rad);
+    // Convert OKLab to Linear sRGB
+    // Using the OKLab to Linear sRGB transformation
+    const double l_ = l + 0.3963377774 * a + 0.2158037573 * lb;
+    const double m_ = l - 0.1055613458 * a - 0.0638541728 * lb;
+    const double s_ = l - 0.0894841775 * a - 1.2914855480 * lb;
+
+    const double l_lin = l_ * l_ * l_;
+    const double m_lin = m_ * m_ * m_;
+    const double s_lin = s_ * s_ * s_;
+
+    const double r_lin = +4.0767416621 * l_lin - 3.3077115913 * m_lin + 0.2309699292 * s_lin;
+    const double g_lin = -1.2684380046 * l_lin + 2.6097574011 * m_lin - 0.3413193965 * s_lin;
+    const double b_lin = -0.0041960863 * l_lin - 0.7034186147 * m_lin + 1.7076147010 * s_lin;
+
+    *r = linear_to_srgb(clamp(r_lin)); *g = linear_to_srgb(clamp(g_lin)); *b = linear_to_srgb(clamp(b_lin));
+}
+
+static double srgb_to_linear(double c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+
+
+static void
+srgb_to_oklab(double r, double g, double b, double *l, double *a, double *lb) {
+    // Convert sRGB to linear sRGB
+    const double r_lin = srgb_to_linear(r);
+    const double g_lin = srgb_to_linear(g);
+    const double b_lin = srgb_to_linear(b);
+
+    // Convert Linear sRGB to OKLab (inverse of oklch_to_srgb)
+    const double l_lin = 0.4122214708 * r_lin + 0.5363325363 * g_lin + 0.0514459929 * b_lin;
+    const double m_lin = 0.2119034982 * r_lin + 0.6806995451 * g_lin + 0.1073969566 * b_lin;
+    const double s_lin = 0.0883024619 * r_lin + 0.2817188376 * g_lin + 0.6299787005 * b_lin;
+
+    const double l_ = l_lin != 0 ? copysign(pow(fabs(l_lin), 1./3.), l_lin) : 0;
+    const double m_ = m_lin != 0 ? copysign(pow(fabs(m_lin), 1./3.), m_lin) : 0;
+    const double s_ = s_lin != 0 ? copysign(pow(fabs(s_lin), 1./3.), s_lin) : 0;
+
+    // OKLab coordinates
+    *l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+    *a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+    *lb = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+}
+
+static double
+distance(double x_l, double x_a, double x_b, double y_l, double y_a, double y_b) {
+    return sqrt((x_l - y_l)*(x_l - y_l) + (x_a - y_a)*(x_a - y_a) + (x_b - y_b)*(x_b - y_b));
+}
+
+static void
+oklch_to_srgb_gamut_map(double l, double c, double h, double *r, double *g, double *b) {
+    // Edge cases: pure black or white don't need gamut mapping
+    if (!isfinite(l) || !isfinite(c) || !isfinite(h) || l <= 0) { *r = 0; *g = 0; *b = 0; return; }
+    if (l >= 1) { *r = 1; *g = 1; *b = 1; return; }
+    // Constants from CSS Color Module Level 4
+    static const double JND = 0.02;  // Just Noticeable Difference threshold (2% in deltaEOK)
+    static const double MIN_CONVERGENCE = 0.0001;  // Binary search precision (0.01% chroma)
+    static const double EPSILON = 0.00001;  // Small value for doubleing point comparisons
+
+    // If chroma is very small, color is essentially achromatic
+    if (c < EPSILON) { *r = linear_to_srgb(l); *g = *r; *b = *r; return; }
+    // Try the original color first
+    oklch_to_srgb(l, c, h, r, g, b);
+#define in_gamut(r,g,b) (0. <= r && r <= 1. && 0. <= g && g <= 1. && 0. <= b && b <= 1.)
+    if (in_gamut(*r,*g,*b)) return;
+    // Binary search for maximum in-gamut chroma
+    double low_chroma = 0, high_chroma = c, r_test, g_test, b_test, r_clipped, g_clipped, b_clipped;
+
+    // Convert original color to OKLab for deltaE calculations
+    while ((high_chroma - low_chroma) > MIN_CONVERGENCE) {
+        double mid_chroma = (high_chroma + low_chroma) * 0.5;
+        // Try this chroma value
+        oklch_to_srgb(l, mid_chroma, h, &r_test, &g_test, &b_test);
+        // Check if in gamut (before clipping)
+        if (in_gamut(r_test, g_test, b_test)) {
+            // In gamut - try higher chroma
+            low_chroma = mid_chroma;
+        } else {
+            // Out of gamut - clip and check deltaE
+            r_clipped = clamp(r_test); g_clipped = clamp(g_test); b_clipped = clamp(b_test);
+
+            // Convert both to OKLab for comparison
+            double l_test, a_test, lb_test, l_clipped, a_clipped, lb_clipped;
+            srgb_to_oklab(r_test, g_test, b_test, &l_test, &a_test, &lb_test);
+            srgb_to_oklab(r_clipped, g_clipped, b_clipped, &l_clipped, &a_clipped, &lb_clipped);
+
+            // Calculate perceptual difference
+            double de = distance(l_test, a_test, lb_test, l_clipped, a_clipped, lb_clipped);
+
+            if (de < JND) {
+                // Difference is imperceptible - accept this chroma
+                low_chroma = mid_chroma;
+            } else {
+                // Difference is noticeable - reduce chroma more
+                high_chroma = mid_chroma;
+            }
+        }
+    }
+    // Use the final chroma value and clip to ensure in-gamut
+    oklch_to_srgb(l, low_chroma, h, r, g, b);
+    *r = clamp(*r); *g = clamp(*g); *b = clamp(*b);
+#undef in_gamut
+}
+
+static double
+f_inv(double t) {
+    static const double delta = 6. / 29.;
+    return t > delta ? t*t*t : 3 * delta * delta * (t - 4. / 29.);
+}
+
+
+static void
+lab_to_oklch(double l, double a, double b, double *okl, double *c, double *h) {
+    const double y = (l + 16.) / 116.;
+    const double x = a / 500. + y;
+    const double z = y - b / 200.;
+    const double x_val = 0.95047 * f_inv(x);
+    const double y_val = f_inv(y);
+    const double z_val = 1.08883 * f_inv(z);
+
+    // XYZ to Linear sRGB (don't clip here to preserve out-of-gamut info)
+    const double r_lin = +3.2404542 * x_val - 1.5371385 * y_val - 0.4985314 * z_val;
+    const double g_lin = -0.9692660 * x_val + 1.8760108 * y_val + 0.0415560 * z_val;
+    const double b_lin = +0.0556434 * x_val - 0.2040259 * y_val + 1.0572252 * z_val;
+
+    // Convert linear sRGB to sRGB gamma
+    const double r_srgb = r_lin >= 0 ? linear_to_srgb(r_lin) : 0;
+    const double g_srgb = g_lin >= 0 ? linear_to_srgb(g_lin) : 0;
+    const double b_srgb = b_lin >= 0 ? linear_to_srgb(b_lin) : 0;
+
+    // Convert to OKLab
+    double a_ok, b_ok;
+    srgb_to_oklab(r_srgb, g_srgb, b_srgb, okl, &a_ok, &b_ok);
+    // Convert OKLab to OKLCH
+    *c = sqrt(a_ok * a_ok + b_ok * b_ok);
+    *h = fmod(radians_to_degrees(atan2(b_ok, a_ok)), 360.f);
+}
+
+static PyObject*
+parse_oklch(const char *spec, size_t len) {
+    if (len < 10 || spec[--len] != ')') Py_RETURN_NONE;
+    if (spec[0] != 'k' || spec[1] != 'l' || spec[2] != 'c' || spec[3] != 'h' || spec[4] != '(') Py_RETURN_NONE;
+    spec += 5; len -= 5;
+    char buf[256]; if (len >= sizeof(buf)) Py_RETURN_NONE;
+    memcpy(buf, spec, len); buf[len] = 0;
+    double l, c, h; char *tok;
+#define p(buf, out) if (!(tok = strtok(buf, " ,")) || !parse_double_intensity(tok, &out, 100)) Py_RETURN_NONE;
+    p(buf, l); p(NULL, c); p(NULL, h);
+#undef p
+    // Clamp to reasonable ranges
+    l = clamp(l);
+    c = MAX(0.f, c);  // Chroma is unbounded but we don't clamp high end
+    h = fmod(h, 360);  // Wrap hue to 0-360
+    double r, g, b;
+    oklch_to_srgb_gamut_map(l, c, h, &r, &g, &b);
+    return (PyObject*)alloc_color(as8bit(r), as8bit(g), as8bit(b), 0);
+}
+
+static PyObject*
+parse_lab(const char *spec, size_t len) {
+    if (len < 8 || spec[--len] != ')') Py_RETURN_NONE;
+    if (spec[0] != 'a' || spec[1] != 'b' || spec[2] != '(') Py_RETURN_NONE;
+    spec += 3; len -= 3;
+    char buf[256]; if (len >= sizeof(buf)) Py_RETURN_NONE;
+    memcpy(buf, spec, len); buf[len] = 0;
+    double l, a, b; char *tok;
+#define p(buf, out) if (!(tok = strtok(buf, " ,")) || !parse_double_intensity(tok, &out, 1)) Py_RETURN_NONE;
+    p(buf, l); p(NULL, a); p(NULL, b);
+#undef p
+    // Clamp to reasonable ranges
+    double okl, c, h, r, g, bb;
+    lab_to_oklch(MAX(0., MIN(l, 100.)), a, b, &okl, &c, &h);
+    oklch_to_srgb_gamut_map(okl, c, h, &r, &g, &bb);
+    return (PyObject*)alloc_color(as8bit(r), as8bit(g), as8bit(bb), 0);
+}
+
+static const char*
+trim_view(const char *str, Py_ssize_t *len) {
+    if (str == NULL || *len == 0) return str;
+    const char *start = str;
+    const char *end = str + *len - 1;
+    while (start <= end && isspace((unsigned char)*start)) start++;
+    while (end > start && isspace((unsigned char)*end)) end--;
+    if (start > end) { *len = 0; } else { *len = (size_t)(end - start + 1); }
+    return start;
+}
+
+static PyObject*
+parse_color(PyTypeObject *type UNUSED, PyObject *pspec) {
+    if (!PyUnicode_Check(pspec)) { PyErr_SetString(PyExc_TypeError, "spec must be a string"); return NULL; }
+    RAII_PyObject(lower_cased, PyObject_CallMethod(pspec, "lower", NULL));
+    if (!lower_cased) return NULL;
+    Py_ssize_t len;
+    const char *spec = PyUnicode_AsUTF8AndSize(lower_cased, &len);
+    spec = trim_view(spec, &len);
+    if (len < 2) Py_RETURN_NONE;
+    // Remove trailing comments
+    switch (spec[0]) {
+        case '#': {
+            const char *s = strchr(spec, ' ');
+            if (s) len = s - spec;
+        } break;
+        default: {
+            const char *s = strchr(spec, '#');
+            if (s) {
+                len = s - spec;
+                spec = trim_view(spec, &len);
+            }
+        } break;
+    }
+    const struct Keyword *k = in_color_name_set(spec, len);
+    if (k) return (PyObject*)alloc_color((k->value >> 16) & 0xff, (k->value >> 8) & 0xff, k->value & 0xff, 0);
+    if (len < 4) Py_RETURN_NONE;
+    switch (spec[0]) {
+        case '#': return parse_sharp(spec + 1, len - 1);
+        case 'r':
+            if (spec[1] != 'g' || spec[2] != 'b' || len < 6) Py_RETURN_NONE;
+            switch(spec[3]) {
+                case ':': return parse_rgb(spec + 4, len - 4);
+                case 'i':
+                    if (spec[4] == 'i' && spec[5] == ':') return parse_rgbi(spec + 5, len - 5);
+            }
+            Py_RETURN_NONE;
+        case 'o': return parse_oklch(spec + 1, len - 1);
+        case 'l': return parse_lab(spec + 1, len - 1);
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef color_methods[] = {
     METHODB(contrast, METH_O),
+    METHODB(parse_color, METH_O | METH_CLASS),
     {NULL}  /* Sentinel */
 };
 
@@ -676,9 +1152,27 @@ PyTypeObject Color_Type = {
 };
 
 
+static PyObject*
+all_color_names(PyObject *self UNUSED, PyObject *args UNUSED) {
+    RAII_PyObject(ans, PyTuple_New(TOTAL_KEYWORDS));
+    if (!ans) return NULL;
+    const struct Keyword *k;
+    Py_ssize_t n = 0;
+    for (unsigned i = 0; i <= MAX_HASH_VALUE; i++) {
+        if ((k = &color_names[i])->name > -1) {
+            const char *name = color_names[i].name + stringpool;
+            PyObject *t = Py_BuildValue("sN", name, alloc_color((k->value >> 16) & 0xff, (k->value >> 8) & 0xff, k->value & 0xff, 0));
+            if (!t) return NULL;
+            PyTuple_SET_ITEM(ans, n, t); n++;
+        }
+    }
+    return Py_NewRef(ans);
+}
+
 static PyMethodDef module_methods[] = {
     METHODB(default_color_table, METH_NOARGS),
     METHODB(patch_color_profiles, METH_VARARGS),
+    METHODB(all_color_names, METH_NOARGS),
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

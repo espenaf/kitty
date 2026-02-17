@@ -5,31 +5,36 @@ package tool
 import (
 	"fmt"
 
-	"kitty/kittens/ask"
-	"kitty/kittens/choose_fonts"
-	"kitty/kittens/clipboard"
-	"kitty/kittens/diff"
-	"kitty/kittens/hints"
-	"kitty/kittens/hyperlinked_grep"
-	"kitty/kittens/icat"
-	"kitty/kittens/notify"
-	"kitty/kittens/query_terminal"
-	"kitty/kittens/show_key"
-	"kitty/kittens/ssh"
-	"kitty/kittens/themes"
-	"kitty/kittens/transfer"
-	"kitty/kittens/unicode_input"
-	"kitty/tools/cli"
-	"kitty/tools/cmd/at"
-	"kitty/tools/cmd/benchmark"
-	"kitty/tools/cmd/edit_in_kitty"
-	"kitty/tools/cmd/mouse_demo"
-	"kitty/tools/cmd/pytest"
-	"kitty/tools/cmd/run_shell"
-	"kitty/tools/cmd/show_error"
-	"kitty/tools/cmd/update_self"
-	"kitty/tools/tui"
-	"kitty/tools/utils/images"
+	"github.com/kovidgoyal/kitty/kittens/ask"
+	"github.com/kovidgoyal/kitty/kittens/choose_files"
+	"github.com/kovidgoyal/kitty/kittens/choose_fonts"
+	"github.com/kovidgoyal/kitty/kittens/clipboard"
+	"github.com/kovidgoyal/kitty/kittens/desktop_ui"
+	"github.com/kovidgoyal/kitty/kittens/diff"
+	"github.com/kovidgoyal/kitty/kittens/hints"
+	"github.com/kovidgoyal/kitty/kittens/hyperlinked_grep"
+	"github.com/kovidgoyal/kitty/kittens/icat"
+	"github.com/kovidgoyal/kitty/kittens/notify"
+	"github.com/kovidgoyal/kitty/kittens/panel"
+	"github.com/kovidgoyal/kitty/kittens/query_terminal"
+	"github.com/kovidgoyal/kitty/kittens/quick_access_terminal"
+	"github.com/kovidgoyal/kitty/kittens/show_key"
+	"github.com/kovidgoyal/kitty/kittens/ssh"
+	"github.com/kovidgoyal/kitty/kittens/themes"
+	"github.com/kovidgoyal/kitty/kittens/transfer"
+	"github.com/kovidgoyal/kitty/kittens/unicode_input"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/cmd/at"
+	"github.com/kovidgoyal/kitty/tools/cmd/atexit"
+	"github.com/kovidgoyal/kitty/tools/cmd/benchmark"
+	"github.com/kovidgoyal/kitty/tools/cmd/edit_in_kitty"
+	"github.com/kovidgoyal/kitty/tools/cmd/mouse_demo"
+	"github.com/kovidgoyal/kitty/tools/cmd/pytest"
+	"github.com/kovidgoyal/kitty/tools/cmd/run_shell"
+	"github.com/kovidgoyal/kitty/tools/cmd/show_error"
+	"github.com/kovidgoyal/kitty/tools/cmd/update_self"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/utils/images"
 )
 
 var _ = fmt.Print
@@ -52,10 +57,16 @@ func KittyToolEntryPoints(root *cli.Command) {
 	ssh.EntryPoint(root)
 	// transfer
 	transfer.EntryPoint(root)
+	// panel
+	panel.EntryPoint(root)
+	// quick_access_terminal
+	quick_access_terminal.EntryPoint(root)
 	// unicode_input
 	unicode_input.EntryPoint(root)
 	// show_key
 	show_key.EntryPoint(root)
+	// desktop_ui
+	desktop_ui.EntryPoint(root)
 	// mouse_demo
 	root.AddSubCommand(&cli.Command{
 		Name:             "mouse-demo",
@@ -84,6 +95,8 @@ func KittyToolEntryPoints(root *cli.Command) {
 	show_error.EntryPoint(root)
 	// choose-fonts
 	choose_fonts.EntryPoint(root)
+	// choose-files
+	choose_files.EntryPoint(root)
 	// query-terminal
 	query_terminal.EntryPoint(root)
 	// __pytest__
@@ -94,21 +107,34 @@ func KittyToolEntryPoints(root *cli.Command) {
 		Hidden:          true,
 		OnlyArgsAllowed: true,
 		Run: func(cmd *cli.Command, args []string) (rc int, err error) {
-			tui.ExecAndHoldTillEnter(args)
-			return
+			return tui.ExecAndHoldTillEnter(args)
 		},
 	})
-	// __confirm_and_run_shebang__
+	// __shebang__
 	root.AddSubCommand(&cli.Command{
-		Name:            "__confirm_and_run_shebang__",
+		Name:            "__shebang__",
 		Hidden:          true,
 		OnlyArgsAllowed: true,
 		Run: func(cmd *cli.Command, args []string) (rc int, err error) {
-			return confirm_and_run_shebang(args)
+			return run_shebang(args)
 		},
 	})
+	// __confirm_and_run_exe__
+	root.AddSubCommand(&cli.Command{
+		Name:            "__confirm_and_run_exe__",
+		Hidden:          true,
+		OnlyArgsAllowed: true,
+		Run: func(cmd *cli.Command, args []string) (rc int, err error) {
+			return confirm_and_run_exe(args)
+		},
+	})
+
 	// __convert_image__
 	images.ConvertEntryPoint(root)
+	// __atexit__
+	atexit.EntryPoint(root)
+	// __width_test__
+	cli.WcswidthKittenEntryPoint(root)
 	// __generate_man_pages__
 	root.AddSubCommand(&cli.Command{
 		Name:            "__generate_man_pages__",

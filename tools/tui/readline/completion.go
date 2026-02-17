@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"kitty/tools/cli"
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -113,7 +113,7 @@ func (self *Readline) complete(forwards bool, repeat_count uint) bool {
 			self.input_state.lines[self.input_state.cursor.Y] += al[0]
 			self.input_state.lines = append(self.input_state.lines, al[1:]...)
 		}
-		if c.current.num_of_matches == 1 && self.AllText() == all_text_before_completion {
+		if c.current.num_of_matches == 1 && self.AllText() == all_text_before_completion && repeat_count > 0 {
 			// when there is only a single match and it has already been inserted there is no point iterating over current completions
 			orig := self.last_action
 			self.last_action = ActionNil

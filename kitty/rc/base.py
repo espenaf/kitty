@@ -1,14 +1,16 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, NoReturn, Optional, Set, Tuple, Type, Union, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Optional, Union, cast
 
-from kitty.cli import CompletionSpec, get_defaults_from_seq, parse_args, parse_option_spec
+from kitty.cli import get_defaults_from_seq, parse_args
 from kitty.cli_stub import RCOptions as R
 from kitty.constants import list_kitty_resources, running_in_kitty
+from kitty.simple_cli_definitions import CompletionSpec, parse_option_spec
 from kitty.types import AsyncResponse
 
 if TYPE_CHECKING:
@@ -19,7 +21,7 @@ if TYPE_CHECKING:
     Boss = B
     Tab = T
 else:
-    Boss = Window = Tab = None
+    Boss = Window = Tab = object
 RCOptions = R
 
 
@@ -61,11 +63,11 @@ class StreamError(ValueError):
 
 class PayloadGetter:
 
-    def __init__(self, cmd: 'RemoteCommand', payload: Dict[str, Any]):
+    def __init__(self, cmd: 'RemoteCommand', payload: dict[str, Any]):
         self.payload = payload
         self.cmd = cmd
 
-    def __call__(self, key: str, opt_name: Optional[str] = None, missing: Any = None) -> Any:
+    def __call__(self, key: str, opt_name: str | None = None, missing: Any = None) -> Any:
         ans = self.payload.get(key, payload_get)
         if ans is not payload_get:
             return ans
@@ -75,13 +77,12 @@ class PayloadGetter:
 no_response = NoResponse()
 payload_get = object()
 ResponseType = Union[bool, str, None, NoResponse, AsyncResponse]
-CmdReturnType = Union[Dict[str, Any], List[Any], Tuple[Any, ...], str, int, float, bool]
+CmdReturnType = Union[dict[str, Any], list[Any], tuple[Any, ...], str, int, float, bool]
 CmdGenerator = Iterator[CmdReturnType]
 PayloadType = Optional[Union[CmdReturnType, CmdGenerator]]
 PayloadGetType = PayloadGetter
-ArgsType = List[str]
-ImageCompletion = CompletionSpec.from_string('type:file group:"Images"')
-ImageCompletion.extensions = 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff'
+ArgsType = list[str]
+ImageCompletion = CompletionSpec.from_string('type:file group:"Images" ext:png,jpg,jpeg,webp,gif,bmp,tiff')
 SUPPORTED_IMAGE_FORMATS = tuple(x.upper() for x in ImageCompletion.extensions if x != 'jpg')
 
 
@@ -89,7 +90,7 @@ MATCH_WINDOW_OPTION = '''\
 --match -m
 The window to match. Match specifications are of the form: :italic:`field:query`.
 Where :italic:`field` can be one of: :code:`id`, :code:`title`, :code:`pid`, :code:`cwd`, :code:`cmdline`, :code:`num`,
-:code:`env`, :code:`var`, :code:`state`, :code:`neighbor`, and :code:`recent`.
+:code:`env`, :code:`var`, :code:`state`, :code:`neighbor`, :code:`session` and :code:`recent`.
 :italic:`query` is the expression to match. Expressions can be either a number or a regular expression, and can be
 :ref:`combined using Boolean operators <search_syntax>`.
 
@@ -110,6 +111,11 @@ active window, one being the previously active window and so on.
 The field :code:`neighbor` refers to a neighbor of the active window in the specified direction, which can be:
 :code:`left`, :code:`right`, :code:`top` or :code:`bottom`.
 
+The field :code:`session` matches windows that were created in the specified session.
+Use the expression :code:`^$` to match windows that were not created in a session and
+:code:`.` to match the currently active session and :code:`~` to match either the currently
+active session or the last active session when no session is active.
+
 When using the :code:`env` field to match on environment variables, you can specify only the environment variable name
 or a name and value, for example, :code:`env:MY_ENV_VAR=2`.
 
@@ -118,14 +124,15 @@ as with the :code:`env` field.
 
 The field :code:`state` matches on the state of the window. Supported states
 are: :code:`active`, :code:`focused`, :code:`needs_attention`,
-:code:`parent_active`, :code:`parent_focused`, :code:`self`,
-:code:`overlay_parent`.  Active windows are the windows that are active in
-their parent tab. There is only one focused window and it is the window to
-which keyboard events are delivered. If no window is focused, the last focused
-window is matched. The value :code:`self` matches the window in which the
-remote control command is run. The value :code:`overlay_parent` matches the
-window that is under the :code:`self` window, when the self window is an
-overlay.
+:code:`parent_active`, :code:`parent_focused`, :code:`focused_os_window`,
+:code:`self`, :code:`overlay_parent`.  Active windows are the windows that are
+active in their parent tab. There is only one focused window and it is the
+window to which keyboard events are delivered. If no window is focused, the
+last focused window is matched. The value :code:`focused_os_window` matches
+all windows in the currently focused OS window. The value :code:`self` matches
+the window in which the remote control command is run. The value
+:code:`overlay_parent` matches the window that is under the :code:`self`
+window, when the self window is an overlay.
 
 Note that you can use the :ref:`kitten @ ls <at-ls>` command to get a list of windows.
 '''
@@ -133,7 +140,7 @@ MATCH_TAB_OPTION = '''\
 --match -m
 The tab to match. Match specifications are of the form: :italic:`field:query`.
 Where :italic:`field` can be one of: :code:`id`, :code:`index`, :code:`title`, :code:`window_id`, :code:`window_title`,
-:code:`pid`, :code:`cwd`, :code:`cmdline` :code:`env`, :code:`var`, :code:`state` and :code:`recent`.
+:code:`pid`, :code:`cwd`, :code:`cmdline` :code:`env`, :code:`var`, :code:`state`, :code:`session` and :code:`recent`.
 :italic:`query` is the expression to match. Expressions can be either a number or a regular expression, and can be
 :ref:`combined using Boolean operators <search_syntax>`.
 
@@ -153,14 +160,21 @@ The :code:`index` number is used to match the nth tab in the currently active OS
 The :code:`recent` number matches recently active tabs in the currently active OS window, with zero being the currently
 active tab, one the previously active tab and so on.
 
+The field :code:`session` matches tabs that were created in the specified session.
+Use the expression :code:`^$` to match windows that were not created in a session and
+:code:`.` to match the currently active session and :code:`~` to match either the currently
+active session or the last active session when no session is active.
+
 When using the :code:`env` field to match on environment variables, you can specify only the environment variable name
 or a name and value, for example, :code:`env:MY_ENV_VAR=2`. Tabs containing any window with the specified environment
 variables are matched. Similarly, :code:`var` matches tabs containing any window with the specified user variable.
 
 The field :code:`state` matches on the state of the tab. Supported states are:
-:code:`active`, :code:`focused`, :code:`needs_attention`, :code:`parent_active` and :code:`parent_focused`.
+:code:`active`, :code:`focused`, :code:`needs_attention`, :code:`parent_active`, :code:`parent_focused`
+and :code:`focused_os_window`.
 Active tabs are the tabs that are active in their parent OS window. There is only one focused tab
 and it is the tab to which keyboard events are delivered. If no tab is focused, the last focused tab is matched.
+The value :code:`focused_os_window` matches all tabs in the currently focused OS window.
 
 Note that you can use the :ref:`kitten @ ls <at-ls>` command to get a list of tabs.
 '''
@@ -172,7 +186,7 @@ class ParsingOfArgsFailed(ValueError):
 
 class AsyncResponder:
 
-    def __init__(self, payload_get: PayloadGetType, window: Optional[Window]) -> None:
+    def __init__(self, payload_get: PayloadGetType, window: Window | None) -> None:
         self.async_id: str = payload_get('async_id', missing='')
         self.peer_id: int = payload_get('peer_id', missing=0)
         self.window_id: int = getattr(window, 'id', 0)
@@ -190,17 +204,17 @@ class AsyncResponder:
 class ArgsHandling:
 
     json_field: str = ''
-    count: Optional[int] = None
+    count: int | None = None
     spec: str = ''
     completion: CompletionSpec = field(default_factory=CompletionSpec)
-    value_if_unspecified: Tuple[str, ...] = ()
+    value_if_unspecified: tuple[str, ...] = ()
     minimum_count: int = -1
-    first_rest: Optional[Tuple[str, str]] = None
+    first_rest: tuple[str, str] | None = None
     special_parse: str = ''
-    args_choices: Optional[Callable[[], Iterable[str]]] = None
+    args_choices: Callable[[], Iterable[str]] | None = None
 
     @property
-    def args_count(self) -> Optional[int]:
+    def args_count(self) -> int | None:
         if not self.spec:
             return 0
         return self.count
@@ -212,7 +226,7 @@ class ArgsHandling:
         if self.completion:
             yield from self.completion.as_go_code(go_name + '.ArgCompleter', ' = ')
 
-    def as_go_code(self, cmd_name: str, field_types: Dict[str, str], handled_fields: Set[str]) -> Iterator[str]:
+    def as_go_code(self, cmd_name: str, field_types: dict[str, str], handled_fields: set[str]) -> Iterator[str]:
         c = self.args_count
         if c == 0:
             yield f'if len(args) != 0 {{ return fmt.Errorf("%s", "Unknown extra argument(s) supplied to {cmd_name}") }}'
@@ -271,7 +285,7 @@ class ArgsHandling:
                 return
             if jt.startswith('choices.'):
                 yield f'if len(args) != 1 {{ return fmt.Errorf("%s", "Must specify exactly 1 argument for {cmd_name}") }}'
-                choices = ", ".join((f'"{x}"' for x in jt.split('.')[1:]))
+                choices = ", ".join(f'"{x}"' for x in jt.split('.')[1:])
                 yield 'switch(args[0]) {'
                 yield f'case {choices}:\n\t{dest} = args[0]'
                 yield f'default: return fmt.Errorf("%s is not a valid choice. Allowed values: %s", args[0], `{choices}`)'
@@ -287,9 +301,9 @@ class StreamInFlight:
 
     def __init__(self) -> None:
         self.stream_id = ''
-        self.tempfile: Optional[BytesIO] = None
+        self.tempfile: BytesIO | None = None
 
-    def handle_data(self, stream_id: str, data: bytes) -> Union[AsyncResponse, BytesIO]:
+    def handle_data(self, stream_id: str, data: bytes) -> AsyncResponse | BytesIO:
         from ..remote_control import close_active_stream
         def abort_stream() -> None:
             close_active_stream(self.stream_id)
@@ -325,15 +339,15 @@ class RemoteCommand:
     short_desc: str = ''
     desc: str = ''
     args: ArgsHandling = ArgsHandling()
-    options_spec: Optional[str] = None
+    options_spec: str | None = None
     response_timeout: float = 10.  # seconds
     string_return_is_error: bool = False
-    defaults: Optional[Dict[str, Any]] = None
+    defaults: dict[str, Any] | None = None
     is_asynchronous: bool = False
-    options_class: Type[RCOptions] = RCOptions
+    options_class: type[RCOptions] = RCOptions
     protocol_spec: str = ''
     argspec = args_count = args_completion = ArgsHandling()
-    field_to_option_map: Optional[Dict[str, str]] = None
+    field_to_option_map: dict[str, str] | None = None
     reads_streaming_data: bool = False
     disallow_responses: bool = False
 
@@ -354,7 +368,7 @@ class RemoteCommand:
             return self.defaults.get(name, missing)
         return missing
 
-    def windows_for_match_payload(self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType) -> List['Window']:
+    def windows_for_match_payload(self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType) -> list['Window']:
         if payload_get('all'):
             windows = list(boss.all_windows)
         else:
@@ -370,7 +384,7 @@ class RemoteCommand:
                     raise MatchError(payload_get('match'))
         return windows
 
-    def tabs_for_match_payload(self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType) -> List['Tab']:
+    def tabs_for_match_payload(self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType) -> list['Tab']:
         if payload_get('all'):
             return list(boss.all_tabs)
         match = payload_get('match')
@@ -380,8 +394,7 @@ class RemoteCommand:
                 raise MatchError(match, 'tabs')
             return tabs
         if window and payload_get('self') in (None, True):
-            q = boss.tab_for_window(window)
-            if q:
+            if q := window.tabref():
                 return [q]
         t = boss.active_tab
         if t:
@@ -391,14 +404,14 @@ class RemoteCommand:
     def windows_for_payload(
         self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType,
         window_match_name: str = 'match_window', tab_match_name: str = 'match_tab',
-    ) -> List['Window']:
+    ) -> list['Window']:
         if payload_get('all'):
             windows = list(boss.all_windows)
         else:
             window = window or boss.active_window
             windows = [window] if window else []
             if payload_get(window_match_name):
-                windows = list(boss.match_windows(payload_get(window_match_name)))
+                windows = list(boss.match_windows(payload_get(window_match_name), window))
                 if not windows:
                     raise MatchError(payload_get(window_match_name))
             if payload_get(tab_match_name):
@@ -410,7 +423,7 @@ class RemoteCommand:
                     windows += list(tab)
         return windows
 
-    def create_async_responder(self, payload_get: PayloadGetType, window: Optional[Window]) -> AsyncResponder:
+    def create_async_responder(self, payload_get: PayloadGetType, window: Window | None) -> AsyncResponder:
         return AsyncResponder(payload_get, window)
 
     def message_to_kitty(self, global_opts: RCOptions, opts: Any, args: ArgsType) -> PayloadType:
@@ -422,18 +435,18 @@ class RemoteCommand:
     def cancel_async_request(self, boss: 'Boss', window: Optional['Window'], payload_get: PayloadGetType) -> None:
         pass
 
-    def handle_streamed_data(self, data: bytes, payload_get: PayloadGetType) -> Union[BytesIO, AsyncResponse]:
+    def handle_streamed_data(self, data: bytes, payload_get: PayloadGetType) -> BytesIO | AsyncResponse:
         stream_id = payload_get('stream_id')
         if not stream_id or not isinstance(stream_id, str):
             raise StreamError('No stream_id in rc payload')
         return self.stream_in_flight.handle_data(stream_id, data)
 
 
-def cli_params_for(command: RemoteCommand) -> Tuple[Callable[[], str], str, str, str]:
+def cli_params_for(command: RemoteCommand) -> tuple[Callable[[], str], str, str, str]:
     return (command.options_spec or '\n').format, command.args.spec, command.desc, f'kitten @ {command.name}'
 
 
-def parse_subcommand_cli(command: RemoteCommand, args: ArgsType) -> Tuple[Any, ArgsType]:
+def parse_subcommand_cli(command: RemoteCommand, args: ArgsType) -> tuple[Any, ArgsType]:
     opts, items = parse_args(args[1:], *cli_params_for(command), result_class=command.options_class)
     if command.args.args_count is not None and command.args.args_count != len(items):
         if command.args.args_count == 0:
@@ -457,7 +470,7 @@ def command_for_name(cmd_name: str) -> RemoteCommand:
     return cast(RemoteCommand, getattr(m, cmd_name))
 
 
-def all_command_names() -> FrozenSet[str]:
+def all_command_names() -> frozenset[str]:
 
     def ok(name: str) -> bool:
         root, _, ext = name.rpartition('.')

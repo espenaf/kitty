@@ -1,17 +1,28 @@
 #!/usr/bin/env python
 # License: GPL v3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 
+from kitty.constants import is_macos, kitty_exe, read_kitty_resource
 from kitty.fast_data_types import (
     Color,
     HistoryBuf,
     LineBuf,
+    abspath,
+    char_props_for,
     expand_ansi_c_escapes,
+    expanduser,
+    get_config_dir,
+    makedirs,
     parse_input_from_terminal,
+    read_file,
     replace_c0_codes_except_nl_space_tab,
+    split_into_graphemes,
     strip_csi,
     truncate_point_for_length,
     wcswidth,
@@ -19,7 +30,7 @@ from kitty.fast_data_types import (
 )
 from kitty.fast_data_types import Cursor as C
 from kitty.rgb import to_color
-from kitty.utils import is_ok_to_read_image_file, is_path_in_temp_dir, sanitize_title, sanitize_url_for_dispay_to_user, shlex_split_with_positions
+from kitty.utils import is_ok_to_read_image_file, is_path_in_temp_dir, sanitize_title, sanitize_url_for_display_to_user, shlex_split, shlex_split_with_positions
 
 from . import BaseTest, filled_cursor, filled_history_buf, filled_line_buf
 
@@ -54,18 +65,26 @@ class TestDataTypes(BaseTest):
 
         def c(spec, r=0, g=0, b=0, a=0):
             c = to_color(spec)
-            self.ae(c.red, r)
-            self.ae(c.green, g)
-            self.ae(c.blue, b)
-            self.ae(c.alpha, a)
+            self.ae(Color(r, g, b, a), c, spec)
 
-        c('#eee', 0xee, 0xee, 0xee)
+        c('#eee # comment', 0xee, 0xee, 0xee)
         c('#234567', 0x23, 0x45, 0x67)
-        c('#abcabcdef', 0xab, 0xab, 0xde)
-        c('rgb:e/e/e', 0xee, 0xee, 0xee)
-        c('rgb:23/45/67', 0x23, 0x45, 0x67)
+        c('#abCabcdef', 0xab, 0xab, 0xde)
+        c('rgb:e/e/e # comment', 0xee, 0xee, 0xee)
+        c('rgB:23/45/67', 0x23, 0x45, 0x67)
         c('rgb:abc/abc/def', 0xab, 0xab, 0xde)
-        c('red', 0xff)
+        c('rEd', 0xff, 0, 0)
+        c('aLice blUe # comment', 240, 248, 255)
+        c('oklch(1,0,0)', 255, 255, 255)
+        c('oklch(0,0,0)', 0, 0, 0)
+        c('oklch(0.5,0.1,180)', 0, 117, 101)
+        c('oklcH(0.7 0.15 140) # comment', 0x68, 0xb4, 0x57)
+        c('oklch(0.9 0.05 265)', 0xce, 0xde, 0xff)
+        c('lAb(70 50 -30)', 0xea, 0x88, 0xe2)
+        c('lab(50,0,0)', 199, 199, 199)
+        c('lab(100,0,0)', 255, 255, 255)
+        c('lab(0,0,0)', 0, 0, 0)
+
         self.ae(int(Color(1, 2, 3)), 0x10203)
         base = Color(12, 12, 12)
         a = Color(23, 23, 23)
@@ -75,6 +94,152 @@ class TestDataTypes(BaseTest):
         self.ae(Color(1, 2, 3).as_sharp, '#010203')
         self.ae(Color(1, 2, 3, 4).as_sharp, '#04010203')
         self.ae(Color(1, 2, 3, 4).rgb, 0x10203)
+
+    def test_oklch_gamut_mapping(self):
+        """Test OKLCH color format with CSS Color 4 gamut mapping"""
+        def c(spec, r=0, g=0, b=0):
+            color = to_color(spec)
+            self.assertIsNotNone(color, f'Failed to parse: {spec}')
+            self.ae(Color(r, g, b), color, spec)
+
+        def in_range(spec):
+            """Verify color values are in valid 0-255 range"""
+            color = to_color(spec)
+            self.assertIsNotNone(color, f'Failed to parse: {spec}')
+            self.assertTrue(0 <= color.red <= 255, f'Red out of range: {color.red}')
+            self.assertTrue(0 <= color.green <= 255, f'Green out of range: {color.green}')
+            self.assertTrue(0 <= color.blue <= 255, f'Blue out of range: {color.blue}')
+            return color
+
+        # In-gamut colors should parse unchanged
+        c('oklch(0.5 0.1 180)', 0x00, 0x75, 0x65)  # Mid-tone cyan with moderate chroma
+
+        # Out-of-gamut colors should be mapped to sRGB gamut
+        # High chroma red - should be mapped but remain reddish
+        color = in_range('oklch(0.7 0.35 25)')
+        self.assertGreater(color.red, 200, 'High chroma red should have high red component')
+        self.assertLess(color.green, 100, 'High chroma red should have low green component')
+
+        # Edge cases
+        c('oklch(0 0 0)', 0x00, 0x00, 0x00)  # Pure black
+        c('oklch(1 0 0)', 0xff, 0xff, 0xff)  # Pure white
+
+        # Achromatic colors (zero chroma)
+        c('oklch(0.5 0 180)', 0xbc, 0xbc, 0xbc)  # Mid gray, hue irrelevant
+        c('oklch(0.25 0 90)', 0x89, 0x89, 0x89)  # Dark gray
+
+        # Test various hues with moderate chroma
+        in_range('oklch(0.6 0.15 0)')    # Red hue
+        in_range('oklch(0.6 0.15 60)')   # Yellow hue
+        in_range('oklch(0.6 0.15 120)')  # Green hue
+        in_range('oklch(0.6 0.15 180)')  # Cyan hue
+        in_range('oklch(0.6 0.15 240)')  # Blue hue
+        in_range('oklch(0.6 0.15 300)')  # Magenta hue
+
+        # Test with different comma/space separators
+        c('oklch(0.5, 0.1, 180)', 0x00, 0x75, 0x65)
+        c('oklch(0.5,0.1,180)', 0x00, 0x75, 0x65)
+
+        # Test percentage lightness
+        color = to_color('oklch(50% 0.1 180)')
+        self.assertIsNotNone(color)
+
+        # Very high chroma should trigger gamut mapping
+        # These should all succeed and return valid RGB values
+        in_range('oklch(0.5 0.5 0)')
+        in_range('oklch(0.5 0.5 180)')
+        in_range('oklch(0.9 0.3 120)')
+
+    def test_inline_comments(self):
+        """Test inline comments in color values"""
+        def c(spec, r=0, g=0, b=0):
+            color = to_color(spec)
+            self.assertIsNotNone(color, f'Failed to parse: {spec}')
+            self.ae(Color(r, g, b), color, spec)
+
+        # OKLCH with inline comment
+        c('oklch(0.5 0.1 180) # Cyan color', 0x00, 0x75, 0x65)
+        c('oklch(0.7 0.15 140) # Green', 0x68, 0xb4, 0x57)
+
+        # Hex colors with inline comments
+        c('#ff0000 # Red', 0xff, 0x00, 0x00)
+        c('#00ff00 # Green', 0x00, 0xff, 0x00)
+        c('#0000ff # Blue', 0x00, 0x00, 0xff)
+
+        # LAB colors with inline comments
+        c('lab(70 50 -30) # Purple-ish', 0xea, 0x88, 0xe2)
+
+        # RGB with inline comments
+        c('rgb:ff/00/00 # RGB Red', 0xff, 0x00, 0x00)
+
+        # Named color should not be affected by text after it
+        # (not a comment, just ignored)
+        c('red', 0xff, 0x00, 0x00)
+
+    def test_lab_parsing(self):
+        """Test CIE LAB color format parsing"""
+        def c(spec, r=0, g=0, b=0):
+            color = to_color(spec)
+            self.assertIsNotNone(color, f'Failed to parse: {spec}')
+            self.ae(color.red, r)
+            self.ae(color.green, g)
+            self.ae(color.blue, b)
+            self.ae(Color(r, g, b), color, spec)
+
+        # LAB basic colors
+        c('lab(0 0 0)', 0x00, 0x00, 0x00)      # LAB black
+        c('lab(100 0 0)', 0xff, 0xff, 0xff)    # LAB white
+        c('lab(50 0 0)', 0xc7, 0xc7, 0xc7)     # LAB mid-gray
+
+        # LAB with color components
+        c('lab(70 50 -30)', 0xea, 0x88, 0xe2)  # Purple-ish
+        color = to_color('lab(50 50 50)')      # Orange/red-ish (positive a and b)
+        self.assertIsNotNone(color)
+        self.assertGreater(color.red, 0xc0)    # Should have high red
+        self.assertLess(color.blue, 0x50)      # Should have low blue
+
+        # LAB with different separators
+        color = to_color('lab(70, 50, -30)')
+        self.assertIsNotNone(color)
+        color = to_color('lab(70,50,-30)')
+        self.assertIsNotNone(color)
+
+        # LAB with negative values (valid for a and b channels)
+        color = to_color('lab(50 -50 -50)')
+        self.assertIsNotNone(color)
+        color = to_color('lab(50 -50 50)')
+        self.assertIsNotNone(color)
+
+    def test_color_format_errors(self):
+        """Test error handling for invalid color formats"""
+        # Invalid OKLCH
+        self.assertIsNone(to_color('oklch()'))
+        self.assertIsNone(to_color('oklch(0.5)'))
+        self.assertIsNone(to_color('oklch(0.5 0.1)'))
+        self.assertIsNone(to_color('oklch(a b c)'))
+
+        # Invalid LAB
+        self.assertIsNone(to_color('lab()'))
+        self.assertIsNone(to_color('lab(50)'))
+        self.assertIsNone(to_color('lab(50 0)'))
+        self.assertIsNone(to_color('lab(a b c)'))
+
+        # Invalid color() function
+        self.assertIsNone(to_color('color()'))
+        self.assertIsNone(to_color('color(unknown 1 0 0)'))
+
+        # Empty and whitespace
+        self.assertIsNone(to_color(''))
+        self.assertIsNone(to_color('   '))
+
+        # Malformed hex
+        self.assertIsNone(to_color('#'))
+        self.assertIsNone(to_color('#12'))
+        self.assertIsNone(to_color('#1234'))
+
+        # Malformed rgb
+        self.assertIsNone(to_color('rgb:'))
+        self.assertIsNone(to_color('rgb:a/b'))
 
     def test_linebuf(self):
         old = filled_line_buf(2, 3, filled_cursor())
@@ -204,9 +369,9 @@ class TestDataTypes(BaseTest):
         l0.add_combining_char(0, '\u0302')
         self.ae(l0[0], ' \u0300\U000e0100\u0302')
         l0.add_combining_char(0, '\u0301')
-        self.ae(l0[0], ' \u0300\U000e0100\u0301')
+        self.ae(l0[0], ' \u0300\U000e0100\u0302\u0301')
         self.ae(l0[1], '\0')
-        self.ae(str(l0), ' \u0300\U000e0100\u0301')
+        self.ae(str(l0), ' \u0300\U000e0100\u0302\u0301')
         t = 'Testing with simple text'
         lb = LineBuf(2, len(t))
         l0 = lb.line(0)
@@ -240,19 +405,6 @@ class TestDataTypes(BaseTest):
         l3 = lb.line(0)
         l3.set_text(t, 0, len(t), C())
         self.ae(t, str(l3))
-        l3.right_shift(4, 2)
-        self.ae('0123454567', str(l3))
-        l3.set_text(t, 0, len(t), C())
-        l3.right_shift(0, 0)
-        self.ae(t, str(l3))
-        l3.right_shift(0, 1)
-        self.ae(str(l3), '0' + t[:-1])
-        l3.set_text(t, 0, len(t), C())
-        l3.left_shift(0, 2)
-        self.ae(str(l3), t[2:] + '89')
-        l3.set_text(t, 0, len(t), C())
-        l3.left_shift(7, 3)
-        self.ae(str(l3), t)
 
         l3.set_text(t, 0, len(t), C())
         q = C()
@@ -327,28 +479,25 @@ class TestDataTypes(BaseTest):
         self.ae(l4.url_end_at(0), len(l4) - 2)
         self.ae(l4.url_end_at(0, 0, True), len(l4) - 1)
 
-    def rewrap(self, lb, lb2):
-        hb = HistoryBuf(lb2.ynum, lb2.xnum)
-        cy = lb.rewrap(lb2, hb)
-        return hb, cy[1]
+    def rewrap(self, lb, lines, columns):
+        return lb.rewrap(lines, columns)
 
     def test_rewrap_simple(self):
         ' Same width buffers '
         lb = filled_line_buf(5, 5)
         lb2 = LineBuf(lb.ynum, lb.xnum)
-        self.rewrap(lb, lb2)
+        lb2 = self.rewrap(lb, lb.ynum, lb.xnum)[0]
         for i in range(lb.ynum):
             self.ae(lb2.line(i), lb.line(i))
-        lb2 = LineBuf(8, 5)
-        cy = self.rewrap(lb, lb2)[1]
+        lb2, _, cy = self.rewrap(lb, 8, 5)
         self.ae(cy, 5)
         for i in range(lb.ynum):
-            self.ae(lb2.line(i), lb.line(i))
+            self.ae(lb2.line(i), lb.line(i), i)
         empty = LineBuf(1, lb2.xnum)
         for i in range(lb.ynum, lb2.ynum):
             self.ae(str(lb2.line(i)), str(empty.line(0)))
         lb2 = LineBuf(3, 5)
-        cy = self.rewrap(lb, lb2)[1]
+        lb2, _, cy = self.rewrap(lb, 3, 5)
         self.ae(cy, 3)
         for i in range(lb2.ynum):
             self.ae(lb2.line(i), lb.line(i + 2))
@@ -361,8 +510,7 @@ class TestDataTypes(BaseTest):
             self.ae(l0, str(l2))
 
     def line_comparison_rewrap(self, lb, *lines):
-        lb2 = LineBuf(len(lines), max(map(len, lines)))
-        self.rewrap(lb, lb2)
+        lb2 = self.rewrap(lb, len(lines), max(map(len, lines)))[0]
         self.line_comparison(lb2, *lines)
         return lb2
 
@@ -392,6 +540,7 @@ class TestDataTypes(BaseTest):
     def test_utils(self):
         def w(x):
             return wcwidth(ord(x))
+        self.ae(wcswidth('\x9c'), 0)
         self.ae(wcswidth('a\033[2mb'), 2)
         self.ae(wcswidth('\033a\033[2mb'), 2)
         self.ae(wcswidth('a\033]8;id=moo;https://foo\033\\a'), 2)
@@ -471,8 +620,74 @@ class TestDataTypes(BaseTest):
         if os.path.isdir('/dev/shm'):
             with tempfile.NamedTemporaryFile(dir='/dev/shm') as tf:
                 self.assertTrue(is_ok_to_read_image_file(tf.name, tf.fileno()), fifo)
-        self.ae(sanitize_url_for_dispay_to_user(
+        self.ae(sanitize_url_for_display_to_user(
             'h://a\u0430b.com/El%20Ni%C3%B1o/'), 'h://xn--ab-7kc.com/El Niño/')
+        for x in ('~', '~/', '', '~root', '~root/~', '/~', '/a/b/', '~xx/a', '~~'):
+           self.assertEqual(os.path.expanduser(x), expanduser(x), x)
+        for x in (
+            '/', '', '/a', '/ab', '/ab/', '/ab/c', 'a', 'ab', 'ab/', 'ab///c', 'ab/././..', '.', '..', '../', './', '../..', '../.',
+            '/a/../..', '/a/../../', '/a/..', '/ab/../../../cd/.', '///',
+        ):
+           self.assertEqual(os.path.abspath(x), abspath(x), repr(x))
+        self.assertEqual('/', abspath('//'))
+        with tempfile.TemporaryDirectory() as tdir:
+            for x, ex in {
+                'a': None, 'a/b/c': None, 'a/..': None, 'a/../a': None,
+                'a/f': NotADirectoryError, 'a/f/d': NotADirectoryError, 'a/b/c/f/g': NotADirectoryError,
+            }.items():
+                q = os.path.join(tdir, x)
+                if ex is None:
+                    makedirs(q)
+                    open(os.path.join(q, 'f'), 'wb').close()
+                else:
+                    with self.assertRaises(ex, msg=x):
+                        makedirs(q)
+        saved = {x: os.environ.get(x) for x in 'KITTY_CONFIG_DIRECTORY XDG_CONFIG_DIRS XDG_CONFIG_HOME'.split()}
+        try:
+            dot_config = os.path.expanduser('~/.config')
+            if os.path.exists(dot_config):
+                shutil.rmtree(dot_config)
+            with tempfile.TemporaryDirectory() as tdir:
+                with open(tdir + '/macos-launch-services-cmdline', 'w') as f:
+                    print('kitty +runpy "import sys; print(sys.argv[-1])"', file=f)
+                    print('next-line', file=f)
+                    print()
+                if is_macos:
+                    env = os.environ.copy()
+                    env['KITTY_CONFIG_DIRECTORY'] = tdir
+                    env['KITTY_LAUNCHED_BY_LAUNCH_SERVICES'] = '1'
+                    cp = subprocess.run([kitty_exe(), '+runpy', 'import json, sys; print(json.dumps(sys.argv))'], env=env, stdout=subprocess.PIPE)
+                    actual = cp.stdout.strip().decode()
+                    if cp.returncode != 0:
+                        print(actual)
+                        raise AssertionError(f'kitty +runpy failed with return code: {cp.returncode}')
+                    self.ae('next-line', actual)
+                os.makedirs(tdir + '/good/kitty')
+                open(tdir + '/good/kitty/kitty.conf', 'w').close()
+                data = os.urandom(32879)
+                with open(tdir + '/f', 'wb') as f:
+                    f.write(data)
+                self.ae(data, read_file(f.name))
+                for x in (
+                    (f'KITTY_CONFIG_DIRECTORY={tdir}', f'{tdir}'),
+                    (f'XDG_CONFIG_HOME={tdir}/good', f'{tdir}/good/kitty'),
+                    (f'XDG_CONFIG_DIRS={tdir}:{tdir}/good', f'{tdir}/good/kitty'),
+                    (f'XDG_CONFIG_DIRS={tdir}:{tdir}/bad:{tdir}/f', f'{dot_config}/kitty'),
+                    (f'{dot_config}/kitty',),
+                ):
+                    for k in saved:
+                        os.environ.pop(k, None)
+                    for e in x[:-1]:
+                        k, v = e.partition('=')[::2]
+                        os.environ[k] = v
+                    self.assertEqual(x[-1], get_config_dir(), str(x))
+        finally:
+            if os.path.exists(dot_config):
+                shutil.rmtree(dot_config)
+            for k in saved:
+                os.environ.pop(k, None)
+                if saved[k] is not None:
+                    os.environ[k] = saved[k]
 
     def test_historybuf(self):
         lb = filled_line_buf()
@@ -499,35 +714,31 @@ class TestDataTypes(BaseTest):
             self.ae(str(hb.line(i)).rstrip(), str(3000 - 1 - i))
 
         # rewrap
+        def as_ansi(hb):
+            lines = []
+            hb.as_ansi(lines.append)
+            return ''.join(lines)
         hb = filled_history_buf(5, 5)
-        hb2 = HistoryBuf(hb.ynum, hb.xnum)
-        hb.rewrap(hb2)
+        for i in range(hb.ynum):
+            hb.line(i).set_wrapped_flag(True)
+        before = as_ansi(hb)
+        hb2 = hb.rewrap(10)
+        self.ae(before, as_ansi(hb2).rstrip())
+
+        hb = filled_history_buf(5, 5)
+        hb2 = hb.rewrap(hb.xnum)
         for i in range(hb.ynum):
             self.ae(hb2.line(i), hb.line(i))
-        hb2 = HistoryBuf(8, 5)
-        hb.rewrap(hb2)
-        for i in range(hb.ynum):
-            self.ae(hb2.line(i), hb.line(i))
-        for i in range(hb.ynum, hb2.ynum):
-            with self.assertRaises(IndexError):
-                hb2.line(i)
-        hb2 = HistoryBuf(3, 5)
-        hb.rewrap(hb2)
-        for i in range(hb2.ynum):
-            self.ae(hb2.line(i), hb.line(i))
-        self.ae(hb2.dirty_lines(), list(range(hb2.ynum)))
         hb = filled_history_buf(5, 5)
-        hb2 = HistoryBuf(hb.ynum, hb.xnum * 2)
-        hb.rewrap(hb2)
+        hb2 = hb.rewrap(hb.xnum * 2)
         hb3 = HistoryBuf(hb.ynum, hb.xnum)
-        hb2.rewrap(hb3)
+        hb3 = hb2.rewrap(hb.xnum)
         for i in range(hb.ynum):
             self.ae(hb.line(i), hb3.line(i))
 
         hb2 = HistoryBuf(hb.ynum, hb.xnum)
-        large_hb.rewrap(hb2)
-        hb2 = HistoryBuf(large_hb.ynum, large_hb.xnum)
-        large_hb.rewrap(hb2)
+        hb2 = large_hb.rewrap(hb.xnum)
+        hb2.rewrap(large_hb.xnum)
 
     def test_ansi_repr(self):
         lb = filled_line_buf()
@@ -543,8 +754,8 @@ class TestDataTypes(BaseTest):
         c.bg = (1 << 24) | (2 << 16) | (3 << 8) | 2
         c.decoration_fg = (5 << 8) | 1
         l2.set_text('1', 0, 1, c)
-        self.ae(l2.as_ansi(), '\x1b[1;2;3;7;9;34;48:2:1:2:3;58:5:5m' '1'
-                '\x1b[22;23;27;29;39;49;59m' '0000')
+        self.ae(str(l2), '10000')
+        self.ae(l2.as_ansi(), '\x1b[1;2;3;7;9;34;48:2:1:2:3;58:5:5m' '1' '\x1b[22;23;27;29;39;49;59m' '0000')  # ]]
         lb = filled_line_buf()
         for i in range(1, lb.ynum + 1):
             lb.set_continued(i, True)
@@ -560,9 +771,10 @@ class TestDataTypes(BaseTest):
         def q(x, y=''):
             self.ae(y or x, strip_csi(x))
         q('test')
-        q('a\x1bbc', 'ac')
+        q('a\x1bbc', 'abc')
         q('a\x1b[bc', 'ac')
         q('a\x1b[12;34:43mbc', 'abc')
+        q('a\x1b[12;34:43\U0001f638', 'a\U0001f638')
 
     def test_single_key(self):
         from kitty.fast_data_types import GLFW_MOD_KITTY, GLFW_MOD_SHIFT, SingleKey
@@ -623,15 +835,30 @@ class TestDataTypes(BaseTest):
         ):
             with self.assertRaises(ValueError, msg=f'Failed to raise exception for {bad!r}'):
                 tuple(shlex_split_with_positions(bad))
+            with self.assertRaises(ValueError, msg=f'Failed to raise exception for {bad!r}'):
+                tuple(shlex_split(bad))
 
         for q, expected in {
+            'a""': ((0, 'a'),),
+            'a""b': ((0, 'ab'),),
+            '-1 "" 2': ((0, '-1'), (3, ''), (6, '2')),
+            "-1 '' 2": ((0, '-1'), (3, ''), (6, '2')),
+            'a ""': ((0, 'a'), (2, '')),
+            '""': ((0, ''),),
             '"ab"': ((0, 'ab'),),
             r'x "ab"y \m': ((0, 'x'), (2, 'aby'), (8, 'm')),
             r'''x'y"\z'1''': ((0, 'xy"\\z1'),),
             r'\abc\ d': ((0, 'abc d'),),
-            '': (), '   ': (), ' \tabc\n\t\r ': ((2, 'abc'),),
+            '': ((0, ''),), '   ': ((0, ''),), ' \tabc\n\t\r ': ((2, 'abc'),),
             "$'ab'": ((0, '$ab'),),
+            '😀': ((0, '😀'),),
+            '"a😀"': ((0, 'a😀'),),
+            '😀 a': ((0, '😀'), (2, 'a')),
+            ' \t😀a': ((2, '😀a'),),
         }.items():
+            ex = tuple(x[1] for x in expected)
+            actual = tuple(shlex_split(q))
+            self.ae(ex, actual, f'Failed for text: {q!r}')
             actual = tuple(shlex_split_with_positions(q))
             self.ae(expected, actual, f'Failed for text: {q!r}')
 
@@ -651,3 +878,55 @@ class TestDataTypes(BaseTest):
         }.items():
             actual = tuple(shlex_split_with_positions(q, True))
             self.ae(expected, actual, f'Failed for text: {q!r}')
+            actual = tuple(shlex_split(q, True))
+            ex = tuple(x[1] for x in expected)
+            self.ae(ex, actual, f'Failed for text: {q!r}')
+
+    def test_split_into_graphemes(self):
+        self.assertEqual(char_props_for('\ue000')['category'], 'Co')
+        self.ae(split_into_graphemes('ab'), ['a', 'b'])
+        s = self.create_screen(cols=12)
+        excluded_chars = set(range(32))
+
+        def is_excluded(text):
+            return bool(set(map(ord, text)) & excluded_chars)
+
+        def adapt_cell_text(cells):
+            for cell in cells:
+                gp = split_into_graphemes(cell)
+                if len(gp) == 1:
+                    yield cell
+                else:
+                    for i, g in enumerate(gp[:-1]):
+                        if wcswidth(gp[i+1][0]) != 0:
+                            raise AssertionError(
+                                f'cell {cell!r} contains grapheme break point at non zero width character for Test #{i}: {test["comment"]}')
+                    yield from gp
+
+        for i, test in enumerate(json.loads(read_kitty_resource('GraphemeBreakTest.json', __name__.rpartition('.')[0]))):
+            expected = test['data']
+            text = ''.join(expected)
+            actual = split_into_graphemes(text)
+            self.ae(expected, actual, f'Test #{i} failed: {test["comment"]}')
+            if is_excluded(text):
+                continue
+            s.carriage_return(), s.erase_in_line()
+            s.draw(' ' + text)
+            actual = []
+            for x in range(s.cursor.x):
+                cell = s.cpu_cells(0, x)
+                if cell['x'] > 0:
+                    continue
+                ct = cell['text']
+                if x == 0:
+                    ct = ct[1:]
+                if ct:
+                    actual.append(ct)
+            self.ae(expected, list(adapt_cell_text(actual)), f'Test #{i} failed: {test["comment"]}')
+        s.reset()
+        s.draw('a' * s.columns)
+        s.draw('\u0306')
+        self.ae(str(s.line(0)), 'a' * s.columns + '\u0306')
+        s.reset()
+        s.draw('\0')
+        self.ae(str(s.line(0)), '')

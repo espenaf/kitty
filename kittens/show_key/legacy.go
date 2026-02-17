@@ -5,9 +5,9 @@ package show_key
 import (
 	"errors"
 	"fmt"
+	"github.com/kovidgoyal/kitty/tools/cli/markup"
+	"github.com/kovidgoyal/kitty/tools/tty"
 	"io"
-	"kitty/tools/cli/markup"
-	"kitty/tools/tty"
 	"os"
 
 	"golang.org/x/sys/unix"

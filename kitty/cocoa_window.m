@@ -50,6 +50,7 @@ extern CGSConnectionID _CGSDefaultConnection(void);
 CFArrayRef CGSCopySpacesForWindows(CGSConnectionID Connection, CGSSpaceSelector Type, CFArrayRef Windows);
 
 static NSMenuItem* title_menu = NULL;
+static bool application_has_finished_launching = false;
 
 
 static NSString*
@@ -252,8 +253,14 @@ PENDING(new_window, NEW_WINDOW)
 PENDING(close_window, CLOSE_WINDOW)
 PENDING(reset_terminal, RESET_TERMINAL)
 PENDING(clear_terminal_and_scrollback, CLEAR_TERMINAL_AND_SCROLLBACK)
+PENDING(clear_scrollback, CLEAR_SCROLLBACK)
+PENDING(clear_screen, CLEAR_SCREEN)
+PENDING(clear_last_command, CLEAR_LAST_COMMAND)
 PENDING(reload_config, RELOAD_CONFIG)
 PENDING(toggle_macos_secure_keyboard_entry, TOGGLE_MACOS_SECURE_KEYBOARD_ENTRY)
+PENDING(macos_cycle_through_os_windows, MACOS_CYCLE_THROUGH_OS_WINDOWS)
+PENDING(macos_cycle_through_os_windows_backwards, MACOS_CYCLE_THROUGH_OS_WINDOWS_BACKWARDS)
+PENDING(search_scrollback, SEARCH_SCROLLBACK)
 PENDING(toggle_fullscreen, TOGGLE_FULLSCREEN)
 PENDING(open_kitty_website, OPEN_KITTY_WEBSITE)
 PENDING(hide_macos_app, HIDE)
@@ -275,6 +282,9 @@ PENDING(quit, QUIT)
         item.action == @selector(close_window:) ||
         item.action == @selector(reset_terminal:) ||
         item.action == @selector(clear_terminal_and_scrollback:) ||
+        item.action == @selector(clear_last_command:) ||
+        item.action == @selector(clear_scrollback:) ||
+        item.action == @selector(clear_screen:) ||
         item.action == @selector(previous_tab:) ||
         item.action == @selector(next_tab:) ||
         item.action == @selector(detach_tab:))
@@ -308,9 +318,11 @@ typedef struct {
 } GlobalShortcut;
 typedef struct {
     GlobalShortcut new_os_window, close_os_window, close_tab, edit_config_file, reload_config;
-    GlobalShortcut previous_tab, next_tab, new_tab, new_window, close_window, reset_terminal, clear_terminal_and_scrollback;
+    GlobalShortcut previous_tab, next_tab, new_tab, new_window, close_window, reset_terminal;
+    GlobalShortcut clear_terminal_and_scrollback, clear_screen, clear_scrollback, clear_last_command;
     GlobalShortcut toggle_macos_secure_keyboard_entry, toggle_fullscreen, open_kitty_website;
-    GlobalShortcut hide_macos_app, hide_macos_other_apps, minimize_macos_window, quit;
+    GlobalShortcut hide_macos_app, hide_macos_other_apps, minimize_macos_window, quit, search_scrollback;
+    GlobalShortcut macos_cycle_through_os_windows, macos_cycle_through_os_windows_backwards;
 } GlobalShortcuts;
 static GlobalShortcuts global_shortcuts;
 
@@ -324,9 +336,12 @@ cocoa_set_global_shortcut(PyObject *self UNUSED, PyObject *args) {
 #define Q(x) if (strcmp(name, #x) == 0) gs = &global_shortcuts.x
     Q(new_os_window); else Q(close_os_window); else Q(close_tab); else Q(edit_config_file);
     else Q(new_tab); else Q(next_tab); else Q(previous_tab);
-    else Q(new_window); else Q(close_window); else Q(reset_terminal); else Q(clear_terminal_and_scrollback); else Q(reload_config);
-    else Q(toggle_macos_secure_keyboard_entry); else Q(toggle_fullscreen); else Q(open_kitty_website);
-    else Q(hide_macos_app); else Q(hide_macos_other_apps); else Q(minimize_macos_window); else Q(quit);
+    else Q(new_window); else Q(close_window); else Q(reset_terminal);
+    else Q(clear_terminal_and_scrollback); else Q(clear_scrollback); else Q(clear_screen); else Q(clear_last_command);
+    else Q(reload_config); else Q(toggle_macos_secure_keyboard_entry); else Q(toggle_fullscreen);
+    else Q(open_kitty_website); else Q(hide_macos_app); else Q(hide_macos_other_apps);
+    else Q(minimize_macos_window); else Q(quit); else Q(search_scrollback);
+    else Q(macos_cycle_through_os_windows); else Q(macos_cycle_through_os_windows_backwards);
 #undef Q
     if (gs == NULL) { PyErr_SetString(PyExc_KeyError, "Unknown shortcut name"); return NULL; }
     int cocoa_mods;
@@ -432,7 +447,7 @@ ident_in_list_of_notifications(NSString *ident, NSArray<UNNotification*> *list) 
 
 void
 cocoa_report_live_notifications(const char* ident) {
-    do_notification_callback(ident, "live", "");
+    do_notification_callback(ident, "live", ident ? ident : "");
 }
 
 static bool
@@ -673,6 +688,12 @@ cocoa_send_notification(PyObject *self UNUSED, PyObject *args, PyObject *kw) {
     return YES;
 }
 
+- (void)quickAccessTerminal:(NSPasteboard *)pboard userData:(NSString *)userData error:(NSString **)error {
+    // we ignore event during application launch as it will cause the window to be shown and hidden
+    static bool is_first_event = true;
+    if (!is_first_event || monotonic() >= s_double_to_monotonic_t(2.0)) { call_boss(quick_access_terminal_invoked, NULL); }
+    is_first_event = false;
+}
 @end
 
 // global menu {{{
@@ -706,7 +727,7 @@ add_user_global_menu_entry(struct MenuItem *e, NSMenu *bar, size_t action_index)
     }
 }
 
-void
+static void
 cocoa_create_global_menu(void) {
     NSString* app_name = find_app_name();
     NSMenu* bar = [[NSMenu alloc] init];
@@ -755,10 +776,7 @@ cocoa_create_global_menu(void) {
     MENU_ITEM(appMenu, ([NSString stringWithFormat:@"Quit %@", app_name]), quit);
     [appMenu release];
 
-    NSMenuItem* shellMenuItem =
-        [bar addItemWithTitle:@"Shell"
-                       action:NULL
-                keyEquivalent:@""];
+    NSMenuItem* shellMenuItem = [bar addItemWithTitle:@"Shell" action:NULL keyEquivalent:@""];
     NSMenu* shellMenu = [[NSMenu alloc] initWithTitle:@"Shell"];
     [shellMenuItem setSubmenu:shellMenu];
     MENU_ITEM(shellMenu, @"New OS Window", new_os_window);
@@ -770,8 +788,16 @@ cocoa_create_global_menu(void) {
     MENU_ITEM(shellMenu, @"Close Window", close_window);
     [shellMenu addItem:[NSMenuItem separatorItem]];
     MENU_ITEM(shellMenu, @"Reset", reset_terminal);
-    MENU_ITEM(shellMenu, @"Clear to Cursor Line", clear_terminal_and_scrollback);
     [shellMenu release];
+    NSMenuItem* editMenuItem = [bar addItemWithTitle:@"Edit" action:NULL keyEquivalent:@""];
+    NSMenu* editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenuItem setSubmenu:editMenu];
+    MENU_ITEM(editMenu, @"Clear to Start", clear_terminal_and_scrollback);
+    MENU_ITEM(editMenu, @"Clear Scrollback", clear_scrollback);
+    MENU_ITEM(editMenu, @"Clear Screen", clear_screen);
+    MENU_ITEM(editMenu, @"Clear Last Command", clear_last_command);
+    MENU_ITEM(editMenu, @"Find", search_scrollback);
+    [editMenu release];
 
     NSMenuItem* windowMenuItem =
         [bar addItemWithTitle:@"Window"
@@ -784,6 +810,9 @@ cocoa_create_global_menu(void) {
     [windowMenu addItemWithTitle:@"Zoom"
                           action:@selector(performZoom:)
                    keyEquivalent:@""];
+    [windowMenu addItem:[NSMenuItem separatorItem]];
+    MENU_ITEM(windowMenu, @"Cycle Through OS Windows", macos_cycle_through_os_windows);
+    MENU_ITEM(windowMenu, @"Cycle Through OS Windows backwards", macos_cycle_through_os_windows_backwards);
     [windowMenu addItem:[NSMenuItem separatorItem]];
     [windowMenu addItemWithTitle:@"Bring All to Front"
                           action:@selector(arrangeInFront:)
@@ -836,6 +865,13 @@ cocoa_create_global_menu(void) {
 }
 
 void
+cocoa_application_lifecycle_event(bool application_launch_finished) {
+    if (application_launch_finished) {  // applicationDidFinishLaunching
+        application_has_finished_launching = true;
+    } else cocoa_create_global_menu();  // applicationWillFinishLaunching
+}
+
+void
 cocoa_update_menu_bar_title(PyObject *pytitle) {
     if (!pytitle) return;
     NSString *title = nil;
@@ -849,14 +885,16 @@ cocoa_update_menu_bar_title(PyObject *pytitle) {
         title = @(PyUnicode_AsUTF8(pytitle));
     }
     if (!title) return;
-    NSMenu *bar = [NSApp mainMenu];
+    NSString *menuTitle = [NSString stringWithFormat:@" :: %@", title];
     if (title_menu != NULL) {
-        [bar removeItem:title_menu];
+        [[title_menu submenu] setTitle:menuTitle];
+    } else {
+        NSMenu *bar = [NSApp mainMenu];
+        title_menu = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+        NSMenu *m = [[NSMenu alloc] initWithTitle:menuTitle];
+        [title_menu setSubmenu:m];
+        [m release];
     }
-    title_menu = [bar addItemWithTitle:@"" action:NULL keyEquivalent:@""];
-    NSMenu *m = [[NSMenu alloc] initWithTitle:[NSString stringWithFormat:@" :: %@", title]];
-    [title_menu setSubmenu:m];
-    [m release];
 }
 
 void
@@ -939,7 +977,7 @@ cocoa_get_workspace_ids(void *w, size_t *workspace_ids, size_t array_sz) {
 }
 
 static PyObject*
-cocoa_get_lang(PyObject UNUSED *self) {
+cocoa_get_lang(PyObject UNUSED *self, PyObject *args UNUSED) {
     @autoreleasepool {
     NSString* lang_code = [[NSLocale currentLocale] languageCode];
     NSString* country_code = [[NSLocale currentLocale] objectForKey:NSLocaleCountryCode];
@@ -1193,6 +1231,114 @@ play_system_sound_by_id_async(PyObject *self UNUSED, PyObject *which) {
     Py_RETURN_NONE;
 }
 
+// Dock Progress bar {{{
+@interface RoundedRectangleView : NSView {
+    unsigned intermediate_step;
+    CGFloat fill_fraction;
+    BOOL is_indeterminate;
+}
+- (void) animate;
+- (BOOL) isIndeterminate;
+- (void) setIndeterminate:(BOOL)val;
+- (void) setFraction:(CGFloat) fraction;
+@end
+
+@implementation RoundedRectangleView
+
+- (void) animate { intermediate_step++; }
+- (BOOL) isIndeterminate { return is_indeterminate; }
+- (void) setIndeterminate:(BOOL)val {
+    if (val != is_indeterminate) {
+        is_indeterminate = val;
+        intermediate_step = 0;
+        }
+    }
+- (void) setFraction:(CGFloat)fraction { fill_fraction = fraction; }
+
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+
+    NSRect bar = NSInsetRect(self.bounds, 4, 4);
+    CGFloat cornerRadius = self.bounds.size.height / 4.0;
+
+#define fill(bar) [[NSBezierPath bezierPathWithRoundedRect:bar xRadius:cornerRadius yRadius:cornerRadius] fill]
+    // Create the border
+    [[[NSColor whiteColor] colorWithAlphaComponent:0.8] setFill];
+    fill(bar);
+    // Create the background
+    [[[NSColor blackColor] colorWithAlphaComponent:0.8] setFill];
+    fill(NSInsetRect(bar, 0.5, 0.5));
+    // Create the progress
+    NSRect bar_progress = NSInsetRect(bar, 1, 1);
+    if (intermediate_step) {
+        unsigned num_of_steps = 80;
+        intermediate_step = intermediate_step % num_of_steps;
+        bar_progress.size.width = self.bounds.size.width / 8;
+        float frac = intermediate_step / (float)num_of_steps;
+        bar_progress.origin.x += (self.bounds.size.width - bar_progress.size.width) * frac;
+    } else bar_progress.size.width *= fill_fraction;
+    [[NSColor whiteColor] setFill];
+    fill(bar_progress);
+#undef fill
+}
+
+@end
+static NSView *dock_content_view = nil;
+static NSImageView *dock_image_view = nil;
+static RoundedRectangleView *dock_pbar = nil;
+
+static void
+animate_dock_progress_bar(id_type timer_id UNUSED, void *data UNUSED);
+
+static void
+tick_dock_pbar(void) {
+    add_main_loop_timer(ms_to_monotonic_t(20), false, animate_dock_progress_bar, NULL, NULL);
+}
+
+static void
+animate_dock_progress_bar(id_type timer_id UNUSED, void *data UNUSED) {
+    if (dock_pbar != nil && [dock_pbar isIndeterminate]) {
+        [dock_pbar animate];
+        NSDockTile *dockTile = [NSApp dockTile];
+        [dockTile display];
+        tick_dock_pbar();
+    }
+}
+
+static PyObject*
+cocoa_show_progress_bar_on_dock_icon(PyObject *self UNUSED, PyObject *args) {
+    float percent = -100;
+    if (!PyArg_ParseTuple(args, "|f", &percent)) return NULL;
+    NSDockTile *dockTile = [NSApp dockTile];
+    if (!dock_content_view) {
+        dock_content_view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, dockTile.size.width, dockTile.size.height)];
+        dock_image_view = [NSImageView.alloc initWithFrame:dock_content_view.frame];
+        dock_image_view.imageScaling = NSImageScaleProportionallyDown;
+        dock_image_view.image = NSApp.applicationIconImage;
+        [dock_content_view addSubview:dock_image_view];
+        dock_pbar = [[RoundedRectangleView alloc] initWithFrame:NSMakeRect(0, 0, dockTile.size.width, dockTile.size.height / 4)];
+        [dock_content_view addSubview:dock_pbar];
+    }
+    [dock_content_view setFrameSize:dockTile.size];
+    [dock_image_view setFrameSize:dockTile.size];
+    if (percent >= 0 && percent <= 100) {
+        [dock_pbar setFraction:percent/100.];
+        [dock_pbar setIndeterminate:NO];
+    } else if (percent > 100) {
+        if (![dock_pbar isIndeterminate]) {
+            [dock_pbar setIndeterminate:YES];
+            tick_dock_pbar();
+        }
+    }
+    [dock_pbar setFrameSize:NSMakeSize(dockTile.size.width - 20, 20)];
+    [dock_pbar setFrameOrigin:NSMakePoint(10, -2)];
+    [dockTile setContentView:percent < 0 ? nil : dock_content_view];
+    [dockTile display];
+    Py_RETURN_NONE;
+}
+// }}}
+
 static PyMethodDef module_methods[] = {
     {"cocoa_play_system_sound_by_id_async", play_system_sound_by_id_async, METH_O, ""},
     {"cocoa_get_lang", (PyCFunction)cocoa_get_lang, METH_NOARGS, ""},
@@ -1204,6 +1350,7 @@ static PyMethodDef module_methods[] = {
     {"cocoa_set_url_handler", (PyCFunction)cocoa_set_url_handler, METH_VARARGS, ""},
     {"cocoa_set_app_icon", (PyCFunction)cocoa_set_app_icon, METH_VARARGS, ""},
     {"cocoa_set_dock_icon", (PyCFunction)cocoa_set_dock_icon, METH_VARARGS, ""},
+    {"cocoa_show_progress_bar_on_dock_icon", (PyCFunction)cocoa_show_progress_bar_on_dock_icon, METH_VARARGS, ""},
     {"cocoa_bundle_image_as_png", (PyCFunction)(void(*)(void))bundle_image_as_png, METH_VARARGS | METH_KEYWORDS, ""},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };

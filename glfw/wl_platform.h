@@ -65,6 +65,11 @@ typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR
 #include "wayland-kwin-blur-v1-client-protocol.h"
 #include "wayland-wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wayland-single-pixel-buffer-v1-client-protocol.h"
+#include "wayland-idle-inhibit-unstable-v1-client-protocol.h"
+#include "wayland-keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
+#include "wayland-xdg-toplevel-icon-v1-client-protocol.h"
+#include "wayland-xdg-system-bell-v1-client-protocol.h"
+#include "wayland-xdg-toplevel-tag-v1-client-protocol.h"
 
 #define _glfw_dlopen(name) dlopen(name, RTLD_LAZY | RTLD_LOCAL)
 #define _glfw_dlclose(handle) dlclose(handle)
@@ -128,6 +133,10 @@ typedef enum WaylandWindowState {
     TOPLEVEL_STATE_TILED_TOP = 64,
     TOPLEVEL_STATE_TILED_BOTTOM = 128,
     TOPLEVEL_STATE_SUSPENDED = 256,
+    TOPLEVEL_STATE_CONSTRAINED_LEFT = 512,
+    TOPLEVEL_STATE_CONSTRAINED_RIGHT = 1024,
+    TOPLEVEL_STATE_CONSTRAINED_TOP = 2048,
+    TOPLEVEL_STATE_CONSTRAINED_BOTTOM = 4096,
 } WaylandWindowState;
 
 typedef struct glfw_wl_xdg_activation_request {
@@ -158,7 +167,7 @@ enum _GLFWWaylandAxisEvent {
 typedef struct _GLFWwindowWayland
 {
     int                         width, height;
-    bool                        visible;
+    bool                        visible, created;
     bool                        hovered;
     bool                        transparent;
     struct wl_surface*          surface;
@@ -177,7 +186,7 @@ typedef struct _GLFWwindowWayland
     struct org_kde_kwin_blur *org_kde_kwin_blur;
     bool has_blur, expect_scale_from_compositor, window_fully_created;
     struct {
-        bool surface_configured, fractional_scale_received, preferred_scale_received;
+        bool surface_configured, preferred_scale_received, fractional_scale_received;
     } once;
     struct wl_buffer *temp_buffer_used_during_window_creation;
     struct {
@@ -196,14 +205,16 @@ typedef struct _GLFWwindowWayland
         } discrete, continuous;
 
         /* Event timestamp in nanoseconds */
-        monotonic_t timestamp_ns;
+        bool x_stop_received, y_stop_received;
+        uint32_t source_type;
+        monotonic_t x_start_time, x_stop_time, y_stop_time, y_start_time;
     } pointer_curr_axis_info;
 
     _GLFWcursor*                currentCursor;
     double                      cursorPosX, cursorPosY, allCursorPosX, allCursorPosY;
 
     char*                       title;
-    char                        appId[256];
+    char                        appId[256], windowTag[256];
 
     // We need to track the monitors the window spans on to calculate the
     // optimal scaling factor.
@@ -220,7 +231,7 @@ typedef struct _GLFWwindowWayland
     } pointerLock;
 
     struct {
-        bool serverSide, buffer_destroyed, titlebar_needs_update;
+        bool serverSide, buffer_destroyed, titlebar_needs_update, dragging;
         _GLFWCSDSurface focus;
 
         _GLFWWaylandCSDSurface titlebar, shadow_left, shadow_right, shadow_top, shadow_bottom, shadow_upper_left, shadow_upper_right, shadow_lower_left, shadow_lower_right;
@@ -282,21 +293,12 @@ typedef struct _GLFWwindowWayland
         WaylandWindowState toplevel_states;
         uint32_t decoration_mode;
     } current, pending;
+    struct zwp_keyboard_shortcuts_inhibitor_v1 *keyboard_shortcuts_inhibitor;
 } _GLFWwindowWayland;
-
-typedef enum _GLFWWaylandOfferType
-{
-    EXPIRED,
-    CLIPBOARD,
-    DRAG_AND_DROP,
-    PRIMARY_SELECTION
-}_GLFWWaylandOfferType ;
 
 typedef struct _GLFWWaylandDataOffer
 {
     void *id;
-    _GLFWWaylandOfferType offer_type;
-    size_t idx;
     bool is_self_offer;
     bool is_primary;
     const char *mime_for_drop;
@@ -305,6 +307,14 @@ typedef struct _GLFWWaylandDataOffer
     struct wl_surface *surface;
     const char **mimes;
     size_t mimes_capacity, mimes_count;
+    bool drag_accepted, dropped;
+    uint32_t serial;
+    struct {
+        id_type watch_id;
+        int fd;
+        char *mime;
+    } *requested_drop_data;
+    size_t dd_capacity, dd_count;
 } _GLFWWaylandDataOffer;
 
 // Wayland-specific global data
@@ -331,6 +341,9 @@ typedef struct _GLFWlibraryWayland
     struct zwp_primary_selection_device_v1*    primarySelectionDevice;
     struct zwp_primary_selection_source_v1*    dataSourceForPrimarySelection;
     struct xdg_activation_v1* xdg_activation_v1;
+    struct xdg_toplevel_icon_manager_v1* xdg_toplevel_icon_manager_v1;
+    struct xdg_system_bell_v1* xdg_system_bell_v1;
+    struct xdg_toplevel_tag_manager_v1* xdg_toplevel_tag_manager_v1;
     struct wp_cursor_shape_manager_v1* wp_cursor_shape_manager_v1;
     struct wp_cursor_shape_device_v1* wp_cursor_shape_device_v1;
     struct wp_fractional_scale_manager_v1 *wp_fractional_scale_manager_v1;
@@ -338,9 +351,12 @@ typedef struct _GLFWlibraryWayland
     struct org_kde_kwin_blur_manager *org_kde_kwin_blur_manager;
     struct zwlr_layer_shell_v1* zwlr_layer_shell_v1; uint32_t zwlr_layer_shell_v1_version;
     struct wp_single_pixel_buffer_manager_v1 *wp_single_pixel_buffer_manager_v1;
+    struct zwp_idle_inhibit_manager_v1* idle_inhibit_manager;
+    struct zwp_keyboard_shortcuts_inhibit_manager_v1 *keyboard_shortcuts_inhibit_manager;
 
     int                         compositorVersion;
     int                         seatVersion;
+    bool has_key_repeat_events;
 
     struct wl_surface*          cursorSurface;
     GLFWCursorShape             cursorPreviousShape;
@@ -384,9 +400,24 @@ typedef struct _GLFWlibraryWayland
     } activation_requests;
 
     EventLoopData eventLoopData;
-    size_t dataOffersCounter;
-    _GLFWWaylandDataOffer dataOffers[8];
+    _GLFWWaylandDataOffer untyped_data_offers[8];
+    _GLFWWaylandDataOffer clipboard_data_offer, primary_data_offer, drop_data_offer;
+
     bool has_preferred_buffer_scale;
+    char *compositor_name;
+
+    // Drag operation state
+    struct {
+        struct wl_data_source* source;
+        char** mimes;           // Array of MIME type strings
+        int mime_count;         // Number of MIME types
+        GLFWid window_id;    // Window that initiated the drag
+        GLFWDragSourceData** pending_requests; // Array of pending data requests
+        int pending_request_count;  // Number of pending requests
+        int pending_request_capacity; // Capacity of the pending requests array
+        struct wl_surface *drag_icon;
+        struct wp_viewport *drag_viewport;
+    } drag;
 } _GLFWlibraryWayland;
 
 // Wayland-specific per-monitor data
@@ -395,7 +426,6 @@ typedef struct _GLFWmonitorWayland
 {
     struct wl_output*           output;
     uint32_t                    name;
-    char                        friendly_name[64], description[64];
     int                         currentMode;
 
     int                         x;
@@ -430,6 +460,7 @@ int _glfwWaylandIntegerWindowScale(_GLFWwindow*);
 void animateCursorImage(id_type timer_id, void *data);
 struct wl_cursor* _glfwLoadCursor(GLFWCursorShape, struct wl_cursor_theme*);
 void destroy_data_offer(_GLFWWaylandDataOffer*);
+const char* _glfwWaylandCompositorName(void);
 
 typedef struct wayland_cursor_shape {
     int which; const char *name;

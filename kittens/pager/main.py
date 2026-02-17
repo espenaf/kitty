@@ -3,9 +3,8 @@
 
 
 import sys
-from typing import List
 
-from kitty.cli import CompletionSpec
+from kitty.simple_cli_definitions import CompletionSpec
 
 OPTIONS = '''
 --role
@@ -27,7 +26,7 @@ and STDIN is not a TTY, it is used.
 usage = '[filename]'
 
 
-def main(args: List[str]) -> None:
+def main(args: list[str]) -> None:
     raise SystemExit('Must be run as kitten pager')
 
 

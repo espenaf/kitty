@@ -16,7 +16,6 @@ PyObject* read_from_disk_cache_python(PyObject *self_, const void *key, size_t k
 bool disk_cache_wait_for_write(PyObject *self, monotonic_t timeout);
 size_t disk_cache_total_size(PyObject *self);
 size_t disk_cache_size_on_disk(PyObject *self);
-void clear_disk_cache(PyObject *self);
 size_t disk_cache_clear_from_ram(PyObject *self_, bool(matches)(void* data, void *key, unsigned keysz), void*);
 size_t disk_cache_num_cached_in_ram(PyObject *self_);
 
@@ -28,5 +27,9 @@ static inline void* disk_cache_malloc_allocator(void *x, size_t sz) {
 static inline bool
 read_from_disk_cache_simple(PyObject *self_, const void *key, size_t key_sz, void **data, size_t *data_sz, bool store_in_ram) {
     *data = read_from_disk_cache(self_, key, key_sz, disk_cache_malloc_allocator, data_sz, store_in_ram);
-    return PyErr_Occurred() == NULL;
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return false;
+    }
+    return *data != NULL;
 }

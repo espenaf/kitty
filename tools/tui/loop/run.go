@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"kitty/tools/tty"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var SIGNULL unix.Signal
@@ -26,6 +26,9 @@ func new_loop() *Loop {
 	l := Loop{controlling_term: nil}
 	l.terminal_options.Alternate_screen = true
 	l.terminal_options.restore_colors = true
+	l.terminal_options.focus_tracking = true
+	l.terminal_options.in_band_resize_notification = true
+	l.terminal_options.color_scheme_change_notification = false
 	l.terminal_options.kitty_keyboard_mode = DISAMBIGUATE_KEYS | REPORT_ALTERNATE_KEYS | REPORT_ALL_KEYS_AS_ESCAPE_CODES | REPORT_TEXT_WITH_KEYS
 	l.escape_code_parser.HandleCSI = l.handle_csi
 	l.escape_code_parser.HandleOSC = l.handle_osc
@@ -111,6 +114,11 @@ func (self *Loop) handle_csi(raw []byte) (err error) {
 				return nil
 			}
 		}
+	} else if csi == "I" || csi == "O" {
+		if self.OnFocusChange != nil {
+			return self.OnFocusChange(csi == "I")
+		}
+		return nil
 	}
 	ke := KeyEventFromCSI(csi)
 	if ke != nil {
@@ -121,6 +129,38 @@ func (self *Loop) handle_csi(raw []byte) (err error) {
 		me := MouseEventFromCSI(csi, sz)
 		if me != nil {
 			return self.handle_mouse_event(me)
+		}
+	}
+	if self.waiting_for_capabilities_response {
+		if strings.HasPrefix(csi, "?") && strings.HasSuffix(csi, "c") {
+			self.waiting_for_capabilities_response = false
+			if self.OnCapabilitiesReceived != nil {
+				if err = self.OnCapabilitiesReceived(self.TerminalCapabilities); err != nil {
+					return err
+				}
+			}
+		} else if strings.HasPrefix(csi, "?997;") && strings.HasSuffix(csi, "n") {
+			switch csi[len(csi)-2] {
+			case '1':
+				self.TerminalCapabilities.ColorPreference = DARK_COLOR_PREFERENCE
+			case '2':
+				self.TerminalCapabilities.ColorPreference = LIGHT_COLOR_PREFERENCE
+			}
+			self.TerminalCapabilities.ColorPreferenceResponseReceived = true
+		} else if strings.HasPrefix(csi, "?") && strings.HasSuffix(csi, "u") {
+			self.TerminalCapabilities.KeyboardProtocol = true
+			self.TerminalCapabilities.KeyboardProtocolResponseReceived = true
+		}
+	} else if self.terminal_options.color_scheme_change_notification && strings.HasPrefix(csi, "?997;") && strings.HasSuffix(csi, "n") {
+		switch csi[len(csi)-2] {
+		case '1':
+			self.TerminalCapabilities.ColorPreference = DARK_COLOR_PREFERENCE
+		case '2':
+			self.TerminalCapabilities.ColorPreference = LIGHT_COLOR_PREFERENCE
+		}
+		self.TerminalCapabilities.ColorPreferenceResponseReceived = true
+		if self.OnColorSchemeChange != nil {
+			return self.OnColorSchemeChange(self.TerminalCapabilities.ColorPreference)
 		}
 	}
 	if self.OnEscapeCode != nil {
@@ -354,6 +394,7 @@ func (self *Loop) run() (err error) {
 	self.write_msg_id_counter = 0
 	write_done_channel := make(chan IdType)
 	self.wakeup_channel = make(chan byte, 256)
+	self.panic_channel = make(chan error)
 	self.pending_writes = make([]write_msg, 0, 256)
 	err_channel := make(chan error, 8)
 	self.death_signal = SIGNULL
@@ -367,6 +408,7 @@ func (self *Loop) run() (err error) {
 	var r_r, r_w, w_r, w_w *os.File
 	var tty_reading_done_channel chan byte
 	var tty_read_channel chan []byte
+	var tty_leftover_read_channel chan []byte
 
 	start_tty_reader := func() (err error) {
 		r_r, r_w, err = os.Pipe()
@@ -375,7 +417,8 @@ func (self *Loop) run() (err error) {
 		}
 		tty_read_channel = make(chan []byte)
 		tty_reading_done_channel = make(chan byte)
-		go read_from_tty(r_r, controlling_term, tty_read_channel, err_channel, tty_reading_done_channel)
+		tty_leftover_read_channel = make(chan []byte, 1)
+		go read_from_tty(r_r, controlling_term, tty_read_channel, err_channel, tty_reading_done_channel, tty_leftover_read_channel)
 		return
 	}
 	err = start_tty_reader()
@@ -403,6 +446,19 @@ func (self *Loop) run() (err error) {
 		// wait for tty reader to exit cleanly
 		for range tty_read_channel {
 		}
+		if !self.waiting_for_capabilities_response {
+			close(tty_leftover_read_channel)
+			return
+		}
+		var pending_bytes []byte
+		select {
+		case msg, ok := <-tty_leftover_read_channel:
+			if ok {
+				pending_bytes = msg
+			}
+		default:
+		}
+		read_until_primary_device_attributes_response(controlling_term, pending_bytes, 2*time.Second)
 	}
 
 	defer func() {
@@ -502,15 +558,14 @@ func (self *Loop) run() (err error) {
 			}
 			var timeout time.Duration
 			if len(self.timers) > 0 {
-				timeout = self.timers[0].deadline.Sub(now)
-				if timeout < 0 {
-					timeout = 0
-				}
+				timeout = max(0, self.timers[0].deadline.Sub(now))
 			}
 			timeout_chan = time.After(timeout)
 		}
 		select {
 		case <-timeout_chan:
+		case p := <-self.panic_channel:
+			return p
 		case <-self.wakeup_channel:
 			for len(self.wakeup_channel) > 0 {
 				<-self.wakeup_channel

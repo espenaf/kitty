@@ -9,8 +9,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 type sgr_color struct {
@@ -35,6 +35,10 @@ func (self sgr_color) as_sgr(base int) string {
 	return fmt.Sprintf("%d:2:%d:%d:%d", base+8, self.color.Red, self.color.Green, self.color.Blue)
 }
 
+func as_uint8(x int) uint8 {
+	return uint8(uint(x) & 0xff)
+}
+
 func (self *sgr_color) from_extended(nums []int) bool {
 	switch nums[0] {
 	case 5:
@@ -45,9 +49,9 @@ func (self *sgr_color) from_extended(nums []int) bool {
 	case 2:
 		if len(nums) > 3 {
 			self.number = -1
-			self.color.Red = uint8(nums[1])
-			self.color.Green = uint8(nums[2])
-			self.color.Blue = uint8(nums[3])
+			self.color.Red = as_uint8(nums[1])
+			self.color.Green = as_uint8(nums[2])
+			self.color.Blue = as_uint8(nums[3])
 			return true
 		}
 	}
@@ -286,13 +290,6 @@ func (self *line_builder) reset(trim_whitespace bool) string {
 
 func (self *line_builder) has_space_for_width(w, max_width int) bool {
 	return w+self.cursor_pos <= max_width
-}
-
-func (self *line_builder) add_char(ch rune) {
-	self.seen_non_space_chars = true
-	self.buf = utf8.AppendRune(self.buf, ch)
-	self.cursor_pos += wcswidth.Runewidth(ch)
-	self.pos_of_trailing_whitespace = -1
 }
 
 func (self *line_builder) add_space(ch rune, trim_whitespace bool) {

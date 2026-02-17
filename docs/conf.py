@@ -18,8 +18,9 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from docutils import nodes
 from docutils.parsers.rst.roles import set_classes
-from pygments.lexer import RegexLexer, bygroups  # type: ignore
-from pygments.token import Comment, Error, Keyword, Literal, Name, Number, String, Whitespace  # type: ignore
+from pygments.lexer import RegexLexer
+from pygments.lexer import bygroups as untyped_bygroups
+from pygments.token import Comment, Error, Keyword, Literal, Name, Number, String, Whitespace
 from sphinx import addnodes, version_info
 from sphinx.util.logging import getLogger
 
@@ -29,7 +30,7 @@ if kitty_src not in sys.path:
 
 from kitty.conf.types import Definition, expand_opt_references  # noqa
 from kitty.constants import str_version, website_url # noqa
-from kitty.fast_data_types import Shlex  # noqa
+from kitty.fast_data_types import Shlex, TEXT_SIZE_CODE  # noqa
 
 # config {{{
 # -- Project information -----------------------------------------------------
@@ -62,7 +63,7 @@ extensions = [
     'sphinx.ext.extlinks',
     'sphinx_copybutton',
     'sphinx_inline_tabs',
-    "sphinxext.opengraph",
+    'sphinxext.opengraph',
 ]
 
 # URL for OpenGraph tags
@@ -119,6 +120,7 @@ def go_version(go_mod_path: str) -> str:  # {{{
 string_replacements = {
     '_kitty_install_cmd': 'curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin',
     '_build_go_version': go_version('../go.mod'),
+    '_text_size_code': str(TEXT_SIZE_CODE),
 }
 
 
@@ -236,6 +238,13 @@ def write_cli_docs(all_kitten_names: Iterable[str]) -> None:
             usage='file-or-dir-to-copy ...', message=copy_message
         ))
     del sys.modules['kittens.ssh.main']
+    from kitty.session import save_as_session_message, save_as_session_options
+    with open('generated/save-as-session.rst', 'w') as f:
+        f.write(option_spec_as_rst(
+            appname='save_as_session', ospec=save_as_session_options, heading_char='^',
+            usage='[path-to-save-session-file-at]',
+            message=save_as_session_message,
+        ))
 
     from kitty.launch import options_spec as launch_options_spec
     with open('generated/launch.rst', 'w') as f:
@@ -282,15 +291,17 @@ if you specify a program-to-run you can use the special placeholder
                 p(f'\nThe source code for this kitten is `available on GitHub <{scurl}>`_.')
                 p('\nCommand Line Interface')
                 p('-' * 72)
+                appname = f'kitten {kitten}'
+                if kitten in ('panel', 'broadcast', 'remote_file'):
+                    appname = 'kitty +' + appname
                 p('\n\n' + option_spec_as_rst(
-                    data['options'], message=data['help_text'], usage=data['usage'], appname=f'kitty +kitten {kitten}',
-                    heading_char='^'))
+                    data['options'], message=data['help_text'], usage=data['usage'], appname=appname, heading_char='^'))
 
 # }}}
 
 
 def write_color_names_table() -> None: # {{{
-    from kitty.rgb import color_names
+    from kitty.fast_data_types import all_color_names
     def s(c: Any) -> str:
         return f'{c.red:02x}/{c.green:02x}/{c.blue:02x}'
     with open('generated/color-names.rst', 'w') as f:
@@ -298,7 +309,7 @@ def write_color_names_table() -> None: # {{{
         p('=' * 50, '=' * 20)
         p('Name'.ljust(50), 'RGB value')
         p('=' * 50, '=' * 20)
-        for name, col in color_names.items():
+        for name, col in all_color_names():
             p(name.ljust(50), s(col))
         p('=' * 50, '=' * 20)
 # }}}
@@ -349,7 +360,7 @@ def write_remote_control_protocol_docs() -> None:  # {{{
 
 def replace_string(app: Any, docname: str, source: List[str]) -> None:  # {{{
     src = source[0]
-    for k, v in app.config.string_replacements.items():
+    for k, v in string_replacements.items():
         src = src.replace(k, v)
     source[0] = src
 # }}}
@@ -357,41 +368,45 @@ def replace_string(app: Any, docname: str, source: List[str]) -> None:  # {{{
 # config file docs {{{
 
 
-class ConfLexer(RegexLexer):  # type: ignore
+def bygroups(*args: Any) -> Any:
+    return untyped_bygroups(*args)  # type: ignore[no-untyped-call]
+
+
+class ConfLexer(RegexLexer):
     name = 'Conf'
     aliases = ['conf']
     filenames = ['*.conf']
 
     def map_flags(self: RegexLexer, val: str, start_pos: int) -> Iterator[Tuple[int, Any, str]]:
-            expecting_arg = ''
-            s = Shlex(val)
-            from kitty.options.utils import allowed_key_map_options
-            last_pos = 0
-            while (tok := s.next_word())[0] > -1:
-                x = tok[1]
-                if tok[0] > last_pos:
-                    yield start_pos + last_pos, Whitespace, ' ' * (tok[0] - last_pos)
-                last_pos = tok[0] + len(x)
-                tok_start = start_pos + tok[0]
-                if expecting_arg:
-                    yield tok_start, String, x
+        expecting_arg = ''
+        s = Shlex(val)
+        from kitty.options.utils import allowed_key_map_options
+        last_pos = 0
+        while (tok := s.next_word())[0] > -1:
+            x = tok[1]
+            if tok[0] > last_pos:
+                yield start_pos + last_pos, Whitespace, ' ' * (tok[0] - last_pos)
+            last_pos = tok[0] + len(x)
+            tok_start = start_pos + tok[0]
+            if expecting_arg:
+                yield tok_start, String, x
+                expecting_arg = ''
+            elif x.startswith('--'):
+                expecting_arg = x[2:]
+                k, sep, v = expecting_arg.partition('=')
+                k = k.replace('-', '_')
+                expecting_arg = k
+                if expecting_arg not in allowed_key_map_options:
+                    yield tok_start, Error, x
+                elif sep == '=':
                     expecting_arg = ''
-                elif x.startswith('--'):
-                    expecting_arg = x[2:]
-                    k, sep, v = expecting_arg.partition('=')
-                    k = k.replace('-', '_')
-                    expecting_arg = k
-                    if expecting_arg not in allowed_key_map_options:
-                        yield tok_start, Error, x
-                    elif sep == '=':
-                        expecting_arg = ''
-                        yield tok_start, Name, x
-                    else:
-                        yield tok_start, Name, x
+                    yield tok_start, Name, x
                 else:
-                    break
+                    yield tok_start, Name, x
+            else:
+                break
 
-    def mapargs(self: RegexLexer, match: 're.Match[str]') -> Iterator[Tuple[int, Any, str]]:
+    def mapargs(self: 'ConfLexer', match: 're.Match[str]') -> Iterator[Tuple[int, Any, str]]:
         start_pos = match.start()
         val = match.group()
         parts = val.split(maxsplit=1)
@@ -455,7 +470,7 @@ class ConfLexer(RegexLexer):  # type: ignore
     }
 
 
-class SessionLexer(RegexLexer):  # type: ignore
+class SessionLexer(RegexLexer):
     name = 'Session'
     aliases = ['session']
     filenames = ['*.session']
@@ -640,33 +655,10 @@ def monkeypatch_man_writer() -> None:
     '''
     Monkeypatch the docutils man translator to be nicer
     '''
-    from docutils.nodes import Element
-    from docutils.writers.manpage import Table, Translator
+    from docutils.nodes import figure
+    from docutils.writers.manpage import Translator
     from sphinx.writers.manpage import ManualPageTranslator
 
-    # Generate nicer tables https://sourceforge.net/p/docutils/bugs/475/
-    class PatchedTable(Table):  # type: ignore
-        _options: list[str]
-        def __init__(self) -> None:
-            super().__init__()
-            self.needs_border_removal = self._options == ['center']
-            if self.needs_border_removal:
-                self._options = ['box', 'center']
-
-        def as_list(self) -> list[str]:
-            ans: list[str] = super().as_list()
-            if self.needs_border_removal:
-                # remove side and top borders as we use box in self._options
-                ans[2] = ans[2][1:]
-                a, b = ans[2].rpartition('|')[::2]
-                ans[2] = a + b
-                if ans[3] == '_\n':
-                    del ans[3]  # top border
-                del ans[-2] # bottom border
-            return ans
-    def visit_table(self: ManualPageTranslator, node: object) -> None:
-        setattr(self, '_active_table', PatchedTable())
-    setattr(ManualPageTranslator, 'visit_table', visit_table)
 
     # Improve header generation
     def header(self: ManualPageTranslator) -> str:
@@ -683,13 +675,13 @@ def monkeypatch_man_writer() -> None:
 
     setattr(ManualPageTranslator, 'header', header)
 
-    def visit_image(self: ManualPageTranslator, node: Element) -> None:
+    def visit_image(self: ManualPageTranslator, node: figure) -> None:
         pass
 
-    def depart_image(self: ManualPageTranslator, node: Element) -> None:
+    def depart_image(self: ManualPageTranslator, node: figure) -> None:
         pass
 
-    def depart_figure(self: ManualPageTranslator, node: Element) -> None:
+    def depart_figure(self: ManualPageTranslator, node: figure) -> None:
         self.body.append(' (images not supported)\n')
         Translator.depart_figure(self, node)
 
@@ -697,8 +689,8 @@ def monkeypatch_man_writer() -> None:
     setattr(ManualPageTranslator, 'depart_image', depart_image)
     setattr(ManualPageTranslator, 'depart_figure', depart_figure)
 
-    orig_astext = Translator.astext
-    def astext(self: Translator) -> Any:
+    orig_astext = getattr(ManualPageTranslator, 'astext')
+    def astext(self: ManualPageTranslator) -> Any:
         b = []
         for line in self.body:
             if line.startswith('.SH'):
@@ -707,9 +699,9 @@ def monkeypatch_man_writer() -> None:
                 parts[0] = parts[0].capitalize()
                 line = x + ' ' + '\n'.join(parts)
             b.append(line)
-        self.body = b
+        setattr(self, 'body', b)
         return orig_astext(self)
-    setattr(Translator, 'astext', astext)
+    setattr(ManualPageTranslator, 'astext', astext)
 
 
 def setup_man_pages() -> None:
@@ -766,7 +758,6 @@ def setup(app: Any) -> None:
     write_remote_control_protocol_docs()
     write_color_names_table()
     write_conf_docs(app, kn)
-    app.add_config_value('string_replacements', {}, True)
     app.connect('source-read', replace_string)
     app.add_config_value('analytics_id', '', 'env')
     app.connect('html-page-context', add_html_context)

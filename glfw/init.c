@@ -223,8 +223,9 @@ _glfwDebug(const char *format, ...) {
 //////                        GLFW public API                       //////
 //////////////////////////////////////////////////////////////////////////
 
-GLFWAPI int glfwInit(monotonic_t start_time)
+GLFWAPI int glfwInit(monotonic_t start_time, bool *supports_window_occlusion)
 {
+    *supports_window_occlusion = false;
     if (_glfw.initialized)
         return true;
     monotonic_start_time = start_time;
@@ -233,7 +234,7 @@ GLFWAPI int glfwInit(monotonic_t start_time)
     _glfw.hints.init = _glfwInitHints;
     _glfw.ignoreOSKeyboardProcessing = false;
 
-    if (!_glfwPlatformInit())
+    if (!_glfwPlatformInit(supports_window_occlusion))
     {
         terminate();
         return false;
@@ -391,6 +392,13 @@ GLFWAPI GLFWsystemcolorthemechangefun glfwSetSystemColorThemeChangeCallback(GLFW
 {
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
     _GLFW_SWAP_POINTERS(_glfw.callbacks.system_color_theme_change, cbfun);
+    return cbfun;
+}
+
+GLFWAPI GLFWclipboardlostfun glfwSetClipboardLostCallback(GLFWclipboardlostfun cbfun)
+{
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(_glfw.callbacks.clipboard_lost, cbfun);
     return cbfun;
 }
 

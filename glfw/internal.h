@@ -85,6 +85,17 @@ typedef struct _GLFWjoystick    _GLFWjoystick;
 typedef struct _GLFWtls         _GLFWtls;
 typedef struct _GLFWmutex       _GLFWmutex;
 
+// Drag source data structure for chunked writing of drag data
+// Lifetime is managed by the backend - freed on end of data, error, drag cancellation, or exit
+struct GLFWDragSourceData {
+    GLFWid window_id;           // ID of window that initiated the drag (use _glfwWindowForId to get pointer)
+    char* mime_type;            // MIME type being sent (owned, copied from request)
+    int write_fd;               // File descriptor for writing data (Wayland/X11), -1 if not used
+    bool finished;              // Whether data sending is complete (EOF or error)
+    int error_code;             // POSIX error code if an error occurred, 0 otherwise
+    void* platform_data;        // Platform-specific data
+};
+
 typedef void (* _GLFWmakecontextcurrentfun)(_GLFWwindow*);
 typedef void (* _GLFWswapbuffersfun)(_GLFWwindow*);
 typedef void (* _GLFWswapintervalfun)(int);
@@ -331,7 +342,7 @@ struct _GLFWwndconfig
         char      instanceName[256];
     } x11;
     struct {
-        char      appId[256];
+        char      appId[256], windowTag[256];
         uint32_t  bgcolor;
     } wl;
 };
@@ -478,8 +489,12 @@ struct _GLFWwindow
         GLFWcursorenterfun      cursorEnter;
         GLFWscrollfun           scroll;
         GLFWkeyboardfun         keyboard;
-        GLFWdropfun             drop;
         GLFWliveresizefun       liveResize;
+
+        GLFWdragfun             drag;
+        GLFWdragsourcefun       dragSource;
+
+        GLFWdropeventfun drop_event;
     } callbacks;
 
     // This is defined in the window API's platform.h
@@ -490,7 +505,7 @@ struct _GLFWwindow
 //
 struct _GLFWmonitor
 {
-    char*           name;
+    const char *name, *description;
     void*           userPointer;
 
     // Physical dimensions in millimeters.
@@ -616,7 +631,7 @@ struct _GLFWlibrary
     _GLFWtls            contextSlot;
     _GLFWmutex          errorLock;
 
-    bool                ignoreOSKeyboardProcessing;
+    bool                ignoreOSKeyboardProcessing, keyboard_grabbed;
 
     struct {
         bool            available;
@@ -644,6 +659,7 @@ struct _GLFWlibrary
         GLFWmonitorfun  monitor;
         GLFWjoystickfun joystick;
         GLFWapplicationclosefun application_close;
+        GLFWclipboardlostfun clipboard_lost;
         GLFWsystemcolorthemechangefun system_color_theme_change;
         GLFWdrawtextfun draw_text;
         GLFWcurrentselectionfun get_current_selection;
@@ -667,12 +683,16 @@ struct _GLFWlibrary
 //
 extern _GLFWlibrary _glfw;
 
+typedef struct GeometryRect { int x, y, width, height; } GeometryRect;
+typedef struct MonitorGeometry {
+    GeometryRect full, workarea;
+} MonitorGeometry;
 
 //////////////////////////////////////////////////////////////////////////
 //////                       GLFW platform API                      //////
 //////////////////////////////////////////////////////////////////////////
 
-int _glfwPlatformInit(void);
+int _glfwPlatformInit(bool*);
 void _glfwPlatformTerminate(void);
 const char* _glfwPlatformGetVersionString(void);
 
@@ -708,14 +728,13 @@ void _glfwPlatformTerminateJoysticks(void);
 int _glfwPlatformPollJoystick(_GLFWjoystick* js, int mode);
 void _glfwPlatformUpdateGamepadGUID(char* guid);
 
-int _glfwPlatformCreateWindow(_GLFWwindow* window,
-                              const _GLFWwndconfig* wndconfig,
-                              const _GLFWctxconfig* ctxconfig,
-                              const _GLFWfbconfig* fbconfig);
+int _glfwPlatformCreateWindow(_GLFWwindow* window, const _GLFWwndconfig* wndconfig, const _GLFWctxconfig* ctxconfig, const _GLFWfbconfig* fbconfig, const GLFWLayerShellConfig *lsc);
 void _glfwPlatformDestroyWindow(_GLFWwindow* window);
 void _glfwPlatformSetWindowTitle(_GLFWwindow* window, const char* title);
 void _glfwPlatformSetWindowIcon(_GLFWwindow* window,
                                 int count, const GLFWimage* images);
+bool _glfwPlatformSetLayerShellConfig(_GLFWwindow* window, const GLFWLayerShellConfig *value);
+const GLFWLayerShellConfig* _glfwPlatformGetLayerShellConfig(_GLFWwindow* window);
 void _glfwPlatformGetWindowPos(_GLFWwindow* window, int* xpos, int* ypos);
 void _glfwPlatformSetWindowPos(_GLFWwindow* window, int xpos, int ypos);
 void _glfwPlatformGetWindowSize(_GLFWwindow* window, int* width, int* height);
@@ -736,7 +755,7 @@ monotonic_t _glfwPlatformGetDoubleClickInterval(_GLFWwindow* window);
 void _glfwPlatformIconifyWindow(_GLFWwindow* window);
 void _glfwPlatformRestoreWindow(_GLFWwindow* window);
 void _glfwPlatformMaximizeWindow(_GLFWwindow* window);
-void _glfwPlatformShowWindow(_GLFWwindow* window);
+void _glfwPlatformShowWindow(_GLFWwindow* window, bool move_to_active_screen);
 void _glfwPlatformHideWindow(_GLFWwindow* window);
 void _glfwPlatformRequestWindowAttention(_GLFWwindow* window);
 int _glfwPlatformWindowBell(_GLFWwindow* window);
@@ -761,6 +780,10 @@ void _glfwPlatformSetWindowMousePassthrough(_GLFWwindow* window, bool enabled);
 void _glfwPlatformSetWindowOpacity(_GLFWwindow* window, float opacity);
 void _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev);
 void _glfwPlatformChangeCursorTheme(void);
+
+int _glfwPlatformStartDrag(_GLFWwindow* window, const char* const* mime_types, int mime_count, const GLFWimage* thumbnail, int operations);
+ssize_t _glfwPlatformSendDragData(GLFWDragSourceData* source_data, const void* data, size_t size);
+void _glfwPlatformCancelDrag(_GLFWwindow* window);
 
 void _glfwPlatformPollEvents(void);
 void _glfwPlatformWaitEvents(void);
@@ -809,12 +832,23 @@ void _glfwInputWindowCloseRequest(_GLFWwindow* window);
 void _glfwInputWindowMonitor(_GLFWwindow* window, _GLFWmonitor* monitor);
 
 void _glfwInputKeyboard(_GLFWwindow *window, GLFWkeyevent *ev);
-void _glfwInputScroll(_GLFWwindow* window, double xoffset, double yoffset, int flags, int mods);
+void _glfwInputClipboardLost(GLFWClipboardType which);
+void _glfwInputScroll(_GLFWwindow* window, const GLFWScrollEvent *ev);
 void _glfwInputMouseClick(_GLFWwindow* window, int button, int action, int mods);
 void _glfwInputCursorPos(_GLFWwindow* window, double xpos, double ypos);
 void _glfwInputCursorEnter(_GLFWwindow* window, bool entered);
-int _glfwInputDrop(_GLFWwindow* window, const char *mime, const char *text, size_t sz);
-void _glfwInputColorScheme(GLFWColorScheme);
+
+int _glfwInputDragEvent(_GLFWwindow* window, int event, double xpos, double ypos, const char** mime_types, int* mime_count);
+void _glfwInputDragSourceRequest(_GLFWwindow* window, const char* mime_type, GLFWDragSourceData* source_data);
+// Platform functions for drop data reading
+
+void _glfwPlatformRequestDropUpdate(_GLFWwindow* window);
+size_t _glfwInputDropEvent(_GLFWwindow *window, GLFWDropEventType type, double xpos, double ypos, const char** mimes, size_t num_mimes, bool from_self);
+ssize_t _glfwPlatformReadAvailableDropData(GLFWwindow *w, GLFWDropEvent *ev, char *buffer, size_t sz);
+void _glfwPlatformEndDrop(GLFWwindow *w, GLFWDragOperationType op);
+int _glfwPlatformRequestDropData(_GLFWwindow *window, const char *mime);
+
+void _glfwInputColorScheme(GLFWColorScheme, bool);
 void _glfwPlatformInputColorScheme(GLFWColorScheme);
 void _glfwInputJoystick(_GLFWjoystick* js, int event);
 void _glfwInputJoystickAxis(_GLFWjoystick* js, int axis, float value);
@@ -878,6 +912,15 @@ unsigned long long _glfwPlatformAddTimer(monotonic_t interval, bool repeats, GLF
 void _glfwPlatformUpdateTimer(unsigned long long timer_id, monotonic_t interval, bool enabled);
 void _glfwPlatformRemoveTimer(unsigned long long timer_id);
 int _glfwPlatformSetWindowBlur(_GLFWwindow* handle, int value);
+MonitorGeometry _glfwPlatformGetMonitorGeometry(_GLFWmonitor* monitor);
+bool _glfwPlatformGrabKeyboard(bool grab);
+void glfw_handle_scroll_event_for_momentum(_GLFWwindow *w, const GLFWScrollEvent *ev, bool stopped, bool is_finger_based);
+#define glfw_cancel_momentum_scroll() glfw_handle_scroll_event_for_momentum(NULL, NULL, false, false)
+#ifdef _GLFW_X11
+#define momentum_scroll_gesture_detection_timeout_ms 50
+#else
+#define momentum_scroll_gesture_detection_timeout_ms 0
+#endif
 
 char* _glfw_strdup(const char* source);
 
@@ -885,3 +928,4 @@ void _glfw_free_clipboard_data(_GLFWClipboardData *cd);
 
 #define debug_rendering(...) if (_glfw.hints.init.debugRendering) { timed_debug_print(__VA_ARGS__); }
 #define debug_input(...) if (_glfw.hints.init.debugKeyboard) { timed_debug_print(__VA_ARGS__); }
+#define safe_close(fd) do { errno = 0; close(fd); } while(errno == EINTR)

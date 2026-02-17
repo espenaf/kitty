@@ -118,8 +118,15 @@ typedef Bool (* PFN_XF86VidModeGetGammaRampSize)(Display*,int,int*);
 
 typedef Status (* PFN_XIQueryVersion)(Display*,int*,int*);
 typedef int (* PFN_XISelectEvents)(Display*,Window,XIEventMask*,int);
+typedef XIDeviceInfo* (* PFN_XIQueryDevice)(Display*,int,int*);
+typedef void (* PFN_XIFreeDeviceInfo)(XIDeviceInfo*);
+typedef Status (* PFN_XIGetProperty)(Display *dpy, int deviceid, Atom property, long offset, long length, Bool delete_property, Atom type, Atom *type_return, int *format_return, unsigned long *num_items_return, unsigned long *bytes_after_return, unsigned char **data);
+
 #define XIQueryVersion _glfw.x11.xi.QueryVersion
 #define XISelectEvents _glfw.x11.xi.SelectEvents
+#define XIQueryDevice _glfw.x11.xi.QueryDevice
+#define XIFreeDeviceInfo _glfw.x11.xi.FreeDeviceInfo
+#define XIGetProperty _glfw.x11.xi.GetProperty
 
 typedef Bool (* PFN_XRenderQueryExtension)(Display*,int*,int*);
 typedef Status (* PFN_XRenderQueryVersion)(Display*dpy,int*,int*);
@@ -205,6 +212,16 @@ typedef struct _GLFWwindowX11
     // The last position the cursor was warped to by GLFW
     int             warpCursorPosX, warpCursorPosY;
 
+    // XI2 smooth scrolling - track valuator values per window
+    struct {
+        double      verticalValue;
+        double      horizontalValue;
+    } smoothScroll;
+
+    struct {
+        bool is_active;
+        GLFWLayerShellConfig config;
+    } layer_shell;
 } _GLFWwindowX11;
 
 typedef struct MimeAtom {
@@ -216,6 +233,26 @@ typedef struct AtomArray {
     MimeAtom *array;
     size_t sz, capacity;
 } AtomArray;
+
+typedef struct XIScrollValuator {
+    double increment, value, min, max; int number, resolution, mode; bool is_vertical;
+} XIScrollValuator;
+
+typedef struct XIScrollDevice {
+    bool is_highres;
+    bool is_finger_based;
+    int deviceid, sourceid;
+    XIScrollValuator valuators[8];
+    unsigned num_valuators;
+    char name[32];
+} XIScrollDevice;
+
+typedef struct XdndSelectionRequest {
+    char *mime;
+    bool inflight, got_data;
+    unsigned char *data;
+    size_t offset, size;
+} XdndSelectionRequest;
 
 // X11-specific global data
 //
@@ -247,19 +284,22 @@ typedef struct _GLFWlibraryX11
     Atom            WM_STATE;
     Atom            WM_DELETE_WINDOW;
     Atom            NET_WM_NAME;
+    Atom            NET_WM_ALLOWED_ACTIONS, NET_WM_ACTION_MOVE, NET_WM_ACTION_RESIZE, NET_WM_ACTION_MINIMIZE, NET_WM_ACTION_SHADE, NET_WM_ACTION_STICK, NET_WM_ACTION_MAXIMIZE_HORZ, NET_WM_ACTION_MAXIMIZE_VERT, NET_WM_ACTION_FULLSCREEN, NET_WM_ACTION_CHANGE_DESKTOP, NET_WM_ACTION_CLOSE, NET_WM_ACTION_ABOVE, NET_WM_ACTION_BELOW, NET_WM_ACTION_ABOVE_BELOW;
     Atom            NET_WM_ICON_NAME;
     Atom            NET_WM_ICON;
     Atom            NET_WM_PID;
     Atom            NET_WM_PING;
-    Atom            NET_WM_WINDOW_TYPE;
-    Atom            NET_WM_WINDOW_TYPE_NORMAL;
-    Atom            NET_WM_WINDOW_TYPE_DOCK;
+    Atom            NET_WM_WINDOW_TYPE, NET_WM_WINDOW_TYPE_NORMAL, NET_WM_WINDOW_TYPE_DOCK, NET_WM_WINDOW_TYPE_DESKTOP, NET_WM_WINDOW_TYPE_UTILITY, NET_WM_WINDOW_TYPE_SPLASH, NET_WM_WINDOW_TYPE_DIALOG, NET_WM_WINDOW_TYPE_MENU, NET_WM_WINDOW_TYPE_NOTIFICATION;
     Atom            NET_WM_STATE;
     Atom            NET_WM_STATE_ABOVE;
+    Atom            NET_WM_STATE_BELOW;
     Atom            NET_WM_STATE_FULLSCREEN;
     Atom            NET_WM_STATE_MAXIMIZED_VERT;
     Atom            NET_WM_STATE_MAXIMIZED_HORZ;
     Atom            NET_WM_STATE_DEMANDS_ATTENTION;
+    Atom            NET_WM_STATE_SKIP_TASKBAR;
+    Atom            NET_WM_STATE_SKIP_PAGER;
+    Atom            NET_WM_STATE_STICKY;
     Atom            NET_WM_BYPASS_COMPOSITOR;
     Atom            NET_WM_FULLSCREEN_MONITORS;
     Atom            NET_WM_WINDOW_OPACITY;
@@ -278,10 +318,13 @@ typedef struct _GLFWlibraryX11
     Atom            XdndPosition;
     Atom            XdndStatus;
     Atom            XdndActionCopy;
+    Atom            XdndActionMove;
+    Atom            XdndActionLink;
     Atom            XdndDrop;
     Atom            XdndFinished;
     Atom            XdndSelection;
     Atom            XdndTypeList;
+    Atom            XdndLeave;
 
     // Selection (clipboard) atoms
     Atom            TARGETS;
@@ -346,9 +389,30 @@ typedef struct _GLFWlibraryX11
     struct {
         int         version;
         Window      source;
-        char        format[128];
+        char        format[256];
         int         format_priority;
+        Window      target_window;  // For drag events: the window being dragged over
+        const char** mimes;          // Cached MIME types from drag enter
+        size_t       mimes_count;    // Current count of MIME types (may be reduced by callback)
+        bool from_self, dropped;
+        Time drop_time;
+        XdndSelectionRequest *selection_requests;
+        size_t selection_requests_count, selection_requests_capacity;
     } xdnd;
+
+    // Drag source state
+    struct {
+        Window           source_window;
+        char**           mimes;         // Array of MIME type strings
+        int              mime_count;    // Number of MIME types
+        Atom*            type_atoms;    // Atoms for each MIME type
+        Atom             action_atom;   // XdndActionCopy, XdndActionMove, or XdndActionLink
+        bool             active;
+        _GLFWwindow*     window;        // Window that initiated the drag
+        GLFWDragSourceData** pending_requests; // Array of pending data requests
+        int              pending_request_count;  // Number of pending requests
+        int              pending_request_capacity; // Capacity of the pending requests array
+    } drag;
 
     struct {
         void*       handle;
@@ -388,6 +452,13 @@ typedef struct _GLFWlibraryX11
         int         minor;
         PFN_XIQueryVersion QueryVersion;
         PFN_XISelectEvents SelectEvents;
+        PFN_XIQueryDevice QueryDevice;
+        PFN_XIFreeDeviceInfo FreeDeviceInfo;
+        PFN_XIGetProperty GetProperty;
+        XIScrollDevice scroll_devices[16];
+        unsigned num_scroll_devices;
+        int master_pointer_id;
+        Atom LIBINPUT_SCROLL_METHOD_ENABLED, LIBINPUT_TAPPING;
     } xi;
 
     struct {
@@ -460,3 +531,5 @@ void _glfwInputErrorX11(int error, const char* message);
 
 void _glfwGetSystemContentScaleX11(float* xscale, float* yscale, bool bypass_cache);
 void _glfwPushSelectionToManagerX11(void);
+void read_xi_scroll_devices(void);
+void free_dnd_data(void);

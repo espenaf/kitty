@@ -1,23 +1,24 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
-from typing import Any, Dict, Generator, Iterable, List, Tuple
+from collections.abc import Generator, Iterable
+from typing import Any
 
 from kitty.borders import BorderColor
-from kitty.types import Edges
-from kitty.typing import WindowType
+from kitty.types import Edges, NeighborsMap, WindowMapper
+from kitty.typing_compat import EdgeLiteral, WindowType
 from kitty.window_list import WindowGroup, WindowList
 
-from .base import BorderLine, Layout, LayoutData, LayoutDimension, NeighborsMap, lgd
+from .base import BorderLine, Layout, LayoutData, LayoutDimension, lgd
 
 
 def borders(
-    data: Iterable[Tuple[WindowGroup, LayoutData, LayoutData]],
+    data: Iterable[tuple[WindowGroup, LayoutData, LayoutData]],
     is_horizontal: bool,
     all_windows: WindowList,
     start_offset: int = 1, end_offset: int = 1
 ) -> Generator[BorderLine, None, None]:
-    borders: List[BorderLine] = []
+    borders: list[BorderLine] = []
     active_group = all_windows.active_group
     needs_borders_map = all_windows.compute_needs_borders_map(lgd.draw_active_borders)
     try:
@@ -66,7 +67,7 @@ class Vertical(Layout):
     main_axis_layout = Layout.ylayout
     perp_axis_layout = Layout.xlayout
 
-    def variable_layout(self, all_windows: WindowList, biased_map: Dict[int, float]) -> LayoutDimension:
+    def variable_layout(self, all_windows: WindowList, biased_map: dict[int, float]) -> LayoutDimension:
         num_windows = all_windows.num_groups
         bias = biased_map if num_windows > 1 else None
         return self.main_axis_layout(all_windows.iter_all_layoutable_groups(), bias=bias)
@@ -75,7 +76,7 @@ class Vertical(Layout):
         return self.perp_axis_layout(iter((wg,)), border_mult=0 if lgd.draw_minimal_borders else 1)
 
     def remove_all_biases(self) -> bool:
-        self.biased_map: Dict[int, float] = {}
+        self.biased_map: dict[int, float] = {}
         return True
 
     def apply_bias(self, idx: int, increment: float, all_windows: WindowList, is_horizontal: bool = True) -> bool:
@@ -99,7 +100,7 @@ class Vertical(Layout):
         after_layout = tuple(self.variable_layout(all_windows, self.biased_map))
         return before_layout == after_layout
 
-    def generate_layout_data(self, all_windows: WindowList) -> Generator[Tuple[WindowGroup, LayoutData, LayoutData], None, None]:
+    def generate_layout_data(self, all_windows: WindowList) -> Generator[tuple[WindowGroup, LayoutData, LayoutData], None, None]:
         ylayout = self.variable_layout(all_windows, self.biased_map)
         for wg, yl in zip(all_windows.iter_all_layoutable_groups(), ylayout):
             xl = next(self.fixed_layout(wg))
@@ -128,17 +129,27 @@ class Vertical(Layout):
         idx = groups.index(wg)
         lg = len(groups)
         if lg > 1:
-            before = [groups[(idx - 1 + lg) % lg].id]
-            after = [groups[(idx + 1) % lg].id]
+            after = [groups[(idx - 1 + lg) % lg].id]
+            before = [groups[(idx + 1) % lg].id]
         else:
             before, after = [], []
+        ans: NeighborsMap = {}
+        akey: EdgeLiteral = 'top'
+        bkey: EdgeLiteral = 'bottom'
         if self.main_is_horizontal:
-            return {'left': before, 'right': after, 'top': [], 'bottom': []}
-        return {'top': before, 'bottom': after, 'left': [], 'right': []}
+            akey, bkey = 'left', 'right'
+        if before:
+            ans[bkey] = before
+        if after:
+            ans[akey] = after
+        return ans
 
-    def layout_state(self) -> Dict[str, Any]:
+    def layout_state(self) -> dict[str, Any]:
         return {'biased_map': self.biased_map}
 
+    def set_layout_state(self, layout_state: dict[str, Any], map_group_id: WindowMapper) -> bool:
+        self.biased_map = {int(k): v for k, v in layout_state['biased_map'].items()}
+        return True
 
 class Horizontal(Vertical):
 

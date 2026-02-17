@@ -25,8 +25,14 @@ typedef enum {
     CLOSE_WINDOW,
     RESET_TERMINAL,
     CLEAR_TERMINAL_AND_SCROLLBACK,
+    CLEAR_SCROLLBACK,
+    CLEAR_SCREEN,
+    CLEAR_LAST_COMMAND,
     RELOAD_CONFIG,
     TOGGLE_MACOS_SECURE_KEYBOARD_ENTRY,
+    MACOS_CYCLE_THROUGH_OS_WINDOWS,
+    MACOS_CYCLE_THROUGH_OS_WINDOWS_BACKWARDS,
+    SEARCH_SCROLLBACK,
     TOGGLE_FULLSCREEN,
     OPEN_KITTY_WEBSITE,
     HIDE,
@@ -41,7 +47,7 @@ typedef enum {
 
 void cocoa_focus_window(void *w);
 long cocoa_window_number(void *w);
-void cocoa_create_global_menu(void);
+void cocoa_application_lifecycle_event(bool);
 void cocoa_recreate_global_menu(void);
 void cocoa_system_beep(const char*);
 void cocoa_set_activation_policy(bool);

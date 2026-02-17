@@ -5,7 +5,6 @@ package simdstring
 import (
 	"bytes"
 	"fmt"
-	"kitty/tools/utils"
 	"runtime"
 	"strings"
 	"testing"
@@ -49,7 +48,7 @@ func test_cmpeq_epi8(a, b []byte) []byte {
 func test_cmplt_epi8(t *testing.T, a, b []byte) []byte {
 	ans := make([]byte, len(a))
 	var prev []byte
-	for which := 0; which < 3; which++ {
+	for which := range 3 {
 		if len(ans) == 16 {
 			test_cmplt_epi8_asm_128(a, b, which, ans)
 		} else {
@@ -120,13 +119,19 @@ func addressof_data(b []byte) uintptr {
 	return uintptr(unsafe.Pointer(&b[0]))
 }
 
+func memset(ans []byte, val byte) {
+	for i := range ans {
+		ans[i] = val
+	}
+}
+
 func aligned_slice(sz, alignment int) ([]byte, []byte) {
 	ans := make([]byte, sz+alignment+512)
 	a := addressof_data(ans)
 	a &= uintptr(alignment - 1)
 	extra := uintptr(alignment) - a
-	utils.Memset(ans, '<')
-	utils.Memset(ans[extra+uintptr(sz):], '>')
+	memset(ans, '<')
+	memset(ans[extra+uintptr(sz):], '>')
 	return ans[extra : extra+uintptr(sz)], ans
 }
 
@@ -156,7 +161,7 @@ func TestSIMDStringOps(t *testing.T) {
 	}
 	// test alignment issues
 	q := []byte("abc")
-	for sz := 0; sz < 32; sz++ {
+	for sz := range 32 {
 		test(q, '<', '>', sz)
 		test(q, ' ', 'b', sz)
 		test(q, '<', 'a', sz)
@@ -167,7 +172,7 @@ func TestSIMDStringOps(t *testing.T) {
 	tests := func(h string, a, b byte) {
 		for _, sz := range []int{0, 16, 32, 64, 79} {
 			q := strings.Repeat(" ", sz) + h
-			for sz := 0; sz < 32; sz++ {
+			for sz := range 32 {
 				test([]byte(q), a, b, sz)
 			}
 		}
@@ -321,7 +326,7 @@ func TestIntrinsics(t *testing.T) {
 		if e := test_jump_if_zero(a); e != 0 {
 			t.Fatalf("Did not detect zero register")
 		}
-		for i := 0; i < sz; i++ {
+		for i := range sz {
 			a = make([]byte, sz)
 			a[i] = 1
 			if e := test_jump_if_zero(a); e != 1 {
@@ -335,7 +340,7 @@ func TestIntrinsics(t *testing.T) {
 		if e := test_count_to_match(a, 77); e != -1 {
 			t.Fatalf("Unexpectedly found byte at: %d", e)
 		}
-		for i := 0; i < sz; i++ {
+		for i := range sz {
 			if e := test_count_to_match(a, byte(i)); e != i {
 				t.Fatalf("Failed to find the byte: %d (%d != %d)", i, i, e)
 			}

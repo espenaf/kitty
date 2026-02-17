@@ -6,17 +6,18 @@ import (
 	"archive/tar"
 	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"kitty/kittens/ssh"
-	"kitty/tools/cli"
-	"kitty/tools/config"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/kittens/ssh"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -36,16 +37,33 @@ var conf *Config
 var opts *Options
 var lp *loop.Loop
 
-func isdir(path string) bool {
-	if s, err := os.Stat(path); err == nil {
-		return s.IsDir()
-	}
-	return false
-}
+var temp_files []string
 
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func resolve_path(path string) (ans string, is_dir bool, err error) {
+	var s fs.FileInfo
+	if s, err = os.Stat(path); err != nil {
+		return
+	} else {
+		if s.Mode()&fs.ModeNamedPipe != 0 {
+			var src, dest *os.File
+			if src, err = os.Open(path); err != nil {
+				return
+			}
+			defer src.Close()
+			if dest, err = os.CreateTemp("", fmt.Sprintf("*-pipe-%s", filepath.Base(path))); err != nil {
+				return
+			}
+			defer dest.Close()
+			temp_files = append(temp_files, dest.Name())
+			if _, err = io.Copy(dest, src); err != nil {
+				return
+			}
+			return dest.Name(), false, nil
+
+		} else {
+			return path, s.IsDir(), nil
+		}
+	}
 }
 
 func get_ssh_file(hostname, rpath string) (string, error) {
@@ -58,7 +76,7 @@ func get_ssh_file(hostname, rpath string) (string, error) {
 	for strings.HasPrefix(rpath, "/") {
 		rpath = rpath[1:]
 	}
-	cmd := []string{ssh.SSHExe(), hostname, "tar", "-c", "-f", "-"}
+	cmd := []string{ssh.SSHExe(), hostname, "tar", "--dereference", "--create", "--file", "-"}
 	if is_abs {
 		cmd = append(cmd, "-C", "/")
 	}
@@ -111,8 +129,15 @@ func main(_ *cli.Command, opts_ *Options, args []string) (rc int, err error) {
 	if err = set_diff_command(conf.Diff_cmd); err != nil {
 		return 1, err
 	}
+	switch conf.Color_scheme {
+	case Color_scheme_light:
+		use_light_colors = true
+	case Color_scheme_dark:
+		use_light_colors = false
+	case Color_scheme_auto:
+		use_light_colors = false
+	}
 	init_caches()
-	create_formatters()
 	defer func() {
 		for tdir := range remote_dirs {
 			os.RemoveAll(tdir)
@@ -126,28 +151,44 @@ func main(_ *cli.Command, opts_ *Options, args []string) (rc int, err error) {
 	if err != nil {
 		return 1, err
 	}
-	if isdir(left) != isdir(right) {
+	defer func() {
+		for _, path := range temp_files {
+			os.Remove(path)
+		}
+	}()
+	var left_is_dir, right_is_dir bool
+	if left, left_is_dir, err = resolve_path(left); err != nil {
+		return 1, err
+	}
+	if right, right_is_dir, err = resolve_path(right); err != nil {
+		return 1, err
+	}
+	if left_is_dir != right_is_dir {
 		return 1, fmt.Errorf("The items to be diffed should both be either directories or files. Comparing a directory to a file is not valid.'")
 	}
-	if !exists(left) {
-		return 1, fmt.Errorf("%s does not exist", left)
-	}
-	if !exists(right) {
-		return 1, fmt.Errorf("%s does not exist", right)
-	}
+
 	lp, err = loop.New()
 	loop.MouseTrackingMode(lp, loop.BUTTONS_AND_DRAG_MOUSE_TRACKING)
 	if err != nil {
 		return 1, err
 	}
+	lp.ColorSchemeChangeNotifications()
 	h := Handler{left: left, right: right, lp: lp}
 	lp.OnInitialize = func() (string, error) {
 		lp.SetCursorVisible(false)
 		lp.SetCursorShape(loop.BAR_CURSOR, true)
 		lp.AllowLineWrapping(false)
 		lp.SetWindowTitle(fmt.Sprintf("%s vs. %s", left, right))
+		lp.QueryCapabilities()
 		h.initialize()
 		return "", nil
+	}
+	lp.OnCapabilitiesReceived = func(tc loop.TerminalCapabilities) error {
+		if !tc.KeyboardProtocol {
+			return fmt.Errorf("This terminal does not support the kitty keyboard protocol, or you are running inside a terminal multiplexer that is blocking querying for kitty keyboard protocol support. The diff kitten cannot function without it.")
+		}
+		h.on_capabilities_received(tc)
+		return nil
 	}
 	lp.OnWakeup = h.on_wakeup
 	lp.OnFinalize = func() string {

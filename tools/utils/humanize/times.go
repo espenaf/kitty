@@ -2,7 +2,7 @@ package humanize
 
 import (
 	"fmt"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 	"math"
 	"sort"
 	"strings"
@@ -100,7 +100,7 @@ func CustomRelTime(a, b time.Time, albl, blbl string, magnitudes []RelTimeMagnit
 		n = len(magnitudes) - 1
 	}
 	mag := magnitudes[n]
-	args := []interface{}{}
+	args := []any{}
 	escaped := false
 	for _, ch := range mag.Format {
 		if escaped {

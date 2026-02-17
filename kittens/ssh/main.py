@@ -2,7 +2,6 @@
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
 
 import sys
-from typing import List, Optional
 
 from kitty.conf.types import Definition
 from kitty.types import run_once
@@ -92,7 +91,8 @@ available or broken, using an alternate interpreter can be useful.
 
 opt('remote_dir', '.local/share/kitty-ssh-kitten', long_text='''
 The location on the remote host where the files needed for this kitten are
-installed. Relative paths are resolved with respect to :code:`$HOME`.
+installed. Relative paths are resolved with respect to :code:`$HOME`. Absolute
+paths have their leading / removed and so are also resolved with respect to $HOME.
 ''')
 
 opt('+copy', '', add_to_default=False, ctype='CopyInstruction', long_text=f'''
@@ -220,8 +220,42 @@ environment variable.
 
 egr()  # }}}
 
+agr('askpass', 'Askpass automation')  # {{{
 
-def main(args: List[str]) -> Optional[str]:
+opt('password', '', long_text='''
+Specify a password to use when SSH prompts for a password. The value format is
+"backend:secret". Currently, only the "text" backend is supported, which stores
+the secret in plain text in the config file. For example:
+
+    password text:my_password
+
+If the backend prefix is omitted, it is treated as "text:" for backward
+compatibility. Beware that storing passwords in plain text is insecure.
+''')
+
+opt('totp_secret', '', long_text='''
+Specify a TOTP shared secret to auto-fill one-time codes when SSH asks for them.
+The value format is "backend:secret". Currently, only the "text" backend is
+supported. For example:
+
+    totp_secret text:JBSWY3DPEHPK3PXP
+
+If the backend prefix is omitted, it is treated as "text:" for backward
+compatibility.
+''')
+
+opt('totp_digits', '6', option_type='int', long_text='''
+Number of digits for the generated TOTP codes. Default is 6.
+''')
+
+opt('totp_period', '30', option_type='int', long_text='''
+Time period in seconds for the TOTP code validity. Default is 30.
+''')
+
+egr()  # }}}
+
+
+def main(args: list[str]) -> str | None:
     raise SystemExit('This should be run as kitten ssh')
 
 if __name__ == '__main__':

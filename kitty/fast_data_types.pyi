@@ -1,24 +1,40 @@
 import termios
-from ctypes import Array, c_ubyte
 from typing import Any, Callable, Dict, Iterator, List, Literal, NewType, Optional, Tuple, TypedDict, Union, overload
 
+from kitty.borders import Border
 from kitty.boss import Boss
 from kitty.fonts import VariableData
 from kitty.fonts.render import FontObject
 from kitty.marks import MarkerFunc
 from kitty.notifications import MacOSNotificationCategory
 from kitty.options.types import Options
+from kitty.simple_cli_definitions import OptionDefinition
 from kitty.types import LayerShellConfig, SignalInfo
-from kitty.typing import EdgeLiteral, NotRequired, ReadableBuffer, WriteableBuffer
+from kitty.typing_compat import EdgeLiteral, NotRequired, ReadableBuffer, WriteableBuffer
 
 # Constants {{{
+SCALE_BITS: int
+WIDTH_BITS: int
+SUBSCALE_BITS: int
+COLOR_IS_SPECIAL: int
+COLOR_NOT_SET: int
+COLOR_IS_RGB: int
+COLOR_IS_INDEX: int
+GLFW_DRAG_OPERATION_MOVE: int
+GLFW_DRAG_OPERATION_COPY: int
+GLFW_DRAG_OPERATION_GENERIC: int
 GLFW_LAYER_SHELL_NONE: int
 GLFW_LAYER_SHELL_PANEL: int
+GLFW_LAYER_SHELL_TOP: int
+GLFW_LAYER_SHELL_OVERLAY: int
 GLFW_LAYER_SHELL_BACKGROUND: int
 GLFW_EDGE_TOP: int
 GLFW_EDGE_BOTTOM: int
 GLFW_EDGE_LEFT: int
 GLFW_EDGE_RIGHT: int
+GLFW_EDGE_CENTER: int
+GLFW_EDGE_CENTER_SIZED: int
+GLFW_EDGE_NONE: int
 GLFW_FOCUS_NOT_ALLOWED: int
 GLFW_FOCUS_EXCLUSIVE: int
 GLFW_FOCUS_ON_DEMAND: int
@@ -36,6 +52,7 @@ MOUSE_SELECTION_NORMAL: int
 MOUSE_SELECTION_WORD: int
 MOUSE_SELECTION_RECTANGLE: int
 MOUSE_SELECTION_LINE_FROM_POINT: int
+MOUSE_SELECTION_UPTO_SURROUNDING_WHITESPACE: int
 MOUSE_SELECTION_WORD_AND_LINE_FROM_POINT: int
 MOUSE_SELECTION_MOVE_END: int
 KITTY_VCS_REV: str
@@ -256,23 +273,25 @@ GLFW_RELEASE: int
 GLFW_REPEAT: int
 CURSOR_BEAM: int
 CURSOR_BLOCK: int
+CURSOR_HOLLOW: int
 NO_CURSOR_SHAPE: int
 CURSOR_UNDERLINE: int
 DECAWM: int
 BGIMAGE_PROGRAM: int
-CELL_BG_PROGRAM: int
-CELL_FG_PROGRAM: int
 CELL_PROGRAM: int
-CELL_SPECIAL_PROGRAM: int
+CELL_FG_PROGRAM: int
+CELL_BG_PROGRAM: int
+BLIT_PROGRAM: int
+ROUNDED_RECT_PROGRAM: int
 DECORATION: int
+BLINK: int
 DIM: int
 GRAPHICS_ALPHA_MASK_PROGRAM: int
-GRAPHICS_PREMULT_PROGRAM: int
 GRAPHICS_PROGRAM: int
+GRAPHICS_PREMULT_PROGRAM: int
 MARK: int
 MARK_MASK: int
 DECORATION_MASK: int
-NUM_UNDERLINE_STYLES: int
 FILE_TRANSFER_CODE: int
 ESC_CSI: int
 ESC_OSC: int
@@ -295,6 +314,7 @@ FC_WIDTH_NORMAL: int
 FC_SLANT_ROMAN: int
 FC_SLANT_ITALIC: int
 BORDERS_PROGRAM: int
+TRAIL_PROGRAM: int
 PRESS: int
 RELEASE: int
 DRAG: int
@@ -303,6 +323,10 @@ WINDOW_NORMAL: int = 0
 WINDOW_FULLSCREEN: int
 WINDOW_MAXIMIZED: int
 WINDOW_MINIMIZED: int
+WINDOW_HIDDEN: int
+TEXT_SIZE_CODE: int
+TOP_EDGE: int
+BOTTOM_EDGE: int
 # }}}
 
 
@@ -320,10 +344,6 @@ def encode_key_for_tty(
 
 
 def log_error_string(s: str) -> None:
-    pass
-
-
-def redirect_std_streams(devnull: str) -> None:
     pass
 
 
@@ -370,6 +390,8 @@ def cmdline_of_process(pid: int) -> List[str]:
 def cwd_of_process(pid: int) -> str:
     pass
 
+
+def abspath_of_process(pid: int) -> str: ...
 
 def default_color_table() -> Tuple[int, ...]:
     pass
@@ -444,7 +466,10 @@ class Face:
     def identify_for_debug(self) -> str: ...
     def postscript_name(self) -> str: ...
     def set_size(self, sz_in_pts: float, dpi_x: float, dpi_y: float) -> None: ...
-    def render_sample_text(self, text: str, width: int, height: int, fg_color: int = 0xffffff) -> Tuple[bytes, int, int]: ...
+    def render_sample_text(
+        self, text: str, width: int, height: int, fg_color: int = 0xffffff
+    ) -> tuple[bytes, int, int]: ...
+    def render_codepoint(self, cp: int, fg_color: int = 0xffffff) -> tuple[bytes, int, int]: ...
     def get_variation(self) -> Optional[Dict[str, float]]: ...
     def get_features(self) -> Dict[str, Optional[FeatureData]]: ...
     def applied_features(self) -> Dict[str, str]: ...
@@ -481,7 +506,10 @@ class CTFace:
     def identify_for_debug(self) -> str: ...
     def postscript_name(self) -> str: ...
     def set_size(self, sz_in_pts: float, dpi_x: float, dpi_y: float) -> None: ...
-    def render_sample_text(self, text: str, width: int, height: int, fg_color: int = 0xffffff) -> Tuple[bytes, int, int]: ...
+    def render_sample_text(
+        self, text: str, width: int, height: int, fg_color: int = 0xffffff,
+    ) -> tuple[bytes, int, int]: ...
+    def render_codepoint(self, cp: int, fg_color: int = 0xffffff) -> tuple[bytes, int, int]: ...
     def get_variation(self) -> Optional[Dict[str, float]]: ...
     def get_features(self) -> Dict[str, Optional[FeatureData]]: ...
     def applied_features(self) -> Dict[str, str]: ...
@@ -529,16 +557,11 @@ def set_os_window_chrome(os_window_id: int) -> bool:
     pass
 
 
-def add_borders_rect(
-    os_window_id: int, tab_id: int, left: int, top: int, right: int,
-    bottom: int, color: int
-) -> None:
-    pass
+def set_borders_rects(os_window_id: int, tab_id: int, rects: list[Border]) -> None: ...
 
 
 def init_borders_program() -> None:
     pass
-
 
 def os_window_has_background_image(os_window_id: int) -> bool:
     pass
@@ -589,7 +612,7 @@ def create_os_window(
     wm_class_name: str,
     wm_class_class: str,
     window_state: Optional[int] = WINDOW_NORMAL,
-    load_programs: Optional[Callable[[bool], None]] = None,
+    load_programs: Optional[Callable[[], None]] = None,
     x: Optional[int] = None,
     y: Optional[int] = None,
     disallow_override_title: bool = False,
@@ -628,12 +651,18 @@ def get_options() -> Options:
     pass
 
 
-def glfw_primary_monitor_size() -> Tuple[int, int]:
+def glfw_primary_monitor_size() -> tuple[int, int]:
+    pass
+
+def glfw_get_monitor_workarea() -> tuple[tuple[int, int, int, int], ...]:
     pass
 
 
 def set_default_window_icon(path: str) -> None:
     pass
+
+
+def set_os_window_icon(os_window_id: int, path: str | None | bytes = None) -> None: ...
 
 
 def set_custom_cursor(
@@ -660,7 +689,7 @@ def glfw_terminate() -> None:
 def glfw_init(
     path: str, edge_spacing_func: Callable[[EdgeLiteral], float], debug_keyboard: bool = False, debug_rendering: bool = False,
     wayland_enable_ime: bool = True
-) -> bool:
+) -> tuple[bool, bool]:
     pass
 
 
@@ -689,7 +718,10 @@ def set_background_image(
     os_window_ids: Tuple[int, ...],
     configured: bool = True,
     layout_name: Optional[str] = None,
-    png_data: bytes = b''
+    png_data: bytes = b'',
+    linear: bool | None = None,
+    tint: float | None = None,
+    tint_gaps: float | None = None,
 ) -> None:
     pass
 
@@ -711,6 +743,9 @@ def patch_global_colors(spec: Dict[str, Optional[int]], configured: bool) -> Non
 
 
 class Color:
+    @classmethod
+    def parse_color(cls, spec: str) -> Color | None: ...
+
     @property
     def rgb(self) -> int:
         pass
@@ -737,6 +772,10 @@ class Color:
 
     @property
     def luminance(self) -> float:
+        pass
+
+    @property
+    def is_dark(self) -> bool:
         pass
 
     @property
@@ -808,15 +847,10 @@ class ColorProfile:
     @visual_bell_color.setter
     def visual_bell_color(self, val: Union[None|int|Color]) -> None: ...
 
-    @property
-    def second_transparent_bg(self) -> Optional[Color]: ...
-    @second_transparent_bg.setter
-    def second_transparent_bg(self, val: Union[None|int|Color]) -> None: ...
-
     def __init__(self, opts: Optional[Options] = None): ...
 
-    def as_dict(self) -> Dict[str, Optional[int]]:
-        pass
+    def as_dict(self) -> Dict[str, int | None | tuple[tuple[Color, float], ...]]: ...
+    def basic_colors(self) -> Dict[str, int | None | tuple[tuple[Color, float], ...]]: ...
 
     def as_color(self, val: int) -> Optional[Color]:
         pass
@@ -832,9 +866,13 @@ class ColorProfile:
 
     def reload_from_opts(self, opts: Optional[Options] = None) -> None: ...
 
+    def get_transparent_background_color(self, index: int) -> Color | None: ...
+    def set_transparent_background_color(self, index: int, color: Color | None = None, opacity: float | None = None) -> None: ...
+
 
 def patch_color_profiles(
-    spec: Dict[str, Optional[int]], profiles: Tuple[ColorProfile, ...], change_configured: bool
+        spec: Dict[str, Optional[int]], transparent_background_colors: tuple[tuple[Color, float], ...],
+        profiles: Tuple[ColorProfile, ...], change_configured: bool
 ) -> None:
     pass
 
@@ -869,6 +907,10 @@ def cocoa_set_app_icon(icon_path: str, app_path: Optional[str] = None) -> None:
 
 
 def cocoa_set_dock_icon(icon_path: str) -> None:
+    pass
+
+
+def cocoa_show_progress_bar_on_dock_icon(progress: float = -100) -> None:
     pass
 
 
@@ -909,6 +951,10 @@ def focus_os_window(os_window_id: int, also_raise: bool = True, activation_token
 
 
 def toggle_secure_input() -> None:
+    pass
+
+
+def macos_cycle_through_os_windows(backwards: bool) -> None:
     pass
 
 
@@ -984,11 +1030,11 @@ def set_active_window(os_window_id: int, tab_id: int, window_id: int) -> None:
     pass
 
 
-def ring_bell() -> None:
+def ring_bell(os_window_id: int = 0) -> None:
     pass
 
 
-def concat_cells(cell_width: int, cell_height: int, is_32_bit: bool, cells: Tuple[bytes, ...]) -> bytes:
+def concat_cells(cell_width: int, cell_height: int, is_32_bit: bool, cells: Tuple[bytes, ...], bgcolor: int = 0) -> bytes:
     pass
 
 
@@ -1025,8 +1071,11 @@ def next_window_id() -> int:
     pass
 
 
-def mark_tab_bar_dirty(os_window_id: int) -> None:
+def mark_tab_bar_dirty(os_window_id: int, should_be_shown: bool) -> None:
     pass
+
+
+def is_tab_bar_visible(os_window_id: int) -> bool: ...
 
 
 def detach_window(os_window_id: int, tab_id: int, window_id: int) -> None:
@@ -1097,8 +1146,7 @@ def parse_input_from_terminal(
 
 class Line:
 
-    def sprite_at(self, cell: int) -> Tuple[int, int, int]:
-        pass
+    def sprite_at(self, cell: int) -> int: ...
 
 
 def test_shape(line: Line,
@@ -1122,12 +1170,7 @@ def set_send_sprite_to_gpu(
 
 
 def set_font_data(
-    box_drawing_func: Callable[[int, int, int, float],
-                               Tuple[int, Union[bytearray, bytes, Array[c_ubyte]]]],
-    prerender_func: Callable[
-        [int, int, int, int, int, int, int, float, float, float, float],
-        Tuple[Tuple[int, ...], Tuple[Array[c_ubyte], ...]]],
-    descriptor_for_idx: Callable[[int], Tuple[FontObject, bool, bool]],
+    descriptor_for_idx: Callable[[int], Tuple[Union[FontObject|str], bool, bool]],
     bold: int, italic: int, bold_italic: int, num_symbol_fonts: int,
     symbol_maps: Tuple[Tuple[int, int, int], ...], font_sz_in_pts: float,
     narrow_symbols: Tuple[Tuple[int, int, int], ...],
@@ -1139,9 +1182,7 @@ def get_fallback_font(text: str, bold: bool, italic: bool) -> Any:
     pass
 
 
-def create_test_font_group(sz: float, dpix: float,
-                           dpiy: float) -> Tuple[int, int]:
-    pass
+def create_test_font_group(sz: float, dpix: float, dpiy: float) -> tuple[int, int, int]: ...
 
 
 class HistoryBuf:
@@ -1161,6 +1202,8 @@ class LineBuf:
     def line(self, num: int) -> Line:
         pass
 
+    def as_ansi(self, callback: Callable[[str], None]) -> None: ...
+
 
 class Cursor:
     x: int
@@ -1170,6 +1213,7 @@ class Cursor:
     bold: bool
     italic: bool
     blink: bool
+    text_blink: bool
     shape: int
 
 
@@ -1183,6 +1227,8 @@ class Screen:
     linebuf: LineBuf
     in_bracketed_paste_mode: bool
     in_band_resize_notification: bool
+    paste_events: bool
+    color_preference_notification: bool
     cursor_visible: bool
     scrolled_by: int
     cursor: Cursor
@@ -1201,6 +1247,12 @@ class Screen:
             test_child: Any = None
     ):
         pass
+
+    def test_create_write_buffer(self) -> memoryview: ...
+    def test_commit_write_buffer(self, inp: memoryview, output: memoryview) -> int: ...
+    def test_parse_written_data(self, dump_callback: None = None) -> None: ...
+    def hyperlink_for_id(self, hyperlink_id: int) -> str: ...
+    def erase_last_command(self, include_prompt: bool = True) -> bool: ...
 
     def cursor_at_prompt(self) -> bool:
         pass
@@ -1223,7 +1275,7 @@ class Screen:
     def draw(self, text: str) -> None:
         pass
 
-    def dump_lines_with_attrs(self, acc: Callable[[str], None]) -> None:
+    def dump_lines_with_attrs(self, acc: Callable[[str], None], which_screen: int = -1) -> None:
         pass
 
     def apply_sgr(self, text: str) -> None:
@@ -1268,10 +1320,16 @@ class Screen:
     def scroll(self, amt: int, upwards: bool) -> bool:
         pass
 
+    def fractional_scroll(self, amt: float) -> bool:
+        pass
+
     def scroll_to_next_mark(self, mark: int = 0, backwards: bool = True) -> bool:
         pass
 
-    def scroll_to_prompt(self, num_of_prompts: int = -1) -> bool:
+    def scroll_to_prompt(self, num_of_prompts: int = -1, scroll_offset: int = 0) -> bool:
+        pass
+
+    def set_last_visited_prompt(self, visual_y: int = 0) -> bool:
         pass
 
     def reverse_scroll(self, amt: int, fill_from_scrollback: bool = False) -> bool:
@@ -1346,7 +1404,8 @@ def set_tab_bar_render_data(
 
 def set_window_render_data(
     os_window_id: int, tab_id: int, window_id: int, screen: Screen,
-    left: int, top: int, right: int, bottom: int
+    left: int, top: int, right: int, bottom: int,
+    spaces_left: int, spaces_top: int, spaces_right: int, spaces_bottom: int
 ) -> None:
     pass
 
@@ -1365,6 +1424,7 @@ class ChildMonitor:
         dump_callback: Optional[Callable[[int, str, Any], None]],
         talk_fd: int = -1,
         listen_fd: int = -1,
+        verify_peer_uid: bool = False,
     ):
         pass
 
@@ -1380,7 +1440,7 @@ class ChildMonitor:
     def resize_pty(self, window_id: int, rows: int, cols: int, x_pixels: int, y_pixels: int) -> None:
         pass
 
-    def needs_write(self, child_id: int, data: bytes) -> bool:
+    def needs_write(self, child_id: int, data: bytes | memoryview) -> bool:
         pass
 
     def set_iutf8_winid(self, win_id: int, on: bool) -> bool:
@@ -1459,6 +1519,7 @@ def spawn(
     handled_signals: Tuple[int, ...],
     kitten_exe: str,
     forward_stdio: bool,
+    pass_fds: tuple[int, ...],
 ) -> int:
     pass
 
@@ -1493,6 +1554,9 @@ def set_window_logo(os_window_id: int, tab_id: int, window_id: int, path: str, p
     pass
 
 
+def get_window_logo_settings_if_not_default(os_window_id: int, tab_id: int, window_id: int) -> None | tuple[
+        str, float, tuple[float, float, float, float]]: ...
+
 def apply_options_update() -> None:
     pass
 
@@ -1512,6 +1576,7 @@ class OSWindowSize(TypedDict):
     ydpi: float
     cell_width: int
     cell_height: int
+    is_layer_shell: bool
 
 
 def mark_os_window_dirty(os_window_id: int) -> None:
@@ -1531,6 +1596,7 @@ def set_os_window_pos(os_window_id: int, x: int, y: int) -> None:
 def get_all_processes() -> Tuple[int, ...]:
     pass
 
+def glfw_get_monitor_names() -> tuple[tuple[str, str], ...]: ...
 
 def num_users() -> int:
     pass
@@ -1544,7 +1610,7 @@ def get_click_interval() -> float:
     pass
 
 
-def send_data_to_peer(peer_id: int, data: Union[str, bytes]) -> None:
+def send_data_to_peer(peer_id: int, data: Union[str, bytes], is_async_response: bool = False) -> None:
     pass
 
 
@@ -1572,10 +1638,6 @@ def sigqueue(pid: int, signal: int, value: int) -> None:
     pass
 
 
-def random_unix_socket() -> int:
-    pass
-
-
 def read_signals(fd: int, callback: Callable[[SignalInfo], None]) -> None:
     pass
 
@@ -1585,10 +1647,6 @@ def install_signal_handlers(*signals: int) -> Tuple[int, int]:
 
 
 def remove_signal_handlers() -> None:
-    pass
-
-
-def getpeereid(fd: int) -> Tuple[int, int]:
     pass
 
 
@@ -1648,6 +1706,8 @@ class AES256GCMDecrypt:
 class Shlex:
     def __init__(self, src: str, allow_ansi_quoted_strings: bool = False): ...
     def next_word(self) -> Tuple[int, str]: ...
+    def __next__(self) -> str: ...
+    def __iter__(self) -> Iterator[str]: ...
 
 
 class SingleKey:
@@ -1673,22 +1733,28 @@ class SingleKey:
 
 def set_use_os_log(yes: bool) -> None: ...
 def get_docs_ref_map() -> bytes: ...
-def clearenv() -> None: ...
 def set_clipboard_data_types(ct: int, mime_types: Tuple[str, ...]) -> None: ...
 def get_clipboard_mime(ct: int, mime: Optional[str], callback: Callable[[bytes], None]) -> None: ...
 def run_with_activation_token(func: Callable[[str], None]) -> bool: ...
-def make_x11_window_a_dock_window(x11_window_id: int, strut: Tuple[int, int, int, int, int, int, int, int, int, int, int, int]) -> None: ...
-def unicode_database_version() -> Tuple[int, int, int]: ...
+def toggle_os_window_visibility(os_window_id: int, visible: bool | Literal[-1] = -1, move_to_active_screen: bool = False) -> bool: ...
+def parse_cli_from_spec(
+    args: list[str], names_map: dict[str, OptionDefinition], defval_map: dict[str, Any]
+) -> tuple[dict[str, tuple[Any, bool]], list[str]]: ...
+def layer_shell_config_for_os_window(os_window_id: int) -> dict[str, Any] | None: ...
+def set_layer_shell_config(os_window_id: int, cfg: LayerShellConfig) -> bool: ...
 def wrapped_kitten_names() -> List[str]: ...
 def expand_ansi_c_escapes(test: str) -> str: ...
 def update_tab_bar_edge_colors(os_window_id: int) -> bool: ...
 def mask_kitty_signals_process_wide() -> None: ...
 def is_modifier_key(key: int) -> bool: ...
-def base64_encode(src: Union[bytes,str], add_padding: bool = False) -> bytes: ...
-def base64_decode(src: Union[bytes,str]) -> bytes: ...
+def base64_encode(src: Union[str, ReadableBuffer], add_padding: bool = False) -> bytes: ...
+def base64_encode_into(src: Union[str, ReadableBuffer], output: WriteableBuffer, add_padding: bool = False) -> int: ...
+def base64_decode(src: Union[str, ReadableBuffer]) -> bytes: ...
+def base64_decode_into(src: Union[str, ReadableBuffer], output: WriteableBuffer) -> int: ...
 def cocoa_recreate_global_menu() -> None: ...
 def cocoa_clear_global_shortcuts() -> None: ...
 def update_pointer_shape(os_window_id: int) -> None: ...
+def is_layer_shell_supported() -> bool: ...
 def os_window_focus_counters() -> Dict[int, int]: ...
 def find_in_memoryview(buf: Union[bytes, memoryview, bytearray], chr: int) -> int: ...
 @overload
@@ -1699,10 +1765,24 @@ def terminfo_data() -> bytes:...
 def wayland_compositor_data() -> Tuple[int, Optional[str]]:...
 def monotonic() -> float: ...
 def timed_debug_print(x: str) -> None: ...
-def opengl_version_string() -> str: ...
+def gpu_driver_version_string() -> str: ...
 def systemd_move_pid_into_new_scope(pid: int, scope_name: str, description: str) -> str: ...
 def play_desktop_sound_async(name: str, event_id: str = 'test sound', is_path: bool = False, theme_name: str = '') -> str: ...
 def cocoa_play_system_sound_by_id_async(sound_id: int) -> None: ...
+def glfw_get_system_color_theme(query_if_unintialized: bool = True) -> Literal['light', 'dark', 'no_preference']: ...
+def set_redirect_keys_to_overlay(os_window_id: int, tab_id: int, window_id: int, overlay_window_id: int) -> None: ...
+def buffer_keys_in_window(os_window_id: int, tab_id: int, window_id: int, enabled: bool = True) -> bool: ...
+def sprite_idx_to_pos(idx: int, xnum: int, ynum: int) -> tuple[int, int, int]: ...
+def render_box_char(ch: int, width: int, height: int, scale: float = 1.0, dpi_x: float = 96.0, dpi_y: float = 96.0) -> bytes: ...
+def run_at_exit_cleanup_functions() -> None: ...
+def all_color_names() -> tuple[tuple[str, Color], ...]: ...
+def grab_keyboard(grab: bool | None) -> bool: ...
+DecorationTypes = Literal[
+    'curl', 'dashed', 'dotted', 'double', 'straight', 'strikethrough', 'beam_cursor', 'underline_cursor', 'hollow_cursor', 'missing']
+def render_decoration(
+    which: DecorationTypes, cell_width: int, cell_height: int, underline_position: int, underline_thickness: int, dpi: float = 96.0
+) -> bytes: ...
+def os_window_is_invisible(os_window_id: int) -> bool: ...
 
 class MousePosition(TypedDict):
     cell_x: int
@@ -1719,7 +1799,8 @@ class StreamingBase64Decoder:
     def decode(self, data: ReadableBuffer) -> bytes: ...
     # decode the specified data, return number of bytes written dest should be as large as src (technically 3/4 src + 2)
     def decode_into(self, dest: WriteableBuffer, src: ReadableBuffer) -> int: ...
-
+    # whether the data stream decoded so far is complete or not
+    def needs_more_data(self) -> bool: ...
 
 
 class StreamingBase64Encodeer:
@@ -1732,17 +1813,7 @@ class StreamingBase64Encodeer:
     def encode_into(self, dest: WriteableBuffer, src: ReadableBuffer) -> int: ...
 
 
-
-class DiskCache:
-    small_hole_threshold: int
-    defrag_factor: int
-    @property
-    def total_size(self) -> int: ...
-
-    def add(self, key: bytes, data: bytes) -> None: ...
-    def remove(self, key: bytes) -> bool: ...
-    def remove_from_ram(self, predicate: Callable[[bytes], bool]) -> int: ...
-    def num_cached_in_ram(self) -> int: ...
-    def get(self, key: bytes, store_in_ram: bool = False) -> bytes: ...  # raises KeyError if not found
-    def size_on_disk(self) -> int: ...
-    def clear(self) -> None: ...
+def start_drag_with_data(
+    os_window_id: int, data_map: dict[str, bytes], thumbnail: bytes = b'', width: int = 0, height: int = 0,
+    operations: int = GLFW_DRAG_OPERATION_MOVE
+) -> None: ...

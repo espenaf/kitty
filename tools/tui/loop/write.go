@@ -10,8 +10,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"kitty/tools/tty"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/go-parallel"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 type write_msg struct {
@@ -168,6 +169,11 @@ func write_to_tty(
 	pipe_r *os.File, term *tty.Term,
 	job_channel <-chan write_msg, err_channel chan<- error, write_done_channel chan<- IdType,
 ) {
+	defer func() {
+		if r := recover(); r != nil {
+			err_channel <- parallel.Format_stacktrace_on_panic(r, 1)
+		}
+	}()
 	keep_going := true
 	defer func() {
 		pipe_r.Close()

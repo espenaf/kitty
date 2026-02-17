@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"kitty/tools/utils"
-	"kitty/tools/utils/shlex"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/shlex"
 )
 
 var _ = fmt.Print
@@ -297,7 +297,7 @@ func NewFontSpec(spec string, features map[string]FeatureData) (ans FontSpec, er
 	for _, item := range parts {
 		k, v, found := strings.Cut(item, "=")
 		if !found {
-			return ans, fmt.Errorf(fmt.Sprintf("The font specification %s is invalid as %s does not contain an =", spec, item))
+			return ans, fmt.Errorf("The font specification %s is invalid as %s does not contain an =", spec, item)
 		}
 		switch k {
 		case "family":

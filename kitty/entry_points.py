@@ -72,46 +72,9 @@ def launch(args: list[str]) -> None:
     runpy.run_path(exe, run_name='__main__')
 
 
-def edit(args: list[str]) -> None:
-    import shutil
-
-    from .constants import is_macos
-    if is_macos:
-        # On macOS vim fails to handle SIGWINCH if it occurs early, so add a small delay.
-        import time
-        time.sleep(0.05)
-    exe = args[1]
-    if not os.path.isabs(exe):
-        exe = shutil.which(exe) or ''
-    if not exe or not os.access(exe, os.X_OK):
-        print('Cannot find an editor on your system. Set the \x1b[33meditor\x1b[39m value in kitty.conf'
-              ' to the absolute path of your editor of choice.', file=sys.stderr)
-        from kitty.utils import hold_till_enter
-        hold_till_enter()
-        raise SystemExit(1)
-    os.execv(exe, args[1:])
-
-
 def shebang(args: list[str]) -> None:
     from kitty.constants import kitten_exe
-    script_path = args[1]
-    cmd = args[2:]
-    if cmd == ['__ext__']:
-        cmd = [os.path.splitext(script_path)[1][1:].lower()]
-    try:
-        f = open(script_path)
-    except FileNotFoundError:
-        raise SystemExit(f'The file {script_path} does not exist')
-    with f:
-        if f.read(2) == '#!':
-            line = f.readline().strip()
-            _plat = sys.platform.lower()
-            is_macos: bool = 'darwin' in _plat
-            if is_macos:
-                cmd = line.split(' ')
-            else:
-                cmd = line.split(' ', maxsplit=1)
-    os.execvp(kitten_exe(), ['kitten', '__confirm_and_run_shebang__'] + cmd + [script_path])
+    os.execvp(kitten_exe(), ['kitten', '__shebang__', 'confirm-if-needed'] + args[1:])
 
 
 def run_kitten(args: list[str]) -> None:
@@ -124,14 +87,6 @@ def run_kitten(args: list[str]) -> None:
     sys.argv = args[1:]
     from kittens.runner import run_kitten as rk
     rk(kitten)
-
-
-def edit_config_file(args: list[str]) -> None:
-    from kitty.cli import create_default_opts
-    from kitty.fast_data_types import set_options
-    from kitty.utils import edit_config_file as f
-    set_options(create_default_opts())
-    f()
 
 
 def namespaced(args: list[str]) -> None:
@@ -161,9 +116,7 @@ namespaced_entry_points['runpy'] = runpy
 namespaced_entry_points['launch'] = launch
 namespaced_entry_points['open'] = open_urls
 namespaced_entry_points['kitten'] = run_kitten
-namespaced_entry_points['edit-config'] = edit_config_file
 namespaced_entry_points['shebang'] = shebang
-namespaced_entry_points['edit'] = edit
 
 
 def setup_openssl_environment(ext_dir: str) -> None:
@@ -180,10 +133,8 @@ def setup_openssl_environment(ext_dir: str) -> None:
 
 
 def main() -> None:
-    if getattr(sys, 'frozen', False):
-        ext_dir: str = getattr(sys, 'kitty_run_data').get('extensions_dir')
-        if ext_dir:
-            setup_openssl_environment(ext_dir)
+    if getattr(sys, 'frozen', False) and (ext_dir := getattr(sys, 'kitty_run_data', {}).get('extensions_dir')):
+        setup_openssl_environment(ext_dir)
     first_arg = '' if len(sys.argv) < 2 else sys.argv[1]
     func = entry_points.get(first_arg)
     if func is None:

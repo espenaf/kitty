@@ -23,6 +23,7 @@
 #include "png-reader.h"
 PyTypeObject GraphicsManager_Type;
 
+#define MAX_IMAGE_DIMENSION 10000u
 #define DEFAULT_STORAGE_LIMIT 320u * (1024u * 1024u)
 #define REPORT_ERROR(...) { log_error(__VA_ARGS__); }
 #define RAII_CoalescedFrameData(name, initializer) __attribute__((cleanup(cfd_free))) CoalescedFrameData name = initializer
@@ -212,10 +213,15 @@ ref_by_client_id(const Image *img, uint32_t id) {
     return NULL;
 }
 
+static void
+set_layers_dirty(GraphicsManager *self) {
+    self->layers_dirty = true;
+}
+
 static image_map_itr
 remove_image_itr(GraphicsManager *self, image_map_itr i) {
     free_image(self, i.data->val);
-    self->layers_dirty = true;
+    set_layers_dirty(self);
     return vt_erase_itr(&self->images_by_internal_id, i);
 }
 
@@ -243,6 +249,7 @@ grman_pause_rendering(GraphicsManager *self, GraphicsManager *dest) {
     dest->window_id = self->window_id;
     dest->layers_dirty = true;
     dest->last_scrolled_by = 0;
+    dest->last_scroll_offset_lines = 0.0f;
 
     iter_images(self) {
         Image *clone = calloc(1, sizeof(Image)), *img = i.data->val;
@@ -375,7 +382,7 @@ png_error_handler(png_read_data *d UNUSED, const char *code, const char *msg) {
 static bool
 inflate_png(LoadData *load_data, uint8_t *buf, size_t bufsz) {
     png_read_data d = {.err_handler=png_error_handler};
-    inflate_png_inner(&d, buf, bufsz);
+    inflate_png_inner(&d, buf, bufsz, MAX_IMAGE_DIMENSION);
     if (d.ok) {
         free_load_data(load_data);
         load_data->buf = d.decompressed;
@@ -410,7 +417,7 @@ print_png_read_error(png_read_data *d, const char *code, const char* msg) {
 bool
 png_from_data(void *png_data, size_t png_data_sz, const char *path_for_error_messages, uint8_t** data, unsigned int* width, unsigned int* height, size_t* sz) {
     png_read_data d = {.err_handler=print_png_read_error};
-    inflate_png_inner(&d, png_data, png_data_sz);
+    inflate_png_inner(&d, png_data, png_data_sz, MAX_IMAGE_DIMENSION);
     if (!d.ok) {
         log_error("Failed to decode PNG image at: %s with error: %s", path_for_error_messages, d.error.used > 0 ? d.error.buf : "");
         free(d.decompressed); free(d.row_pointers); free(d.error.buf);
@@ -688,7 +695,6 @@ initialize_load_data(GraphicsManager *self, const GraphicsCommand *g, Image *img
     tt = g->transmission_type ? g->transmission_type : 'd'; \
     fmt = g->format ? g->format : RGBA; \
 }
-#define MAX_IMAGE_DIMENSION 10000u
 
 static void
 upload_to_gpu(GraphicsManager *self, Image *img, const bool is_opaque, const bool is_4byte_aligned, const uint8_t *data) {
@@ -697,7 +703,9 @@ upload_to_gpu(GraphicsManager *self, Image *img, const bool is_opaque, const boo
         if (!make_window_context_current(self->window_id)) return;
         self->context_made_current_for_this_command = true;
     }
-    if (img->texture) send_image_to_gpu(&img->texture->id, data, img->width, img->height, is_opaque, is_4byte_aligned, true, REPEAT_CLAMP);
+    if (img->texture) {
+        send_image_to_gpu(&img->texture->id, data, img->width, img->height, is_opaque, is_4byte_aligned, true, REPEAT_CLAMP);
+    }
 }
 
 static Image*
@@ -709,7 +717,7 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
     if (tt == 'd' && self->currently_loading.loading_for.image_id) init_img = false;
     if (init_img) {
         self->currently_loading.loading_for = (const ImageAndFrame){0};
-        if (g->data_width > MAX_IMAGE_DIMENSION || g->data_height > MAX_IMAGE_DIMENSION) ABRT("EINVAL", "Image too large");
+        if (g->data_width > MAX_IMAGE_DIMENSION || g->data_height > MAX_IMAGE_DIMENSION) ABRT("EINVAL", "Image too large, width or height greater than %u", MAX_IMAGE_DIMENSION);
         remove_images(self, add_trim_predicate, 0);
         img = find_or_create_image(self, iid, &existing);
         if (existing) {
@@ -719,8 +727,12 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
             img->is_drawn = false;
             img->current_frame_shown_at = 0;
             img->extra_framecnt = 0;
+            img->current_frame_index = 0;
+            img->animation_duration = 0;
+            img->animation_state = ANIMATION_STOPPED;
+            img->max_loops = 0; img->current_loop = 0;
             *is_dirty = true;
-            self->layers_dirty = true;
+            set_layers_dirty(self);
         } else {
             img->client_id = iid;
             img->client_number = g->image_number;
@@ -1010,7 +1022,7 @@ void grman_put_cell_image(GraphicsManager *self, uint32_t screen_row,
     ImageRef *real_ref = create_ref(img, &ref);
 
     img->atime = monotonic();
-    self->layers_dirty = true;
+    set_layers_dirty(self);
 
     update_src_rect(real_ref, img);
     update_dest_rect(real_ref, ref.num_cols, ref.num_rows, cell);
@@ -1103,7 +1115,7 @@ handle_put_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c, b
     if (ref == NULL) ref = create_ref(img, NULL);
 
     *is_dirty = true;
-    self->layers_dirty = true;
+    set_layers_dirty(self);
     img->atime = monotonic();
     ref->src_x = g->x_offset; ref->src_y = g->y_offset; ref->src_width = g->width ? g->width : img->width; ref->src_height = g->height ? g->height : img->height;
     ref->src_width = MIN(ref->src_width, img->width - ((float)img->width > ref->src_x ? ref->src_x : (float)img->width));
@@ -1138,17 +1150,6 @@ handle_put_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c, b
         }
     }
     return img->client_id;
-}
-
-void
-scale_rendered_graphic(ImageRenderData *rd, float xstart, float ystart, float x_scale, float y_scale) {
-    // Scale the graphic so that it appears at the same position and size during a live resize
-    // this means scale factors are applied to both the position and size of the graphic.
-    float width = rd->dest_rect.right - rd->dest_rect.left, height = rd->dest_rect.bottom - rd->dest_rect.top;
-    rd->dest_rect.left = xstart + (rd->dest_rect.left - xstart) * x_scale;
-    rd->dest_rect.right = rd->dest_rect.left + width * x_scale;
-    rd->dest_rect.top = ystart + (rd->dest_rect.top - ystart) * y_scale;
-    rd->dest_rect.bottom = rd->dest_rect.top + height * y_scale;
 }
 
 void
@@ -1202,9 +1203,10 @@ resolve_parent_offset(const GraphicsManager *self, const ImageRef *ref, int32_t 
 
 
 bool
-grman_update_layers(GraphicsManager *self, unsigned int scrolled_by, float screen_left, float screen_top, float dx, float dy, unsigned int num_cols, unsigned int num_rows, CellPixelSize cell) {
-    if (self->last_scrolled_by != scrolled_by) self->layers_dirty = true;
+grman_update_layers(GraphicsManager *self, unsigned int scrolled_by, float scroll_offset_lines, float screen_left, float screen_top, float dx, float dy, unsigned int num_cols, unsigned int num_rows, CellPixelSize cell) {
+    if (self->last_scrolled_by != scrolled_by || self->last_scroll_offset_lines != scroll_offset_lines) set_layers_dirty(self);
     self->last_scrolled_by = scrolled_by;
+    self->last_scroll_offset_lines = scroll_offset_lines;
     if (!self->layers_dirty) return false;
     self->layers_dirty = false;
     size_t i;
@@ -1216,7 +1218,7 @@ grman_update_layers(GraphicsManager *self, unsigned int scrolled_by, float scree
     float screen_bottom = screen_top - screen_height;
     float screen_width_px = num_cols * cell.width;
     float screen_height_px = num_rows * cell.height;
-    float y0 = screen_top - dy * scrolled_by;
+    float y0 = screen_top - dy * ((float)scrolled_by + scroll_offset_lines);
 
     // Iterate over all visible refs and create render data
     self->render_data.count = 0;
@@ -1562,7 +1564,7 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
         INIT_CHUNKED_LOAD;
     } else {
         self->currently_loading.loading_for = (const ImageAndFrame){0};
-        if (g->data_width > MAX_IMAGE_DIMENSION || g->data_height > MAX_IMAGE_DIMENSION) ABRT("EINVAL", "Image too large");
+        if (g->data_width > MAX_IMAGE_DIMENSION || g->data_height > MAX_IMAGE_DIMENSION) ABRT("EINVAL", "Image too large, width or height greater than %u", MAX_IMAGE_DIMENSION);
         if (!initialize_load_data(self, g, img, tt, fmt, frame_number - 1)) return NULL;
     }
     LoadData *load_data = &self->currently_loading;
@@ -1574,7 +1576,7 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
 
     const unsigned long bytes_per_pixel = load_data->is_opaque ? 3 : 4;
     if (load_data->data_sz < bytes_per_pixel * load_data->width * load_data->height)
-        ABRT("ENODATA", "Insufficient image data %zu < %zu", load_data->data_sz, bytes_per_pixel * g->data_width, g->data_height);
+        ABRT("ENODATA", "Insufficient image data %zu < %zu", load_data->data_sz, bytes_per_pixel * g->data_width * g->data_height);
     if (load_data->width > img->width)
         ABRT("EINVAL", "Frame width %u larger than image width: %u", load_data->width, img->width);
     if (load_data->height > img->height)
@@ -1590,7 +1592,7 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
         .x = g->x_offset, .y = g->y_offset,
         .is_4byte_aligned = load_data->is_4byte_aligned,
         .is_opaque = load_data->is_opaque,
-        .alpha_blend = g->blend_mode != 1 && !load_data->is_opaque,
+        .alpha_blend = g->compose_mode != 1 && !load_data->is_opaque,
         .gap = g->gap > 0 ? g->gap : (g->gap < 0) ? 0 : DEFAULT_GAP,
         .bgcolor = g->bgcolor,
     };
@@ -1894,17 +1896,17 @@ remove_ref(Image *img, ImageRef *ref) {
 }
 
 static void
-filter_refs(GraphicsManager *self, const void* data, bool free_images, bool (*filter_func)(const ImageRef*, Image*, const void*, CellPixelSize), CellPixelSize cell, bool only_first_image) {
-    bool matched = false;
+filter_refs(GraphicsManager *self, const void* data, bool free_images, bool (*filter_func)(const ImageRef*, Image*, const void*, CellPixelSize), CellPixelSize cell, bool only_first_image, bool free_only_matched) {
     for (image_map_itr ii = vt_first(&self->images_by_internal_id); !vt_is_end(ii); ) { Image *img = ii.data->val;
+        bool matched = false;
         for (ref_map_itr ri = vt_first(&img->refs_by_internal_id); !vt_is_end(ri); ) { ImageRef *ref = ri.data->val;
             if (filter_func(ref, img, data, cell)) {
                 ri = remove_ref_itr(img, ri);
-                self->layers_dirty = true;
+                set_layers_dirty(self);
                 matched = true;
             } else ri = vt_next(ri);
         }
-        if (!vt_size(&img->refs_by_internal_id) && (free_images || img->client_id == 0)) ii = remove_image_itr(self, ii);
+        if ((!free_only_matched || matched) && !vt_size(&img->refs_by_internal_id) && (free_images || img->client_id == 0)) ii = remove_image_itr(self, ii);
         else ii = vt_next(ii);
         if (only_first_image && matched) break;
     }
@@ -1980,7 +1982,7 @@ scroll_filter_margins_func(ImageRef* ref, Image* img, const void* data, CellPixe
 void
 grman_scroll_images(GraphicsManager *self, const ScrollData *data, CellPixelSize cell) {
     if (vt_size(&self->images_by_internal_id)) {
-        self->layers_dirty = true;
+        set_layers_dirty(self);
         modify_refs(self, data, data->has_margins ? scroll_filter_margins_func : scroll_filter_func, cell);
     }
 }
@@ -2004,13 +2006,13 @@ void
 grman_remove_cell_images(GraphicsManager *self, int32_t top, int32_t bottom) {
     CellPixelSize dummy = {0};
     int32_t data[] = {top, bottom};
-    filter_refs(self, data, false, cell_image_row_filter_func, dummy, false);
+    filter_refs(self, data, false, cell_image_row_filter_func, dummy, false, true);
 }
 
 void
 grman_remove_all_cell_images(GraphicsManager *self) {
     CellPixelSize dummy = {0};
-    filter_refs(self, NULL, false, cell_image_filter_func, dummy, false);
+    filter_refs(self, NULL, false, cell_image_filter_func, dummy, false, true);
 }
 
 
@@ -2034,7 +2036,7 @@ clear_all_filter_func(const ImageRef *ref UNUSED, Image UNUSED *img, const void 
 
 void
 grman_clear(GraphicsManager *self, bool all, CellPixelSize cell) {
-    filter_refs(self, NULL, true, all ? clear_all_filter_func : clear_filter_func, cell, false);
+    filter_refs(self, NULL, true, all ? clear_all_filter_func : clear_filter_func, cell, false, false);
 }
 
 static bool
@@ -2048,14 +2050,6 @@ static bool
 id_range_filter_func(const ImageRef *ref UNUSED, Image *img, const void *data, CellPixelSize cell UNUSED) {
     const GraphicsCommand *g = data;
     return img->client_id && g->x_offset <= img->client_id && img->client_id <= g->y_offset;
-}
-
-
-static bool
-number_filter_func(const ImageRef *ref, Image *img, const void *data, CellPixelSize cell UNUSED) {
-    const GraphicsCommand *g = data;
-    if (g->image_number && img->client_number == g->image_number) return !g->placement_id || ref->client_id == g->placement_id;
-    return false;
 }
 
 
@@ -2096,10 +2090,27 @@ point3d_filter_func(const ImageRef *ref, Image *img, const void *data, CellPixel
 
 static void
 handle_delete_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c, bool *is_dirty, CellPixelSize cell) {
+    if (self->currently_loading.loading_for.image_id) free_load_data(&self->currently_loading);
     GraphicsCommand d;
-    bool only_first_image = false;
+    if (!g->placement_id) {
+        // special case freeing of images with no refs by id or number as
+        // filter_refs doesnt handle this
+        Image *img = NULL;
+        switch(g->delete_action) {
+            case 'I': img = img_by_client_id(self, g->id); break;
+            case 'N': img = img_by_client_number(self, g->image_number); break;
+            case 'R': {
+                for (image_map_itr ii = vt_first(&self->images_by_internal_id); !vt_is_end(ii); ) {
+                    img = ii.data->val;
+                    if (id_range_filter_func(NULL, img, g, cell) && !vt_size(&img->refs_by_internal_id)) ii = remove_image_itr(self, ii);
+                    else ii = vt_next(ii);
+                }
+            } img = NULL; break;
+        }
+        if (img && !vt_size(&img->refs_by_internal_id)) { remove_image(self, img); goto end; }
+    }
     switch (g->delete_action) {
-#define I(u, data, func) filter_refs(self, data, g->delete_action == u, func, cell, only_first_image); *is_dirty = true; break
+#define I(u, data, func) filter_refs(self, data, g->delete_action == u, func, cell, false, true); *is_dirty = true; break
 #define D(l, u, data, func) case l: case u: I(u, data, func)
 #define G(l, u, func) D(l, u, g, func)
         case 0:
@@ -2116,16 +2127,27 @@ handle_delete_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c
             d.x_offset = c->x + 1; d.y_offset = c->y + 1;
             I('C', &d, point_filter_func);
         case 'n':
-        case 'N':
-            only_first_image = true;
-            I('N', g, number_filter_func);
+        case 'N': {
+            Image *img = img_by_client_number(self, g->image_number);
+            if (img) {
+                for (ref_map_itr ri = vt_first(&img->refs_by_internal_id); !vt_is_end(ri); ) { ImageRef *ref = ri.data->val;
+                    if (!g->placement_id || g->placement_id == ref->client_id) {
+                        ri = remove_ref_itr(img, ri);
+                        set_layers_dirty(self);
+                    } else ri = vt_next(ri);
+                }
+                if (!vt_size(&img->refs_by_internal_id) && (g->delete_action == 'N' || img->client_id == 0)) remove_image(self, img);
+            }
+        } break;
         case 'f':
-        case 'F':
-            if (handle_delete_frame_command(self, g, is_dirty) != NULL) {
-                filter_refs(self, g, true, id_filter_func, cell, true);
+        case 'F': {
+            Image *img = handle_delete_frame_command(self, g, is_dirty);
+            if (img != NULL) {
+                remove_image(self, img);
                 *is_dirty = true;
             }
             break;
+        }
         default:
             REPORT_ERROR("Unknown graphics command delete action: %c", g->delete_action);
             break;
@@ -2133,6 +2155,7 @@ handle_delete_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c
 #undef D
 #undef I
     }
+end:
     if (!vt_size(&self->images_by_internal_id) && self->render_data.count) self->render_data.count = 0;
 }
 
@@ -2141,7 +2164,7 @@ handle_delete_command(GraphicsManager *self, const GraphicsCommand *g, Cursor *c
 void
 grman_resize(GraphicsManager *self, index_type old_lines UNUSED, index_type lines UNUSED, index_type old_columns, index_type columns, index_type num_content_lines_before, index_type num_content_lines_after) {
     ImageRef *ref; Image *img;
-    self->layers_dirty = true;
+    set_layers_dirty(self);
     if (columns == old_columns && num_content_lines_before > num_content_lines_after) {
         const unsigned int vertical_shrink_size = num_content_lines_before - num_content_lines_after;
         iter_images(self) { img = i.data->val;
@@ -2156,7 +2179,7 @@ grman_resize(GraphicsManager *self, index_type old_lines UNUSED, index_type line
 void
 grman_rescale(GraphicsManager *self, CellPixelSize cell) {
     ImageRef *ref; Image *img;
-    self->layers_dirty = true;
+    set_layers_dirty(self);
     iter_images(self) { img = i.data->val;
         iter_refs(img) { ref = i.data->val;
             if (ref->is_virtual_ref || is_cell_image(ref)) continue;
@@ -2346,10 +2369,10 @@ W(shm_unlink) {
 }
 
 W(update_layers) {
-    unsigned int scrolled_by, sx, sy; float xstart, ystart, dx, dy;
+    unsigned int scrolled_by, sx, sy; float xstart, ystart, dx, dy, scroll_offset_lines = 0.0f;
     CellPixelSize cell;
-    PA("IffffIIII", &scrolled_by, &xstart, &ystart, &dx, &dy, &sx, &sy, &cell.width, &cell.height);
-    grman_update_layers(self, scrolled_by, xstart, ystart, dx, dy, sx, sy, cell);
+    PA("IffffIIII|f", &scrolled_by, &xstart, &ystart, &dx, &dy, &sx, &sy, &cell.width, &cell.height, &scroll_offset_lines);
+    grman_update_layers(self, scrolled_by, scroll_offset_lines, xstart, ystart, dx, dy, sx, sy, cell);
     PyObject *ans = PyTuple_New(self->render_data.count);
     for (size_t i = 0; i < self->render_data.count; i++) {
         ImageRenderData *r = self->render_data.item + i;
@@ -2443,13 +2466,14 @@ init_graphics(PyObject *module) {
     return true;
 }
 
-void grman_mark_layers_dirty(GraphicsManager *self) { self->layers_dirty = true; }
+void grman_mark_layers_dirty(GraphicsManager *self) { set_layers_dirty(self); }
 void grman_set_window_id(GraphicsManager *self, id_type id) { self->window_id = id; }
+bool grman_has_images(GraphicsManager *self) { return self->num_of_below_refs + self->num_of_negative_refs + self->num_of_positive_refs > 0; }
 GraphicsRenderData grman_render_data(GraphicsManager *self) {
     GraphicsRenderData ans = {
         .count=self->render_data.count, .capacity=self->render_data.capacity, .images=self->render_data.item,
         .num_of_below_refs=self->num_of_below_refs, .num_of_negative_refs=self->num_of_negative_refs,
-        .num_of_positive_refs=self->num_of_positive_refs
+        .num_of_positive_refs=self->num_of_positive_refs,
     };
     return ans;
 }

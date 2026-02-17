@@ -284,6 +284,30 @@ typedef enum GLFWColorScheme {
     GLFW_COLOR_SCHEME_LIGHT = 2
 } GLFWColorScheme;
 
+typedef enum GLFWMomentumType {
+    GLFW_NO_MOMENTUM_DATA = 0,
+    GLFW_MOMENTUM_PHASE_BEGAN = 1,
+    GLFW_MOMENTUM_PHASE_STATIONARY = 2,
+    GLFW_MOMENTUM_PHASE_ACTIVE = 3,
+    GLFW_MOMENTUM_PHASE_ENDED = 4,
+    GLFW_MOMENTUM_PHASE_CANCELED = 5,
+    GLFW_MOMENTUM_PHASE_MAY_BEGIN = 6,
+} GLFWMomentumType;
+
+typedef enum GLFWOffsetType {
+    GLFW_SCROLL_OFFSET_LINES = 0,
+    GLFW_SCROLL_OFFEST_V120 = 1,
+    GLFW_SCROLL_OFFEST_HIGHRES = 2,
+} GLFWOffsetType;
+
+typedef struct GLFWScrollEvent {
+    double x_offset, y_offset;  // offsets are scaled by the window scale for HIGHRES
+    struct { double x, y; } unscaled;  // unscaled offsets, aka logical pixels
+    GLFWMomentumType momentum_type;
+    GLFWOffsetType offset_type;
+    int keyboard_modifiers;
+} GLFWScrollEvent;
+
 /*! @defgroup joysticks Joysticks
  *  @brief Joystick IDs.
  *
@@ -794,6 +818,7 @@ typedef enum {
 
 #define GLFW_WAYLAND_APP_ID         0x00025001
 #define GLFW_WAYLAND_BGCOLOR        0x00025002
+#define GLFW_WAYLAND_WINDOW_TAG     0x00025003
 /*! @} */
 
 #define GLFW_NO_API                          0
@@ -980,6 +1005,20 @@ typedef struct GLFWwindow GLFWwindow;
  */
 typedef struct GLFWcursor GLFWcursor;
 
+/*! @brief Opaque drop data object.
+ *
+ *  Opaque drop data object representing data from a drag and drop operation.
+ *  This object is passed to the drop callback and can be used to query
+ *  available MIME types and read the dropped data in chunks.
+ *
+ *  @see @ref path_drop
+ *  @see @ref glfwGetDropMimeTypes
+ *  @see @ref glfwReadDropData
+ *
+ *  @since Added in version 4.0.
+ *
+ *  @ingroup input
+ */
 typedef enum {
     GLFW_RELEASE = 0,
     GLFW_PRESS = 1,
@@ -1038,25 +1077,67 @@ typedef struct GLFWkeyevent
     bool fake_event_on_focus_change;
 } GLFWkeyevent;
 
-typedef enum { GLFW_LAYER_SHELL_NONE, GLFW_LAYER_SHELL_BACKGROUND, GLFW_LAYER_SHELL_PANEL } GLFWLayerShellType;
+typedef enum { GLFW_LAYER_SHELL_NONE, GLFW_LAYER_SHELL_BACKGROUND, GLFW_LAYER_SHELL_PANEL, GLFW_LAYER_SHELL_TOP, GLFW_LAYER_SHELL_OVERLAY } GLFWLayerShellType;
 
-typedef enum { GLFW_EDGE_TOP, GLFW_EDGE_BOTTOM, GLFW_EDGE_LEFT, GLFW_EDGE_RIGHT } GLFWEdge;
+typedef enum { GLFW_EDGE_TOP, GLFW_EDGE_BOTTOM, GLFW_EDGE_LEFT, GLFW_EDGE_RIGHT, GLFW_EDGE_CENTER, GLFW_EDGE_NONE, GLFW_EDGE_CENTER_SIZED } GLFWEdge;
 
 typedef enum { GLFW_FOCUS_NOT_ALLOWED, GLFW_FOCUS_EXCLUSIVE, GLFW_FOCUS_ON_DEMAND} GLFWFocusPolicy;
 
 typedef struct GLFWLayerShellConfig {
     GLFWLayerShellType type;
     GLFWEdge edge;
-    char output_name[64];
+    struct {
+        GLFWEdge edge;
+        int requested_top_margin, requested_left_margin, requested_bottom_margin, requested_right_margin;
+    } previous;
+    bool was_toggled_to_fullscreen;
+    char output_name[128];
     GLFWFocusPolicy focus_policy;
-    unsigned size_in_cells;
-    void (*size_callback)(GLFWwindow *window, const struct GLFWLayerShellConfig *config, unsigned monitor_width, unsigned monitor_height, uint32_t *width, uint32_t *height);
+    unsigned x_size_in_cells, x_size_in_pixels;
+    unsigned y_size_in_cells, y_size_in_pixels;
+    int requested_top_margin, requested_left_margin, requested_bottom_margin, requested_right_margin;
+    int requested_exclusive_zone, hide_on_focus_loss;
+    unsigned override_exclusive_zone;
+    void (*size_callback)(GLFWwindow *window, float xscale, float yscale, unsigned *cell_width, unsigned *cell_height, double *left_edge_spacing, double *top_edge_spacing, double *right_edge_spacing, double *bottom_edge_spacing);
+    struct { float xscale, yscale; } expected;
+    struct {
+        float background_opacity; int background_blur, color_space;
+    } related;
 } GLFWLayerShellConfig;
 
 typedef struct GLFWDBUSNotificationData {
     const char *app_name, *icon, *summary, *body, *category, **actions; size_t num_actions;
     int32_t timeout; uint8_t urgency; uint32_t replaces; int muted;
 } GLFWDBUSNotificationData;
+
+typedef enum { GLFW_DROP_ENTER, GLFW_DROP_MOVE, GLFW_DROP_LEAVE, GLFW_DROP_DROP, GLFW_DROP_STATUS_UPDATE, GLFW_DROP_DATA_AVAILABLE } GLFWDropEventType;
+
+/*! @brief Drag operation types.
+ *
+ *  These constants specify the type of drag operation (copy, move, or generic).
+ *
+ *  @ingroup input
+ */
+typedef enum {
+    /*! Move the dragged data to the destination. */
+    GLFW_DRAG_OPERATION_MOVE = 1,
+    /*! Copy the dragged data to the destination. */
+    GLFW_DRAG_OPERATION_COPY = 2,
+    /*! Generic drag operation (platform decides semantics). */
+    GLFW_DRAG_OPERATION_GENERIC = 4
+} GLFWDragOperationType;
+
+
+typedef struct GLFWDropEvent {
+    GLFWDropEventType type;
+    const char **mimes; size_t num_mimes;
+    double xpos, ypos;  // Only valid for GLFW_DROP_ENTER and GLFW_DROP_MOVE
+    bool from_self;  // Only valid upto GLFW_DROP_DROP
+    ssize_t (*read_data)(GLFWwindow *w, struct GLFWDropEvent* ev, char *buffer, size_t sz);  // Only valid for GLFW_DROP_DATA_AVAILABLE
+    void (*finish_drop)(GLFWwindow *w, GLFWDragOperationType op); // Only valid for GLFW_DROP_DROP and GLFW_DROP_DATA_AVAILABLE
+} GLFWDropEvent;
+typedef void (* GLFWdropeventfun)(GLFWwindow*, GLFWDropEvent *event);
+
 
 /*! @brief The function pointer type for error callbacks.
  *
@@ -1163,20 +1244,22 @@ typedef void (* GLFWwindowclosefun)(GLFWwindow*);
  */
 typedef void (* GLFWapplicationclosefun)(int);
 
+
 /*! @brief The function pointer type for system color theme change callbacks.
  *
  *  This is the function pointer type for system color theme changes.
  *  @code
- *  void function_name(int theme_type)
+ *  void function_name(GLFWColorScheme theme_type, bool is_initial_value)
  *  @endcode
  *
  *  @param[in] theme_type 0 for unknown, 1 for dark and 2 for light
+ *  @param[in] is_initial_value true if this is the initial read of the color theme on systems where it is asynchronous such as Linux
  *
  *  @sa @ref glfwSetSystemColorThemeChangeCallback
  *
  *  @ingroup window
  */
-typedef void (* GLFWsystemcolorthemechangefun)(GLFWColorScheme);
+typedef void (* GLFWsystemcolorthemechangefun)(GLFWColorScheme, bool);
 
 
 /*! @brief The function pointer type for window content refresh callbacks.
@@ -1420,7 +1503,7 @@ typedef void (* GLFWcursorenterfun)(GLFWwindow*,int);
  *
  *  @ingroup input
  */
-typedef void (* GLFWscrollfun)(GLFWwindow*,double,double,int,int);
+typedef void (* GLFWscrollfun)(GLFWwindow*,const GLFWScrollEvent*);
 
 /*! @brief The function pointer type for key callbacks.
  *
@@ -1454,32 +1537,95 @@ typedef void (* GLFWscrollfun)(GLFWwindow*,double,double,int,int);
  */
 typedef void (* GLFWkeyboardfun)(GLFWwindow*, GLFWkeyevent*);
 
-/*! @brief The function pointer type for drag and drop callbacks.
+/*! @brief Drag event types.
  *
- *  This is the function pointer type for drop callbacks. A drop
- *  callback function has the following signature:
- *  @code
- *  int function_name(GLFWwindow* window, const char* mime, const char* text)
- *  @endcode
- *
- *  @param[in] window The window that received the event.
- *  @param[in] mime The UTF-8 encoded drop mime-type
- *  @param[in] data The dropped data or NULL for drag enter events
- *  @param[in] sz The size of the dropped data
- *  @return For drag events should return the priority for the specified mime type. A priority of zero
- *  or lower means the mime type is not accepted. Highest priority will be the finally accepted mime-type.
- *
- *  @pointer_lifetime The text is valid until the
- *  callback function returns.
- *
- *  @sa @ref path_drop
- *  @sa @ref glfwSetDropCallback
- *
- *  @since Added in version 3.1.
+ *  These constants are used to identify the type of drag event.
  *
  *  @ingroup input
  */
-typedef int (* GLFWdropfun)(GLFWwindow*, const char *, const char*, size_t);
+typedef enum {
+    /*! The drag operation entered the window. */
+    GLFW_DRAG_ENTER = 1,
+    /*! The drag operation moved within the window. */
+    GLFW_DRAG_MOVE = 2,
+    /*! The drag operation left the window. */
+    GLFW_DRAG_LEAVE = 3,
+    /*! Async status update request (xpos/ypos are invalid). */
+    GLFW_DRAG_STATUS_UPDATE = 4
+} GLFWDragEventType;
+
+/*! @brief Opaque drag source data handle.
+ *
+ *  This is an opaque handle to a heap-allocated object that represents
+ *  data being requested from a drag source. The lifetime is managed by
+ *  the GLFW backend - it is freed on end of data, error, drag source
+ *  cancellation, or at exit.
+ *
+ *  @since Added in version 4.0.
+ *
+ *  @ingroup input
+ */
+typedef struct GLFWDragSourceData GLFWDragSourceData;
+
+/*! @brief The function pointer type for drag source data request callbacks.
+ *
+ *  This is the function pointer type for callbacks invoked when the OS
+ *  requests data for a specific MIME type from the active drag source.
+ *  The callback is called on the GUI thread.
+ *
+ *  @param[in] window The window that initiated the drag.
+ *  @param[in] mime_type The MIME type being requested, or NULL if the OS
+ *  has closed the drag source.
+ *  @param[in] source_data Opaque pointer to a heap-allocated object. Use this
+ *  pointer when calling @ref glfwSendDragData to send data chunks.
+ *
+ *  @sa @ref glfwStartDrag
+ *  @sa @ref glfwSendDragData
+ *  @sa @ref glfwSetDragSourceCallback
+ *
+ *  @since Added in version 4.0.
+ *
+ *  @ingroup input
+ */
+typedef void (* GLFWdragsourcefun)(GLFWwindow* window, const char* mime_type, GLFWDragSourceData* source_data);
+
+/*! @brief The function pointer type for drag event callbacks.
+ *
+ *  This is the function pointer type for drag event callbacks. A drag event
+ *  callback function has the following signature:
+ *  @code
+ *  int function_name(GLFWwindow* window, int event, double xpos, double ypos, const char** mime_types, int* mime_count)
+ *  @endcode
+ *
+ *  @param[in] window The window that received the drag event.
+ *  @param[in] event The drag event type: @ref GLFW_DRAG_ENTER, @ref GLFW_DRAG_MOVE,
+ *  or @ref GLFW_DRAG_LEAVE.
+ *  @param[in] xpos The x-coordinate of the drag position in window coordinates.
+ *  @param[in] ypos The y-coordinate of the drag position in window coordinates.
+ *  @param[in,out] mime_types A writable array of MIME type strings available from the drag source.
+ *  For @ref GLFW_DRAG_ENTER and @ref GLFW_DRAG_MOVE events this is non-NULL and contains all
+ *  available MIME types. The callback is responsible for sorting this list by priority and
+ *  keeping only the MIME types it wants to accept. The first MIME type in the sorted list
+ *  will be used for the drop operation. The strings are only valid for the duration of the
+ *  callback; if you need to store them, make copies. For @ref GLFW_DRAG_LEAVE events this
+ *  is `NULL`.
+ *  @param[in,out] mime_count Pointer to the number of MIME types in the array. The callback
+ *  should update this to reflect the new count after sorting and filtering. For
+ *  @ref GLFW_DRAG_LEAVE events this is `NULL`.
+ *  @return For @ref GLFW_DRAG_ENTER and @ref GLFW_DRAG_MOVE events, return non-zero
+ *  to accept the drag or zero to reject it. This allows the application to
+ *  dynamically accept or reject the drag based on the current position.
+ *  Return value is ignored for @ref GLFW_DRAG_LEAVE events.
+ *
+ *  @sa @ref drag_events
+ *  @sa @ref glfwSetDragCallback
+ *  @sa @ref glfwUpdateDragState
+ *
+ *  @since Added in version 4.0.
+ *
+ *  @ingroup input
+ */
+typedef int (* GLFWdragfun)(GLFWwindow*, GLFWDragEventType event, double xpos, double ypos, const char** mime_types, int* mime_count);
 
 typedef void (* GLFWliveresizefun)(GLFWwindow*, bool);
 
@@ -1544,6 +1690,7 @@ typedef enum {
 typedef GLFWDataChunk (* GLFWclipboarditerfun)(const char *mime_type, void *iter, GLFWClipboardType ctype);
 typedef bool (* GLFWclipboardwritedatafun)(void *object, const char *data, size_t sz);
 typedef bool (* GLFWimecursorpositionfun)(GLFWwindow *window, GLFWIMEUpdateEvent *ev);
+typedef void (* GLFWclipboardlostfun )(GLFWClipboardType);
 
 /*! @brief Video mode type.
  *
@@ -1631,7 +1778,7 @@ typedef struct GLFWimage
     int height;
     /*! The pixel data of this image, arranged left-to-right, top-to-bottom.
      */
-    unsigned char* pixels;
+    const unsigned char* pixels;
 } GLFWimage;
 
 /*! @brief Gamepad input state
@@ -1699,13 +1846,13 @@ typedef struct GLFWgamepadstate
 typedef int (* GLFWcocoatextinputfilterfun)(int,int,unsigned int,unsigned long);
 typedef bool (* GLFWapplicationshouldhandlereopenfun)(int);
 typedef bool (* GLFWhandleurlopen)(const char*);
-typedef void (* GLFWapplicationwillfinishlaunchingfun)(void);
+typedef void (* GLFWapplicationwillfinishlaunchingfun)(bool);
 typedef bool (* GLFWcocoatogglefullscreenfun)(GLFWwindow*);
 typedef void (* GLFWcocoarenderframefun)(GLFWwindow*);
 typedef void (*GLFWwaylandframecallbackfunc)(unsigned long long id);
 typedef void (*GLFWDBusnotificationcreatedfun)(unsigned long long, uint32_t, void*);
 typedef void (*GLFWDBusnotificationactivatedfun)(uint32_t, int, const char*);
-typedef int (*glfwInit_func)(monotonic_t);
+typedef int (*glfwInit_func)(monotonic_t, bool*);
 GFW_EXTERN glfwInit_func glfwInit_impl;
 #define glfwInit glfwInit_impl
 
@@ -1744,6 +1891,10 @@ GFW_EXTERN glfwSetHasCurrentSelectionCallback_func glfwSetHasCurrentSelectionCal
 typedef GLFWimecursorpositionfun (*glfwSetIMECursorPositionCallback_func)(GLFWimecursorpositionfun);
 GFW_EXTERN glfwSetIMECursorPositionCallback_func glfwSetIMECursorPositionCallback_impl;
 #define glfwSetIMECursorPositionCallback glfwSetIMECursorPositionCallback_impl
+
+typedef bool (*glfwIsLayerShellSupported_func)(void);
+GFW_EXTERN glfwIsLayerShellSupported_func glfwIsLayerShellSupported_impl;
+#define glfwIsLayerShellSupported glfwIsLayerShellSupported_impl
 
 typedef void (*glfwTerminate_func)(void);
 GFW_EXTERN glfwTerminate_func glfwTerminate_impl;
@@ -1797,6 +1948,10 @@ typedef const char* (*glfwGetMonitorName_func)(GLFWmonitor*);
 GFW_EXTERN glfwGetMonitorName_func glfwGetMonitorName_impl;
 #define glfwGetMonitorName glfwGetMonitorName_impl
 
+typedef const char* (*glfwGetMonitorDescription_func)(GLFWmonitor*);
+GFW_EXTERN glfwGetMonitorDescription_func glfwGetMonitorDescription_impl;
+#define glfwGetMonitorDescription glfwGetMonitorDescription_impl
+
 typedef void (*glfwSetMonitorUserPointer_func)(GLFWmonitor*, void*);
 GFW_EXTERN glfwSetMonitorUserPointer_func glfwSetMonitorUserPointer_impl;
 #define glfwSetMonitorUserPointer glfwSetMonitorUserPointer_impl
@@ -1841,7 +1996,7 @@ typedef void (*glfwWindowHintString_func)(int, const char*);
 GFW_EXTERN glfwWindowHintString_func glfwWindowHintString_impl;
 #define glfwWindowHintString glfwWindowHintString_impl
 
-typedef GLFWwindow* (*glfwCreateWindow_func)(int, int, const char*, GLFWmonitor*, GLFWwindow*);
+typedef GLFWwindow* (*glfwCreateWindow_func)(int, int, const char*, GLFWmonitor*, GLFWwindow*, const GLFWLayerShellConfig*);
 GFW_EXTERN glfwCreateWindow_func glfwCreateWindow_impl;
 #define glfwCreateWindow glfwCreateWindow_impl
 
@@ -1856,6 +2011,14 @@ GFW_EXTERN glfwIsFullscreen_func glfwIsFullscreen_impl;
 typedef bool (*glfwAreSwapsAllowed_func)(const GLFWwindow*);
 GFW_EXTERN glfwAreSwapsAllowed_func glfwAreSwapsAllowed_impl;
 #define glfwAreSwapsAllowed glfwAreSwapsAllowed_impl
+
+typedef const GLFWLayerShellConfig* (*glfwGetLayerShellConfig_func)(GLFWwindow*);
+GFW_EXTERN glfwGetLayerShellConfig_func glfwGetLayerShellConfig_impl;
+#define glfwGetLayerShellConfig glfwGetLayerShellConfig_impl
+
+typedef bool (*glfwSetLayerShellConfig_func)(GLFWwindow*, const GLFWLayerShellConfig*);
+GFW_EXTERN glfwSetLayerShellConfig_func glfwSetLayerShellConfig_impl;
+#define glfwSetLayerShellConfig glfwSetLayerShellConfig_impl
 
 typedef void (*glfwDestroyWindow_func)(GLFWwindow*);
 GFW_EXTERN glfwDestroyWindow_func glfwDestroyWindow_impl;
@@ -1941,7 +2104,7 @@ typedef void (*glfwMaximizeWindow_func)(GLFWwindow*);
 GFW_EXTERN glfwMaximizeWindow_func glfwMaximizeWindow_impl;
 #define glfwMaximizeWindow glfwMaximizeWindow_impl
 
-typedef void (*glfwShowWindow_func)(GLFWwindow*);
+typedef void (*glfwShowWindow_func)(GLFWwindow*, bool);
 GFW_EXTERN glfwShowWindow_func glfwShowWindow_impl;
 #define glfwShowWindow glfwShowWindow_impl
 
@@ -2009,7 +2172,11 @@ typedef GLFWsystemcolorthemechangefun (*glfwSetSystemColorThemeChangeCallback_fu
 GFW_EXTERN glfwSetSystemColorThemeChangeCallback_func glfwSetSystemColorThemeChangeCallback_impl;
 #define glfwSetSystemColorThemeChangeCallback glfwSetSystemColorThemeChangeCallback_impl
 
-typedef GLFWColorScheme (*glfwGetCurrentSystemColorTheme_func)(void);
+typedef GLFWclipboardlostfun (*glfwSetClipboardLostCallback_func)(GLFWclipboardlostfun);
+GFW_EXTERN glfwSetClipboardLostCallback_func glfwSetClipboardLostCallback_impl;
+#define glfwSetClipboardLostCallback glfwSetClipboardLostCallback_impl
+
+typedef GLFWColorScheme (*glfwGetCurrentSystemColorTheme_func)(bool);
 GFW_EXTERN glfwGetCurrentSystemColorTheme_func glfwGetCurrentSystemColorTheme_impl;
 #define glfwGetCurrentSystemColorTheme glfwGetCurrentSystemColorTheme_impl
 
@@ -2052,6 +2219,10 @@ GFW_EXTERN glfwGetIgnoreOSKeyboardProcessing_func glfwGetIgnoreOSKeyboardProcess
 typedef void (*glfwSetIgnoreOSKeyboardProcessing_func)(bool);
 GFW_EXTERN glfwSetIgnoreOSKeyboardProcessing_func glfwSetIgnoreOSKeyboardProcessing_impl;
 #define glfwSetIgnoreOSKeyboardProcessing glfwSetIgnoreOSKeyboardProcessing_impl
+
+typedef bool (*glfwGrabKeyboard_func)(int);
+GFW_EXTERN glfwGrabKeyboard_func glfwGrabKeyboard_impl;
+#define glfwGrabKeyboard glfwGrabKeyboard_impl
 
 typedef int (*glfwGetInputMode_func)(GLFWwindow*, int);
 GFW_EXTERN glfwGetInputMode_func glfwGetInputMode_impl;
@@ -2129,13 +2300,33 @@ typedef GLFWscrollfun (*glfwSetScrollCallback_func)(GLFWwindow*, GLFWscrollfun);
 GFW_EXTERN glfwSetScrollCallback_func glfwSetScrollCallback_impl;
 #define glfwSetScrollCallback glfwSetScrollCallback_impl
 
-typedef GLFWdropfun (*glfwSetDropCallback_func)(GLFWwindow*, GLFWdropfun);
-GFW_EXTERN glfwSetDropCallback_func glfwSetDropCallback_impl;
-#define glfwSetDropCallback glfwSetDropCallback_impl
-
 typedef GLFWliveresizefun (*glfwSetLiveResizeCallback_func)(GLFWwindow*, GLFWliveresizefun);
 GFW_EXTERN glfwSetLiveResizeCallback_func glfwSetLiveResizeCallback_impl;
 #define glfwSetLiveResizeCallback glfwSetLiveResizeCallback_impl
+
+typedef GLFWdropeventfun (*glfwSetDropEventCallback_func)(GLFWwindow*, GLFWdropeventfun);
+GFW_EXTERN glfwSetDropEventCallback_func glfwSetDropEventCallback_impl;
+#define glfwSetDropEventCallback glfwSetDropEventCallback_impl
+
+typedef int (*glfwRequestDropData_func)(GLFWwindow*, const char*);
+GFW_EXTERN glfwRequestDropData_func glfwRequestDropData_impl;
+#define glfwRequestDropData glfwRequestDropData_impl
+
+typedef void (*glfwEndDrop_func)(GLFWwindow*, GLFWDragOperationType);
+GFW_EXTERN glfwEndDrop_func glfwEndDrop_impl;
+#define glfwEndDrop glfwEndDrop_impl
+
+typedef GLFWdragsourcefun (*glfwSetDragSourceCallback_func)(GLFWwindow*, GLFWdragsourcefun);
+GFW_EXTERN glfwSetDragSourceCallback_func glfwSetDragSourceCallback_impl;
+#define glfwSetDragSourceCallback glfwSetDragSourceCallback_impl
+
+typedef int (*glfwStartDrag_func)(GLFWwindow*, const char* const*, int, const GLFWimage*, int);
+GFW_EXTERN glfwStartDrag_func glfwStartDrag_impl;
+#define glfwStartDrag glfwStartDrag_impl
+
+typedef ssize_t (*glfwSendDragData_func)(GLFWDragSourceData*, const void*, size_t);
+GFW_EXTERN glfwSendDragData_func glfwSendDragData_impl;
+#define glfwSendDragData glfwSendDragData_impl
 
 typedef int (*glfwJoystickPresent_func)(int);
 GFW_EXTERN glfwJoystickPresent_func glfwJoystickPresent_impl;
@@ -2289,6 +2480,10 @@ typedef void (*glfwSetPrimarySelectionString_func)(GLFWwindow*, const char*);
 GFW_EXTERN glfwSetPrimarySelectionString_func glfwSetPrimarySelectionString_impl;
 #define glfwSetPrimarySelectionString glfwSetPrimarySelectionString_impl
 
+typedef void (*glfwCocoaCycleThroughOSWindows_func)(bool);
+GFW_EXTERN glfwCocoaCycleThroughOSWindows_func glfwCocoaCycleThroughOSWindows_impl;
+#define glfwCocoaCycleThroughOSWindows glfwCocoaCycleThroughOSWindows_impl
+
 typedef void (*glfwCocoaSetWindowChrome_func)(GLFWwindow*, unsigned int, bool, unsigned int, int, unsigned int, bool, int, float, bool);
 GFW_EXTERN glfwCocoaSetWindowChrome_func glfwCocoaSetWindowChrome_impl;
 #define glfwCocoaSetWindowChrome glfwCocoaSetWindowChrome_impl
@@ -2325,13 +2520,21 @@ typedef void (*glfwWaylandRedrawCSDWindowTitle_func)(GLFWwindow*);
 GFW_EXTERN glfwWaylandRedrawCSDWindowTitle_func glfwWaylandRedrawCSDWindowTitle_impl;
 #define glfwWaylandRedrawCSDWindowTitle glfwWaylandRedrawCSDWindowTitle_impl
 
-typedef void (*glfwWaylandSetupLayerShellForNextWindow_func)(const GLFWLayerShellConfig*);
-GFW_EXTERN glfwWaylandSetupLayerShellForNextWindow_func glfwWaylandSetupLayerShellForNextWindow_impl;
-#define glfwWaylandSetupLayerShellForNextWindow glfwWaylandSetupLayerShellForNextWindow_impl
+typedef bool (*glfwWaylandIsWindowFullyCreated_func)(GLFWwindow*);
+GFW_EXTERN glfwWaylandIsWindowFullyCreated_func glfwWaylandIsWindowFullyCreated_impl;
+#define glfwWaylandIsWindowFullyCreated glfwWaylandIsWindowFullyCreated_impl
+
+typedef bool (*glfwWaylandBeep_func)(GLFWwindow*);
+GFW_EXTERN glfwWaylandBeep_func glfwWaylandBeep_impl;
+#define glfwWaylandBeep glfwWaylandBeep_impl
 
 typedef pid_t (*glfwWaylandCompositorPID_func)(void);
 GFW_EXTERN glfwWaylandCompositorPID_func glfwWaylandCompositorPID_impl;
 #define glfwWaylandCompositorPID glfwWaylandCompositorPID_impl
+
+typedef void (*glfwConfigureMomentumScroller_func)(double, double, double, unsigned);
+GFW_EXTERN glfwConfigureMomentumScroller_func glfwConfigureMomentumScroller_impl;
+#define glfwConfigureMomentumScroller glfwConfigureMomentumScroller_impl
 
 typedef unsigned long long (*glfwDBusUserNotify_func)(const GLFWDBUSNotificationData*, GLFWDBusnotificationcreatedfun, void*);
 GFW_EXTERN glfwDBusUserNotify_func glfwDBusUserNotify_impl;
@@ -2344,13 +2547,5 @@ GFW_EXTERN glfwDBusSetUserNotificationHandler_func glfwDBusSetUserNotificationHa
 typedef int (*glfwSetX11LaunchCommand_func)(GLFWwindow*, char**, int);
 GFW_EXTERN glfwSetX11LaunchCommand_func glfwSetX11LaunchCommand_impl;
 #define glfwSetX11LaunchCommand glfwSetX11LaunchCommand_impl
-
-typedef void (*glfwSetX11WindowAsDock_func)(int32_t);
-GFW_EXTERN glfwSetX11WindowAsDock_func glfwSetX11WindowAsDock_impl;
-#define glfwSetX11WindowAsDock glfwSetX11WindowAsDock_impl
-
-typedef void (*glfwSetX11WindowStrut_func)(int32_t, uint32_t[12]);
-GFW_EXTERN glfwSetX11WindowStrut_func glfwSetX11WindowStrut_impl;
-#define glfwSetX11WindowStrut glfwSetX11WindowStrut_impl
 
 const char* load_glfw(const char* path);

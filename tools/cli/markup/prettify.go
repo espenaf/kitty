@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode"
 
-	"kitty"
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
 )
 
 var _ = fmt.Print
@@ -19,7 +19,7 @@ var _ = fmt.Print
 type Context struct {
 	fmt_ctx style.Context
 
-	Cyan, Green, Blue, Magenta, Red, BrightRed, Yellow, Italic, Bold, Dim, Title, Exe, Opt, Emph, Err, Code func(args ...interface{}) string
+	Cyan, Green, Blue, Magenta, Red, BrightRed, Yellow, Italic, Bold, Dim, Title, Exe, Opt, Emph, Err, Code func(args ...any) string
 	Url                                                                                                     func(string, string) string
 }
 

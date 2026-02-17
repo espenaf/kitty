@@ -2,12 +2,8 @@
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
 
 import sys
-from typing import (
-    List,
-    Optional,
-)
 
-from kitty.typing import BossType, TypedDict
+from kitty.typing_compat import BossType, TypedDict
 
 from ..tui.handler import result_handler
 
@@ -15,7 +11,7 @@ from ..tui.handler import result_handler
 def option_text() -> str:
     return '''\
 --type -t
-choices=line,yesno,choices,password
+choices=line,yesno,choices,password,file
 default=line
 Type of input. Defaults to asking for a line of text.
 
@@ -42,7 +38,7 @@ A choice for the choices type. Can be specified multiple times. Every choice has
 the syntax: ``letter[;color]:text``, where :italic:`text` is the choice
 text and :italic:`letter` is the selection key. :italic:`letter` is a single letter
 belonging to :italic:`text`. This letter is highlighted within the choice text.
-There can be an optional color specification after the letter 
+There can be an optional color specification after the letter
 to indicate what color it should be.
 For example: :code:`y:Yes` and :code:`n;red:No`
 
@@ -69,15 +65,15 @@ The text in the message to be replaced by hidden text. The hidden text is read v
 
 
 class Response(TypedDict):
-    items: List[str]
-    response: Optional[str]
+    items: list[str]
+    response: str | None
 
-def main(args: List[str]) -> Response:
+def main(args: list[str]) -> Response:
     raise SystemExit('This must be run as kitten ask')
 
 
 @result_handler()
-def handle_result(args: List[str], data: Response, target_window_id: int, boss: BossType) -> None:
+def handle_result(args: list[str], data: Response, target_window_id: int, boss: BossType) -> None:
     if data['response'] is not None:
         func, *args = data['items']
         getattr(boss, func)(data['response'], *args)

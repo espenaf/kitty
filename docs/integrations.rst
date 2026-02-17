@@ -14,6 +14,12 @@ Image and document viewers
 Powered by kitty's :doc:`graphics-protocol` there exist many tools for viewing
 images and other types of documents directly in your terminal, even over SSH.
 
+.. _tool_bookorat:
+
+`bookorat <https://github.com/bugzmanov/bookokrat>`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A terminal PDF/EPUB viewer
+
 .. _tool_termpdf:
 
 `termpdf.py <https://github.com/dsanson/termpdf.py>`_
@@ -26,39 +32,29 @@ A terminal PDF/DJVU/CBR viewer
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 A terminal PDF viewer
 
-.. _tool_mdcat:
+.. _tool_fancy_cat:
 
-`mdcat <https://github.com/lunaryorn/mdcat>`_
+`fancy-cat <https://github.com/freref/fancy-cat>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A terminal PDF viewer
+
+.. _tool_meowpdf:
+
+`meowpdf <https://github.com/monoamine11231/meowpdf>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A terminal PDF viewer with GUI-like usage and Vim-like keybindings written in Rust
+
+.. _tool_mcat:
+
+`mcat <https://github.com/Skardyy/mcat>`_
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Display markdown files nicely formatted with images in the terminal
+Display various types of files nicely formatted with images in the terminal
 
-.. _tool_ranger:
-
-`ranger <https://github.com/ranger/ranger>`_
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-A terminal file manager, with previews of file contents powered by kitty's
-graphics protocol.
-
-.. _tool_nnn:
-
-`nnn <https://github.com/jarun/nnn/>`_
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Another terminal file manager, with previews of file contents powered by kitty's
-graphics protocol.
-
-.. _tool_yazi:
-
-`Yazi <https://github.com/sxyazi/yazi>`_
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Blazing fast terminal file manager, with built-in kitty graphics protocol support
-(implemented both Classic protocol and Unicode placeholders).
-
-.. _tool_hunter:
-
-`hunter <https://github.com/rabite0/hunter>`_
+`dawn <https://github.com/andrewmd5/dawn>`__
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Another terminal file manager, with previews of file contents powered by kitty's
-graphics protocol.
+
+A markdown editor that uses the text-sizing protocol for large headings and
+the graphics protocol for images.
 
 .. _tool_presentterm:
 
@@ -66,6 +62,13 @@ graphics protocol.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Show markdown based slides with images in your terminal, powered by the
 kitty graphics protocol.
+
+.. _tool_mdfried:
+
+`mdfried <https://github.com/benjajaja/mdfried>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Markdown viewer that can render big headers with the text-sizing-protocol, and
+also render images with the kitty graphics protocol.
 
 .. _tool_term_image:
 
@@ -100,16 +103,29 @@ base application that uses kitty's graphics protocol for images.
 A text mode WWW browser that supports kitty's graphics protocol to display
 images.
 
+.. _tool_awrit:
+
 `awrit <https://github.com/chase/awrit>`__
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 A full Chromium based web browser running in the terminal using kitty's
 graphics protocol.
+
+.. _tool_chawan:
+
+`chawan <https://sr.ht/~bptato/chawan/>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A text mode WWW browser that supports kitty's graphics protocol to display
+images.
 
 .. _tool_mpv:
 
 `mpv <https://github.com/mpv-player/mpv/commit/874e28f4a41a916bb567a882063dd2589e9234e1>`_
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 A video player that can play videos in the terminal.
+
+.. code-block:: sh
+
+    mpv --profile=sw-fast --vo=kitty --vo-kitty-use-shm=yes --really-quiet video.mkv
 
 .. _tool_timg:
 
@@ -118,6 +134,51 @@ A video player that can play videos in the terminal.
 A terminal image and video viewer, that displays static and animated images or
 plays videos. Fast multi-threaded loading, JPEG exif rotation, grid view and
 connecting to the webcam make it a versatile terminal utility.
+
+
+File managers
+-------------------
+.. _tool_ranger:
+
+`ranger <https://github.com/ranger/ranger>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A terminal file manager, with previews of file contents powered by kitty's
+graphics protocol.
+
+.. _tool_nnn:
+
+`nnn <https://github.com/jarun/nnn/>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Another terminal file manager, with previews of file contents powered by kitty's
+graphics protocol.
+
+.. _tool_yazi:
+
+`Yazi <https://github.com/sxyazi/yazi>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Blazing fast terminal file manager, with built-in kitty graphics protocol support
+(implemented both Classic protocol and Unicode placeholders).
+
+.. _tool_clifm:
+
+`clifm <https://github.com/leo-arch/clifm>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The shell-like, command line terminal file manager, uses the kitty graphics and
+keyboard protocols.
+
+.. _tool_hunter:
+
+`hunter <https://github.com/rabite0/hunter>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Another terminal file manager, with previews of file contents powered by kitty's
+graphics protocol.
+
+.. _tool_far2l:
+
+`far2l <https://github.com/elfmz/far2l>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Text-mode dual panel (orthodox) file manager and also terminal emulator, uses
+the kitty graphics and keyboard protocols (both as client and as terminal)
 
 
 System and data visualisation tools
@@ -132,9 +193,13 @@ protocol
 
 .. _tool_matplotlib:
 
-`matplotlib <https://github.com/jktr/matplotlib-backend-kitty>`_
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Show matplotlib plots directly in kitty
+matplotlib
+^^^^^^^^^^^^^^
+
+There exist multiple backends for matplotlib to draw images directly in kitty.
+
+* `matplotlib-backend-kitty <https://github.com/jktr/matplotlib-backend-kitty>`__
+* `kitcat <https://github.com/mil-ad/kitcat>`__
 
 .. _tool_KittyTerminalImage:
 
@@ -154,28 +219,15 @@ by kitty's graphics protocol for displaying plots
 `gnuplot <http://www.gnuplot.info/>`_
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A graphing and data visualization tool that can be made to display its output in
-kitty with the following bash snippet:
+A graphing and data visualization tool that has support for the kitty graphics
+protocol, with its ``kittygd`` and ``kittycairo`` backends.
 
-.. code-block:: sh
+.. _tool_k-nine:
 
-    function iplot {
-        cat <<EOF | gnuplot
-        set terminal pngcairo enhanced font 'Fira Sans,10'
-        set autoscale
-        set samples 1000
-        set output '|kitten icat --stdin yes'
-        set object 1 rectangle from screen 0,0 to screen 1,1 fillcolor rgb"#fdf6e3" behind
-        plot $@
-        set output '/dev/null'
-    EOF
-    }
+`k-nine <https://github.com/talwrii/kitty-plotnine>`_
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Add this to bashrc and then to plot a function, simply do:
-
-.. code-block:: sh
-
-    iplot 'sin(x*3)*exp(x*.2)'
+A wrapper around the :code:`plotnine` library which lets you plot data from the command-line with bash one-liners.
 
 .. tool_tgutui:
 
@@ -207,6 +259,14 @@ A tool to display weather information in your terminal with curl
 `wl-clipboard-manager <https://github.com/maximbaz/wl-clipboard-manager>`_
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 View and manage the system clipboard under Wayland in your kitty terminal
+
+.. tool_nemu:
+
+`NEMU <https://github.com/nemuTUI/nemu>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TUI for QEMU used to manage virtual machines, can display the Virtual Machine
+in the terminal using the kitty graphics protocol.
+
 
 Editor integration
 -----------------------
@@ -244,7 +304,7 @@ Allows easily running tests in a terminal window
 
 Various image viewing plugins for editors
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
+* `snacks.nvim <https://github.com/folke/snacks.nvim>`__ - Enables seamless inline images in various file formats within nvim
 * `image.nvim <https://github.com/3rd/image.nvim>`_ - Bringing images to neovim
 * `image_preview.nvim <https://github.com/adelarsq/image_preview.nvim/>`_ - Image preview for neovim
 * `hologram.nvim <https://github.com/edluffy/hologram.nvim>`_  - view images inside nvim
@@ -271,9 +331,49 @@ Live incremental search of the scrollback buffer.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Keyboard based text selection for the kitty scrollback buffer.
 
+Desktop panels
+-------------------------
+
+`kitty panel <https://github.com/5hubham5ingh/kitty-panel>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A system panel for Kitty terminal that displays real-time system metrics using terminal-based utilities.
+
+
+`pawbar <https://github.com/codelif/pawbar>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A kitten-panel based desktop panel for your desktop
+
+Password managers
+---------------------
+
+`1password <https://github.com/mm-zacharydavison/kitty-kitten-1password>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Allow injecting passwords from 1Password into kitty.
+
+`BitWarden <https://github.com/dnanhkhoa/kitty-password-manager>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Inject passwords from BitWarden into kitty
 
 Miscellaneous
 ------------------
+
+.. tool_doom:
+
+DOOM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Play the classic shooter DOOM in `kitty <https://github.com/cryptocode/terminal-doom>`__ or even inside `neovim inside kitty
+<https://github.com/seandewar/actually-doom.nvim>`__.
+
+.. tool_gattino:
+
+`gattino <https://github.com/salvozappa/gattino>`__
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Integrate kitty with an LLM to convert plain language prompts into shell
+commands.
 
 .. tool_kitty_smart_tab:
 

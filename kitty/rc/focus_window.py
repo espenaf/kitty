@@ -2,9 +2,7 @@
 # License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 
-from typing import TYPE_CHECKING, Optional
-
-from kitty.fast_data_types import focus_os_window
+from typing import TYPE_CHECKING
 
 from .base import MATCH_WINDOW_OPTION, ArgsType, Boss, PayloadGetType, PayloadType, RCOptions, RemoteCommand, ResponseType, Window
 
@@ -30,12 +28,10 @@ the command will exit with a success code.
     def message_to_kitty(self, global_opts: RCOptions, opts: 'CLIOptions', args: ArgsType) -> PayloadType:
         return {'match': opts.match}
 
-    def response_from_kitty(self, boss: Boss, window: Optional[Window], payload_get: PayloadGetType) -> ResponseType:
+    def response_from_kitty(self, boss: Boss, window: Window | None, payload_get: PayloadGetType) -> ResponseType:
         for window in self.windows_for_match_payload(boss, window, payload_get):
             if window:
-                os_window_id = boss.set_active_window(window)
-                if os_window_id:
-                    focus_os_window(os_window_id, True)
+                boss.set_active_window(window, switch_os_window_if_needed=True)
                 break
         return None
 

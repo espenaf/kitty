@@ -1,5 +1,13 @@
 [project]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+
+[build-system]
+requires = [
+    # Needed for installing pure python packages at build time
+    "installer == 0.7.0",
+    # Needed for some weird reason for glib
+    "packaging == 23.1",
+]
 
 [tool.mypy]
 files = 'kitty,kittens,glfw,*.py,docs/conf.py,gen'
@@ -17,6 +25,7 @@ disallow_untyped_decorators = true
 disallow_untyped_calls = true
 disallow_incomplete_defs = true
 strict = true
+strict_bytes = true
 no_implicit_reexport = true
 
 [tool.pylsp-mypy]

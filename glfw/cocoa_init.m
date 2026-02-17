@@ -29,6 +29,7 @@
 #include "internal.h"
 #include "../kitty/monotonic.h"
 #include <sys/param.h> // For MAXPATHLEN
+#include <sys/sysctl.h>
 #include <pthread.h>
 
 // Needed for _NSGetProgname
@@ -297,9 +298,18 @@ static NSDictionary<NSString*,NSNumber*> *global_shortcuts = nil;
 // Delegate for application related notifications {{{
 
 @interface GLFWApplicationDelegate : NSObject <NSApplicationDelegate>
+    - (void)handleAppearanceChange;
 @end
 
 @implementation GLFWApplicationDelegate
+
+- (void)applicationDidActivate:(NSNotification *)notification {
+    NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
+    if (app && app.processIdentifier != getpid()) {
+        _glfw.ns.previous_front_most_application = app.processIdentifier;
+        debug_rendering("Front most application changed to: %s pid: %d\n", app.bundleIdentifier.UTF8String, app.processIdentifier)
+    }
+}
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
@@ -358,8 +368,7 @@ static GLFWapplicationwillfinishlaunchingfun finish_launching_callback = NULL;
         else
             createMenuBar();
     }
-    if (finish_launching_callback)
-        finish_launching_callback();
+    if (finish_launching_callback) finish_launching_callback(false);
 }
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
@@ -408,19 +417,76 @@ static GLFWapplicationwillfinishlaunchingfun finish_launching_callback = NULL;
     }
 }
 
+static void *AppearanceObservationContext = &AppearanceObservationContext;
+static NSDate *application_finished_launching_at = nil;
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
     (void)notification;
+    [[NSApplication sharedApplication] addObserver:self
+        forKeyPath:@"effectiveAppearance" options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionInitial
+        context:AppearanceObservationContext];
+
+    if (finish_launching_callback) finish_launching_callback(true);
     [NSApp stop:nil];
 
     CGDisplayRegisterReconfigurationCallback(display_reconfigured, NULL);
     _glfwCocoaPostEmptyEvent();
+    application_finished_launching_at = [NSDate date];
+}
+
+GLFWAPI GLFWColorScheme glfwGetCurrentSystemColorTheme(bool query_if_unintialized) {
+    (void)query_if_unintialized;
+    int theme_type = GLFW_COLOR_SCHEME_NO_PREFERENCE;
+    NSAppearance *changedAppearance = NSApp.effectiveAppearance;
+    NSAppearanceName newAppearance = [changedAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    if([newAppearance isEqualToString:NSAppearanceNameDarkAqua]){
+        theme_type = GLFW_COLOR_SCHEME_DARK;
+    } else {
+        theme_type = GLFW_COLOR_SCHEME_LIGHT;
+    }
+    return theme_type;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
+                       context:(void *)context {
+                           if (context == AppearanceObservationContext) {
+        if ([keyPath isEqualToString:@"effectiveAppearance"]) {
+            // The initial call (from NSKeyValueObservingOptionInitial) might happen on a background thread.
+            // Dispatch to the main thread to be safe, especially if updating UI.
+            __block __typeof__(self) weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf handleAppearanceChange];
+            });
+        }
+    } else {
+        // If the context doesn't match, pass the notification to the superclass.
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+}
+
+- (void)handleAppearanceChange {
+    static GLFWColorScheme previously_reported_appearance = GLFW_COLOR_SCHEME_NO_PREFERENCE;
+    GLFWColorScheme new_appearance = glfwGetCurrentSystemColorTheme(true);
+    if (new_appearance != previously_reported_appearance) {
+        previously_reported_appearance = new_appearance;
+        _glfwInputColorScheme(new_appearance, false);
+    }
 }
 
 - (void)applicationWillTerminate:(NSNotification *)aNotification
 {
     (void)aNotification;
     CGDisplayRemoveReconfigurationCallback(display_reconfigured, NULL);
+    @try {
+        [[NSApplication sharedApplication] removeObserver:self
+                                               forKeyPath:@"effectiveAppearance"
+                                                  context:AppearanceObservationContext];
+    } @catch (NSException * __unused exception) {
+        // Ignore exceptions, which can happen if the observer was never added.
+    }
 }
 
 - (void)applicationDidHide:(NSNotification *)notification
@@ -438,7 +504,6 @@ static GLFWapplicationwillfinishlaunchingfun finish_launching_callback = NULL;
 
 @interface GLFWApplication : NSApplication
 - (void)tick_callback;
-- (void)render_frame_received:(id)displayIDAsID;
 @end
 
 @implementation GLFWApplication
@@ -447,11 +512,6 @@ static GLFWapplicationwillfinishlaunchingfun finish_launching_callback = NULL;
     _glfwDispatchTickCallback();
 }
 
-- (void)render_frame_received:(id)displayIDAsID
-{
-    CGDirectDisplayID displayID = [(NSNumber*)displayIDAsID unsignedIntValue];
-    _glfwDispatchRenderFrame(displayID);
-}
 @end
 
 
@@ -791,10 +851,11 @@ GLFWAPI GLFWapplicationwillfinishlaunchingfun glfwSetApplicationWillFinishLaunch
     return previous;
 }
 
-int _glfwPlatformInit(void)
+int _glfwPlatformInit(bool *supports_window_occlusion)
 {
     @autoreleasepool {
 
+    *supports_window_occlusion = true;
     _glfw.ns.helper = [[GLFWHelper alloc] init];
 
     [NSThread detachNewThreadSelector:@selector(doNothing:)
@@ -815,6 +876,11 @@ int _glfwPlatformInit(void)
     }
 
     [NSApp setDelegate:_glfw.ns.delegate];
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserver:_glfw.ns.delegate
+        selector:@selector(applicationDidActivate:)
+        name:NSWorkspaceDidActivateApplicationNotification
+        object:nil];
     static struct {
         unsigned short virtual_key_code;
         NSEventModifierFlags input_source_switch_modifiers;
@@ -827,7 +893,7 @@ int _glfwPlatformInit(void)
     {
         debug_key("---------------- key down -------------------\n");
         debug_key("%s\n", [[event description] UTF8String]);
-        if (!_glfw.ignoreOSKeyboardProcessing) {
+        if (!_glfw.ignoreOSKeyboardProcessing && !_glfw.keyboard_grabbed) {
             // first check if there is a global menu bar shortcut
             if ([[NSApp mainMenu] performKeyEquivalent:event]) {
                 debug_key("keyDown triggered global menu bar action ignoring\n");
@@ -908,13 +974,16 @@ int _glfwPlatformInit(void)
     if (_glfw.hints.init.ns.chdir)
         changeToResourcesDirectory();
 
-    NSDictionary* defaults = @{
+    [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         // Press and Hold prevents some keys from emitting repeated characters
         @"ApplePressAndHoldEnabled": @NO,
         // Dont generate openFile events from command line arguments
         @"NSTreatUnknownArgumentsAsOpen": @"NO",
-    };
-    [[NSUserDefaults standardUserDefaults] registerDefaults:defaults];
+        // This Tahoe nonsense causes slowdowns in some situations, see for example:
+        // https://issues.chromium.org/issues/452372350 it doesnt affect
+        // autofill via Edit->Autofill
+        @"NSAutoFillHeuristicControllerEnabled" : @NO,
+    }];
 
     NSUserDefaults *apple_settings = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.symbolichotkeys"];
     [apple_settings addObserver:_glfw.ns.helper
@@ -943,10 +1012,46 @@ int _glfwPlatformInit(void)
 
     } // autoreleasepool
 }
+static NSDate*
+get_process_start_time(pid_t pid) {
+    struct kinfo_proc kp;
+    size_t len = sizeof(kp);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) == 0 && len == sizeof(kp)) {
+        struct timeval start_tv = kp.kp_proc.p_starttime;
+        time_t start_sec = start_tv.tv_sec;
+        suseconds_t start_usec = start_tv.tv_usec;
+        NSTimeInterval t = (NSTimeInterval)start_sec + ((NSTimeInterval)start_usec / 1000000.0);
+        return [NSDate dateWithTimeIntervalSince1970:t];
+    }
+    return nil;
+}
 
 void _glfwPlatformTerminate(void)
 {
     @autoreleasepool {
+
+    // Kill the AutoFill helper process that macOS Tahoe starts and fails to
+    // shutdown on application exit, see https://github.com/kovidgoyal/kitty/issues/9299
+    // Only kill helpers that were launched within a few seconds of this process to
+    // avoid killing helpers from other processes. This is obviously not robust
+    // but since Apple cant design its way out of a paper bag, it's the best we
+    // can do.
+    if (application_finished_launching_at != nil) {
+        for (NSRunningApplication *app in [[NSWorkspace sharedWorkspace] runningApplications]) {
+            if ([app.bundleIdentifier isEqualToString:@"com.apple.SafariPlatformSupport.Helper"] &&
+                [[app.localizedName lowercaseString] containsString:@"autofill (kitty)"]) {
+                NSDate *st = get_process_start_time(app.processIdentifier);
+                if (st != nil) {
+                    NSTimeInterval timeDifference = [application_finished_launching_at timeIntervalSinceDate:st];
+                    [st release];
+                    if (fabs(timeDifference) <= 5) [app forceTerminate];
+                }
+            }
+        }
+        [application_finished_launching_at release]; application_finished_launching_at = nil;
+    }
 
     _glfwClearDisplayLinks();
 
@@ -1143,3 +1248,4 @@ void _glfwPlatformUpdateTimer(unsigned long long timer_id, monotonic_t interval,
 }
 
 void _glfwPlatformInputColorScheme(GLFWColorScheme appearance UNUSED) { }
+bool _glfwPlatformGrabKeyboard(bool grab UNUSED) { return true; /* directly uses _glfw.keyboard_grabbed */ }

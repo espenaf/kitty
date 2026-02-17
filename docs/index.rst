@@ -1,7 +1,9 @@
 kitty
 ==========================================================
 
-*The fast, feature-rich, GPU based terminal emulator*
+*If you live in the terminal, kitty is made for YOU!*
+
+The fast, feature-rich, GPU based terminal emulator.
 
 .. toctree::
     :hidden:
@@ -10,6 +12,7 @@ kitty
     overview
     faq
     support
+    sessions
     performance
     changelog
     integrations
@@ -19,7 +22,7 @@ kitty
 
 .. tab:: Fast
 
-   * Uses GPU and SIMD vector CPU instructions for :doc:`best in class <performance>`
+   * Uses GPU and SIMD vector CPU instructions for :doc:`best in class performance <performance>`
    * Uses threaded rendering for :iss:`absolutely minimal latency <2701#issuecomment-636497270>`
    * Performance tradeoffs can be :ref:`tuned <conf-kitty-performance>`
 

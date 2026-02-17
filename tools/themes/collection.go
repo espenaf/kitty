@@ -22,12 +22,12 @@ import (
 	"sync"
 	"time"
 
-	"kitty/tools/cli"
-	"kitty/tools/config"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/subseq"
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/subseq"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
 )
 
 var _ = fmt.Print
@@ -298,6 +298,7 @@ var AllColorSettingNames = map[string]bool{ // {{{
 	"color99":                 true,
 	"cursor":                  true,
 	"cursor_text_color":       true,
+	"cursor_trail_color":      true,
 	"foreground":              true,
 	"inactive_border_color":   true,
 	"inactive_tab_background": true,
@@ -309,7 +310,8 @@ var AllColorSettingNames = map[string]bool{ // {{{
 	"mark2_foreground":        true,
 	"mark3_background":        true,
 	"mark3_foreground":        true,
-	"second_transparent_bg":   true,
+	"scrollbar_handle_color":  true,
+	"scrollbar_track_color":   true,
 	"selection_background":    true,
 	"selection_foreground":    true,
 	"tab_bar_background":      true,
@@ -587,15 +589,18 @@ func (self *Theme) SaveInDir(dirpath string) (err error) {
 	return utils.AtomicUpdateFile(path, bytes.NewReader(utils.UnsafeStringToBytes(code)), 0o644)
 }
 
-func (self *Theme) SaveInConf(config_dir, reload_in, config_file_name string) (err error) {
+func (self *Theme) SaveInFile(config_dir, config_file_name string) (err error) {
 	_ = os.MkdirAll(config_dir, 0o755)
-	path := filepath.Join(config_dir, `current-theme.conf`)
+	path := filepath.Join(config_dir, config_file_name)
 	code, err := self.Code()
 	if err != nil {
 		return err
 	}
-	err = utils.AtomicUpdateFile(path, bytes.NewReader(utils.UnsafeStringToBytes(code)), 0o644)
-	if err != nil {
+	return utils.AtomicUpdateFile(path, bytes.NewReader(utils.UnsafeStringToBytes(code)), 0o644)
+}
+
+func (self *Theme) SaveInConf(config_dir, reload_in, config_file_name string) (err error) {
+	if err = self.SaveInFile(config_dir, `current-theme.conf`); err != nil {
 		return err
 	}
 	confpath := config_file_name
@@ -683,7 +688,7 @@ func ColorSettingsAsEscapeCodes(settings map[string]string) string {
 	set_default_color("selection_foreground", style.DefaultColors.SelectionFg, loop.SELECTION_FG)
 
 	w.WriteString("\033]4")
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		key := "color" + strconv.Itoa(i)
 		val := settings[key]
 		if val != "" {

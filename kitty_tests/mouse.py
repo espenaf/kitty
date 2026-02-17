@@ -79,8 +79,9 @@ class TestMouse(BaseTest):
         def move(x=0, y=0, button=-1, q=None):
             ev(x=x, y=y, button=button)
             if q is not None:
-                s = sel()
-                self.ae(s, q, f'{s!r} != {q!r} after movement to x={x} y={y}')
+                sl = sel()
+                from kitty.window import as_text
+                self.ae(sl, q, f'{sl!r} != {q!r} after movement to x={x} y={y}. Screen contents: {as_text(s)!r}')
 
         def multi_click(x=0, y=0, count=2):
             clear_click_queue = True
@@ -234,6 +235,25 @@ class TestMouse(BaseTest):
         self.ae(sel(), ' 123\n 456')
         release(button=GLFW_MOUSE_BUTTON_RIGHT)
 
+        # line select for wrapped lines in scrollback
+        s.reset()
+        s.draw('ABCDE12345')
+        s.linefeed(), s.carriage_return()
+        s.draw(('X' * s.columns) * (s.lines-1))
+        multi_click(x=1, count=3)
+        self.ae(sel(), 'ABCDE12345')
+        s.reset()
+        s.draw('ABCDE12345')
+        s.linefeed(), s.carriage_return()
+        s.draw('678')
+        s.linefeed(), s.carriage_return()
+        s.draw(('X' * s.columns) * (s.lines-2))
+        multi_click(x=1, y=1, count=3)
+        self.ae(sel(), '678')
+        press(x=2, button=GLFW_MOUSE_BUTTON_RIGHT)
+        release(x=2, button=GLFW_MOUSE_BUTTON_RIGHT)
+        self.ae(sel(), 'ABCDE12345\n678')
+
         # Rectangle select
         init()
         press(x=1, y=1, modifiers=GLFW_MOD_ALT | GLFW_MOD_CONTROL)
@@ -260,6 +280,13 @@ class TestMouse(BaseTest):
         scroll(x=2.6, up=False)
         self.ae(sel(), '3')
         release()
+        # fractional scrolling
+        init()
+        s.fractional_scroll(-0.5)
+        press()
+        move(x=3.6, q='1234')
+        release(x=3.6)
+        self.ae(sel(), '1234')
 
         # extending selections
         init()
@@ -277,3 +304,12 @@ class TestMouse(BaseTest):
         move(x=3.6, y=2, q='abcd')
         press(x=3, y=0, button=GLFW_MOUSE_BUTTON_RIGHT)
         self.ae(sel(), '4567890abcd')
+
+        # blank line select
+        s.reset()
+        s.draw('abcde')
+        s.linefeed(), s.carriage_return()
+        s.linefeed(), s.carriage_return()
+        s.draw('12345')
+        press(x=0, y=0)
+        move(x=2, y=2, q='abcde\n\n12')

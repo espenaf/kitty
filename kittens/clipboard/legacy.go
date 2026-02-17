@@ -11,9 +11,9 @@ import (
 	"os"
 	"strings"
 
-	"kitty/tools/tty"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -110,7 +110,7 @@ func run_plain_text_loop(opts *Options) (err error) {
 			defer tempfile.Close()
 		}
 	}
-	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking)
+	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking, loop.NoInBandResizeNotifications)
 	if err != nil {
 		return
 	}
@@ -139,18 +139,23 @@ func run_plain_text_loop(opts *Options) (err error) {
 
 	buf := make([]byte, 8192)
 	write_one_chunk := func() error {
-		n, err := data_src.Read(buf[:cap(buf)])
-		if err != nil && !errors.Is(err, io.EOF) {
+		orig := enc_writer.last_written_id
+		for enc_writer.last_written_id == orig {
+			n, err := data_src.Read(buf[:cap(buf)])
+			if n > 0 {
+				enc.Write(buf[:n])
+			}
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				enc.Close()
+				send_to_loop("\x1b\\")
+				after_read_from_stdin()
+				return nil
+			}
 			send_to_loop("\x1b\\")
 			return err
-		}
-		if n > 0 {
-			enc.Write(buf[:n])
-		}
-		if errors.Is(err, io.EOF) {
-			enc.Close()
-			send_to_loop("\x1b\\")
-			after_read_from_stdin()
 		}
 		return nil
 	}

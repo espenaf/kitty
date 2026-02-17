@@ -6,11 +6,11 @@ from collections import deque
 from collections.abc import Iterator
 from contextlib import suppress
 from itertools import count
-from typing import Any, Deque, Optional, Union
+from typing import Any, Deque, Sequence, Union
 
 from .fast_data_types import Color, get_options
 from .types import OverlayType, WindowGeometry
-from .typing import EdgeLiteral, TabType, WindowType
+from .typing_compat import EdgeLiteral, TabType, WindowType
 
 WindowOrId = Union[WindowType, int]
 group_id_counter = count(start=1)
@@ -33,6 +33,9 @@ class WindowGroup:
         self.windows: list[WindowType] = []
         self.id = next(group_id_counter)
 
+    def __repr__(self) -> str:
+        return f'WindowGroup(id={self.id}, windows={", ".join(str(w.id) for w in self.windows)})'
+
     def __len__(self) -> int:
         return len(self.windows)
 
@@ -45,6 +48,12 @@ class WindowGroup:
     def __contains__(self, window: WindowType) -> bool:
         for w in self.windows:
             if w is window:
+                return True
+        return False
+
+    def has_window_id(self, wid: int) -> bool:
+        for w in self.windows:
+            if w.id == wid:
                 return True
         return False
 
@@ -90,8 +99,20 @@ class WindowGroup:
     def serialize_state(self) -> dict[str, Any]:
         return {
             'id': self.id,
-            'windows': [w.serialize_state() for w in self.windows]
+            'windows': tuple(w.serialize_state() for w in self.windows),
         }
+
+    def serialize_layout_state(self) -> dict[str, Any]:
+        return {
+            'id': self.id,
+            'window_ids': tuple(w.id for w in self.windows),
+        }
+
+    def unserialize_layout_state(self, window_ids: Sequence[int]) -> None:
+        order_map = {wid: i for i, wid in enumerate(window_ids)}
+        def sort_key(w: WindowType) -> int:
+            return order_map.get(w.id, -1)
+        self.windows.sort(key=sort_key)
 
     def as_simple_dict(self) -> dict[str, Any]:
         return {
@@ -129,7 +150,7 @@ class WindowGroup:
         return get_options().background
 
     @property
-    def geometry(self) -> Optional[WindowGeometry]:
+    def geometry(self) -> WindowGeometry | None:
         if self.windows:
             w = self.windows[-1]
             return w.geometry
@@ -173,6 +194,62 @@ class WindowList:
             'window_groups': [g.serialize_state() for g in self.groups]
         }
 
+    def serialize_layout_state(self) -> dict[str, Any]:
+        return {
+            'active_group_idx': self.active_group_idx,
+            'active_group_history': list(self.active_group_history),
+            'window_groups': [g.serialize_layout_state() for g in self.groups]
+        }
+
+    def unserialize_layout_state(self, state: dict[str, Any], window_id_map: dict[int, int]) -> dict[int, int] | None:
+        if set(window_id_map.values()) != set(self.id_map):
+            # some window in this collection does not correspond to a
+            # serialized window
+            return None
+        ans = {}
+        gmap = {g.id: g for g in self.groups}
+        present_wids_map = {g.id: {w.id for w in g} for g in self.groups}
+
+        def unmapped_group_having_subset_of_windows(wids: Sequence[int]) -> Iterator[WindowGroup]:
+            mapped_wids = set()
+            for wid in wids:
+                new_wid = window_id_map.get(wid)
+                if new_wid is not None:
+                    mapped_wids.add(new_wid)
+            for gid in tuple(gmap):
+                present_wids = present_wids_map[gid]
+                if present_wids.issubset(mapped_wids):
+                    yield gmap.pop(gid)
+                    break
+
+        for wg in state['window_groups']:
+            old_group_id = wg['id']
+            for group in unmapped_group_having_subset_of_windows(wg['window_ids']):
+                ans[old_group_id] = group.id
+        # check that all the groups present were also in the serialized state.
+        # there could have been extra windows/groups in the serialized state,
+        # we ignore them.
+        if len(ans) != len(self.groups):
+            return None
+        gmap = {g.id: g for g in self.groups}
+        groups = []
+        for wg in state['window_groups']:
+            old_group_id = wg['id']
+            if new_group_id := ans.get(old_group_id):
+                groups.append((g := gmap[new_group_id]))
+                new_window_ids = []
+                for old_window_id in wg['window_ids']:
+                    if new_window_id := window_id_map.get(old_window_id):
+                        new_window_ids.append(new_window_id)
+                g.unserialize_layout_state(new_window_ids)
+        self.groups = groups
+        history = []
+        for old_wid in state['active_group_history']:
+            if new_wid := window_id_map.get(old_wid):
+                history.append(new_wid)
+        self.active_group_history = deque(history, 64)
+        return ans
+
     @property
     def active_group_idx(self) -> int:
         return self._active_group_idx
@@ -191,7 +268,7 @@ class WindowList:
                     ans.append(w)
         return ans
 
-    def notify_on_active_window_change(self, old_active_window: Optional[WindowType], new_active_window: Optional[WindowType]) -> None:
+    def notify_on_active_window_change(self, old_active_window: WindowType | None, new_active_window: WindowType | None) -> None:
         if old_active_window is not None:
             old_active_window.focus_changed(False)
         if new_active_window is not None:
@@ -263,14 +340,14 @@ class WindowList:
     def num_groups(self) -> int:
         return len(self.groups)
 
-    def group_for_window(self, x: WindowOrId) -> Optional[WindowGroup]:
+    def group_for_window(self, x: WindowOrId) -> WindowGroup | None:
         q = self.id_map[x] if isinstance(x, int) else x
         for g in self.groups:
             if q in g:
                 return g
         return None
 
-    def group_idx_for_window(self, x: WindowOrId) -> Optional[int]:
+    def group_idx_for_window(self, x: WindowOrId) -> int | None:
         q = self.id_map[x] if isinstance(x, int) else x
         for i, g in enumerate(self.groups):
             if q in g:
@@ -297,24 +374,24 @@ class WindowList:
         return iter(())
 
     @property
-    def active_group(self) -> Optional[WindowGroup]:
+    def active_group(self) -> WindowGroup | None:
         with suppress(Exception):
             return self.groups[self.active_group_idx]
         return None
 
     @property
-    def active_window(self) -> Optional[WindowType]:
+    def active_window(self) -> WindowType | None:
         with suppress(Exception):
             return self.id_map[self.groups[self.active_group_idx].active_window_id]
         return None
 
     @property
-    def active_group_main(self) -> Optional[WindowType]:
+    def active_group_main(self) -> WindowType | None:
         with suppress(Exception):
             return self.id_map[self.groups[self.active_group_idx].main_window_id]
         return None
 
-    def set_active_window_group_for(self, x: WindowOrId, for_keep_focus: Optional[WindowType] = None) -> None:
+    def set_active_window_group_for(self, x: WindowOrId, for_keep_focus: WindowType | None = None) -> None:
         try:
             q = self.id_map[x] if isinstance(x, int) else x
         except KeyError:
@@ -331,15 +408,15 @@ class WindowList:
     def add_window(
         self,
         window: WindowType,
-        group_of: Optional[WindowOrId] = None,
-        next_to: Optional[WindowOrId] = None,
+        group_of: WindowOrId | None = None,
+        next_to: WindowOrId | None = None,
         before: bool = False,
         make_active: bool = True,
         head_of_group: bool = False,
     ) -> WindowGroup:
         self.all_windows.append(window)
         self.id_map[window.id] = window
-        target_group: Optional[WindowGroup] = None
+        target_group: WindowGroup | None = None
 
         if group_of is not None:
             target_group = self.group_for_window(group_of)
@@ -396,14 +473,14 @@ class WindowList:
         if old_active_window is not new_active_window:
             self.notify_on_active_window_change(old_active_window, new_active_window)
 
-    def active_window_in_nth_group(self, n: int, clamp: bool = False) -> Optional[WindowType]:
+    def active_window_in_nth_group(self, n: int, clamp: bool = False) -> WindowType | None:
         if clamp:
             n = max(0, min(n, self.num_groups - 1))
         if 0 <= n < self.num_groups:
             return self.id_map.get(self.groups[n].active_window_id)
         return None
 
-    def active_window_in_group_id(self, group_id: int) -> Optional[WindowType]:
+    def active_window_in_group_id(self, group_id: int) -> WindowType | None:
         for g in self.groups:
             if g.id == group_id:
                 return self.id_map.get(g.active_window_id)
@@ -412,7 +489,7 @@ class WindowList:
     def activate_next_window_group(self, delta: int) -> None:
         self.set_active_group_idx(wrap_increment(self.active_group_idx, self.num_groups, delta))
 
-    def move_window_group(self, by: Optional[int] = None, to_group: Optional[int] = None) -> bool:
+    def move_window_group(self, by: int | None = None, to_group: int | None = None) -> bool:
         if self.active_group_idx < 0 or not self.groups:
             return False
         target = -1
@@ -436,9 +513,11 @@ class WindowList:
         return {gr.id: ((gr is ag and draw_active_borders) or gr.needs_attention) for gr in self.groups}
 
     @property
-    def num_visble_groups(self) -> int:
+    def has_more_than_one_visible_group(self) -> bool:
         ans = 0
         for gr in self.groups:
             if gr.is_visible_in_layout:
                 ans += 1
-        return ans
+                if ans > 1:
+                    return True
+        return False

@@ -313,6 +313,7 @@ def generate_wrappers(glfw_header: str) -> None:
     void* glfwGetX11Display(void)
     unsigned long glfwGetX11Window(GLFWwindow* window)
     void glfwSetPrimarySelectionString(GLFWwindow* window, const char* string)
+    void glfwCocoaCycleThroughOSWindows(bool backwards)
     void glfwCocoaSetWindowChrome(GLFWwindow* window, unsigned int color, bool use_system_color, unsigned int system_color,\
     int background_blur, unsigned int hide_window_decorations, bool show_text_in_titlebar, int color_space, float background_opacity, bool resizable)
     const char* glfwGetPrimarySelectionString(GLFWwindow* window, void)
@@ -323,13 +324,13 @@ def generate_wrappers(glfw_header: str) -> None:
     void glfwWaylandRunWithActivationToken(GLFWwindow *handle, GLFWactivationcallback cb, void *cb_data)
     bool glfwWaylandSetTitlebarColor(GLFWwindow *handle, uint32_t color, bool use_system_color)
     void glfwWaylandRedrawCSDWindowTitle(GLFWwindow *handle)
-    void glfwWaylandSetupLayerShellForNextWindow(const GLFWLayerShellConfig *c)
+    bool glfwWaylandIsWindowFullyCreated(GLFWwindow *handle)
+    bool glfwWaylandBeep(GLFWwindow *handle)
     pid_t glfwWaylandCompositorPID(void)
+    void glfwConfigureMomentumScroller(double friction, double min_velocity, double max_velocity, unsigned timer_interval)
     unsigned long long glfwDBusUserNotify(const GLFWDBUSNotificationData *n, GLFWDBusnotificationcreatedfun callback, void *data)
     void glfwDBusSetUserNotificationHandler(GLFWDBusnotificationactivatedfun handler)
     int glfwSetX11LaunchCommand(GLFWwindow *handle, char **argv, int argc)
-    void glfwSetX11WindowAsDock(int32_t x11_window_id)
-    void glfwSetX11WindowStrut(int32_t x11_window_id, uint32_t dimensions[12])
 '''.splitlines():
         if line:
             functions.append(Function(line.strip(), check_fail=False))
@@ -358,7 +359,7 @@ def generate_wrappers(glfw_header: str) -> None:
 typedef int (* GLFWcocoatextinputfilterfun)(int,int,unsigned int,unsigned long);
 typedef bool (* GLFWapplicationshouldhandlereopenfun)(int);
 typedef bool (* GLFWhandleurlopen)(const char*);
-typedef void (* GLFWapplicationwillfinishlaunchingfun)(void);
+typedef void (* GLFWapplicationwillfinishlaunchingfun)(bool);
 typedef bool (* GLFWcocoatogglefullscreenfun)(GLFWwindow*);
 typedef void (* GLFWcocoarenderframefun)(GLFWwindow*);
 typedef void (*GLFWwaylandframecallbackfunc)(unsigned long long id);

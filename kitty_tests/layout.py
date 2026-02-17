@@ -2,6 +2,8 @@
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
 
 from kitty.config import defaults
+from kitty.fast_data_types import Region
+from kitty.layout.base import lgd
 from kitty.layout.interface import Grid, Horizontal, Splits, Stack, Tall
 from kitty.types import WindowGeometry
 from kitty.window import EdgeWidths
@@ -47,6 +49,12 @@ def create_layout(cls, opts=None, border_width=2):
     ans = cls(1, 1)
     ans.set_active_window_in_os_window = lambda idx: None
     ans.swap_windows_in_os_window = lambda a, b: None
+    orig = ans._set_dimensions
+    def set_dimensions(all_windows):
+        orig(all_windows)
+        # we need a non-zero width and height for central
+        lgd.central = Region((0, 0, 0, 0, 1, 1))
+    ans._set_dimensions = set_dimensions
     return ans
 
 
@@ -87,6 +95,10 @@ def utils(self, q, windows):
 
 
 class TestLayout(BaseTest):
+
+    def setUp(self):
+        super().setUp()
+        self.set_options()
 
     def do_ops_test(self, q):
         windows = create_windows(q)
@@ -154,6 +166,8 @@ class TestLayout(BaseTest):
             windows.set_active_group_idx(i)
             self.ae(i, windows.active_group_idx)
             check_visible()
+
+        # Test
 
     def do_overlay_test(self, q):
         windows = create_windows(q)
@@ -253,7 +267,7 @@ class TestLayout(BaseTest):
         windows[1].set_geometry(WindowGeometry(11, 0, 20, 10, 0, 0))
         windows[2].set_geometry(WindowGeometry(11, 11, 15, 20, 0, 0))
         windows[3].set_geometry(WindowGeometry(16, 11, 20, 20, 0, 0))
-        self.ae(q.neighbors_for_window(windows[0], all_windows), {'left': [], 'right': [2, 3], 'top': [], 'bottom': []})
-        self.ae(q.neighbors_for_window(windows[1], all_windows), {'left': [1], 'right': [], 'top': [], 'bottom': [3, 4]})
-        self.ae(q.neighbors_for_window(windows[2], all_windows), {'left': [1], 'right': [4], 'top': [2], 'bottom': []})
-        self.ae(q.neighbors_for_window(windows[3], all_windows), {'left': [3], 'right': [], 'top': [2], 'bottom': []})
+        self.ae(q.neighbors_for_window(windows[0], all_windows), {'right': [2, 3]})
+        self.ae(q.neighbors_for_window(windows[1], all_windows), {'left': [1], 'bottom': [3, 4]})
+        self.ae(q.neighbors_for_window(windows[2], all_windows), {'left': [1], 'right': [4], 'top': [2]})
+        self.ae(q.neighbors_for_window(windows[3], all_windows), {'left': [3], 'top': [2]})

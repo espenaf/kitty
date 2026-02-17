@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"kitty/tools/utils"
-	"kitty/tools/utils/style"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/style"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -70,18 +70,22 @@ func (self *Color) FromNumber(n uint8) {
 	self.Is_numbered, self.Red = true, n
 }
 
+func as_uint8(x int) uint8 {
+	return uint8(uint(x) & 0xff)
+}
+
 func (self *Color) FromExtended(nums ...int) bool {
 	switch nums[0] {
 	case 5:
 		if len(nums) > 1 {
-			self.Red = uint8(nums[1])
+			self.Red = as_uint8(nums[1])
 			self.Is_numbered = true
 			return true
 		}
 	case 2:
 		if len(nums) > 3 {
 			self.Is_numbered = false
-			self.Red, self.Green, self.Blue = uint8(nums[1]), uint8(nums[2]), uint8(nums[3])
+			self.Red, self.Green, self.Blue = as_uint8(nums[1]), as_uint8(nums[2]), as_uint8(nums[3])
 			return true
 		}
 	}

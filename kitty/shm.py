@@ -11,7 +11,7 @@ import os
 import secrets
 import stat
 import struct
-from typing import Optional, Union
+from typing import Literal, cast
 
 from kitty.fast_data_types import SHM_NAME_MAX, shm_open, shm_unlink
 
@@ -41,7 +41,7 @@ class SharedMemory:
     '''
     _fd: int = -1
     _name: str = ''
-    _mmap: Optional[mmap.mmap] = None
+    _mmap: mmap.mmap | None = None
     _size: int = 0
     size_fmt = '!I'
     num_bytes_for_size = struct.calcsize(size_fmt)
@@ -107,12 +107,12 @@ class SharedMemory:
         return self.mmap.tell()
 
     def seek(self, pos: int, whence: int = os.SEEK_SET) -> None:
-        self.mmap.seek(pos, whence)
+        self.mmap.seek(pos, cast(Literal[0, 1, 2, 3, 4], max(0, min(whence, 4))))
 
     def flush(self) -> None:
         self.mmap.flush()
 
-    def write_data_with_size(self, data: Union[str, bytes]) -> None:
+    def write_data_with_size(self, data: str | bytes) -> None:
         if isinstance(data, str):
             data = data.encode('utf-8')
         sz = struct.pack(self.size_fmt, len(data))

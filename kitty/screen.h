@@ -9,12 +9,15 @@
 #include "vt-parser.h"
 #include "graphics.h"
 #include "monotonic.h"
+#include "line-buf.h"
+#include "history.h"
 
 typedef enum ScrollTypes { SCROLL_LINE = -999999, SCROLL_PAGE, SCROLL_FULL } ScrollType;
 
 typedef struct {
-    bool mLNM, mIRM, mDECTCEM, mDECSCNM, mDECOM, mDECAWM, mDECCOLM, mDECARM, mDECCKM,
-         mBRACKETED_PASTE, mFOCUS_TRACKING, mDECSACE, mHANDLE_TERMIOS_SIGNALS, mINBAND_RESIZE_NOTIFICATION;
+    bool mLNM, mIRM, mDECTCEM, mDECSCNM, mDECOM, mDECAWM, mDECCOLM, mDECARM, mDECCKM, mCOLOR_PREFERENCE_NOTIFICATION,
+         mBRACKETED_PASTE, mFOCUS_TRACKING, mDECSACE, mHANDLE_TERMIOS_SIGNALS, mINBAND_RESIZE_NOTIFICATION,
+         mPASTE_EVENTS;
     MouseTrackingMode mouse_tracking_mode;
     MouseTrackingProtocol mouse_tracking_protocol;
 } ScreenModes;
@@ -85,23 +88,39 @@ typedef struct {
     } last_ime_pos;
 } OverlayLine;
 
+typedef struct ExtraCursor {
+    CursorShape shape;
+    index_type cell;
+} ExtraCursor;
+
+typedef struct ExtraCursors {
+    ExtraCursor *locations;
+    unsigned count, capacity;
+    struct { DynamicColor cursor, text; } color;
+    bool dirty;
+} ExtraCursors;
+
+
 typedef struct {
     PyObject_HEAD
 
-    unsigned int columns, lines, margin_top, margin_bottom, scrolled_by;
+    unsigned int columns, lines, margin_top, margin_bottom, scrolled_by, pixel_scroll_offset_y;
     double pending_scroll_pixels_x, pending_scroll_pixels_y;
     CellPixelSize cell_size;
     OverlayLine overlay_line;
     id_type window_id;
     Selections selections, url_ranges;
     struct {
-        unsigned int cursor_x, cursor_y, scrolled_by;
+        unsigned int scrolled_by;
         index_type lines, columns;
+        color_type cursor_bg;
+        CursorRenderInfo cursor;
     } last_rendered;
-    bool is_dirty, scroll_changed, reload_all_gpu_data;
+    bool is_dirty, scroll_changed, reload_all_gpu_data, sgr_blink_was_used;
     Cursor *cursor;
     Savepoint main_savepoint, alt_savepoint;
     PyObject *callbacks, *test_child;
+    TextCache *text_cache;
     LineBuf *linebuf, *main_linebuf, *alt_linebuf;
     GraphicsManager *grman, *main_grman, *alt_grman;
     HistoryBuf *historybuf;
@@ -133,6 +152,8 @@ typedef struct {
         struct {
             unsigned int redraws_prompts_at_all: 1;
             unsigned int uses_special_keys_for_cursor_movement: 1;
+            unsigned int supports_click_events: 1;
+            unsigned int relative_click_events: 1;
         };
         unsigned int val;
     } prompt_settings;
@@ -165,10 +186,16 @@ typedef struct {
         LineBuf *linebuf;
         GraphicsManager *grman;
         Selections selections, url_ranges;
+        ExtraCursors extra_cursors;
     } paused_rendering;
     CharsetState charset;
+    ListOfChars *lc;
+    monotonic_t parsing_at;
+    ExtraCursors extra_cursors;
 } Screen;
 
+#define pixel_scroll_enabled(screen) (OPT(pixel_scroll) && !screen->paused_rendering.expires_at && screen->linebuf == screen->main_linebuf)
+#define render_lines_for_screen(screen) (screen->lines + pixel_scroll_enabled(screen))
 
 void screen_align(Screen*);
 void screen_restore_cursor(Screen *);
@@ -179,7 +206,7 @@ void screen_save_modes(Screen *);
 void screen_save_mode(Screen *, unsigned int);
 bool write_escape_code_to_child(Screen *self, unsigned char which, const char *data);
 void screen_cursor_position(Screen*, unsigned int, unsigned int);
-void screen_cursor_back(Screen *self, unsigned int count/*=1*/, int move_direction/*=-1*/);
+void screen_cursor_move(Screen *self, unsigned int count/*=1*/, int move_direction/*=-1*/, bool allow_move_to_previous_line);
 void screen_erase_in_line(Screen *, unsigned int, bool);
 void screen_erase_in_display(Screen *, unsigned int, bool);
 void screen_draw_text(Screen *self, const uint32_t *chars, size_t num_chars);
@@ -224,6 +251,7 @@ void screen_pop_colors(Screen *, unsigned int);
 void screen_report_color_stack(Screen *);
 void screen_handle_kitty_dcs(Screen *, const char *callback_name, PyObject *cmd);
 void set_title(Screen *self, PyObject*);
+void osc_context(Screen *self, PyObject *ctx);
 void desktop_notify(Screen *self, unsigned int, PyObject*);
 void set_icon(Screen *self, PyObject*);
 void set_dynamic_color(Screen *self, unsigned int code, PyObject*);
@@ -244,6 +272,7 @@ bool screen_has_selection(Screen*);
 bool screen_invert_colors(Screen *self);
 void screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE, bool cursor_has_moved);
 bool screen_is_cursor_visible(const Screen *self);
+unsigned screen_multi_cursor_count(const Screen *self);
 bool screen_selection_range_for_line(Screen *self, index_type y, index_type *start, index_type *end);
 bool screen_selection_range_for_word(Screen *self, const index_type x, const index_type y, index_type *, index_type *, index_type *start, index_type *end, bool);
 void screen_start_selection(Screen *self, index_type x, index_type y, bool, bool, SelectionExtendMode);
@@ -252,18 +281,21 @@ typedef struct SelectionUpdate {
 } SelectionUpdate;
 void screen_update_selection(Screen *self, index_type x, index_type y, bool in_left_half, SelectionUpdate upd);
 bool screen_history_scroll(Screen *self, int amt, bool upwards);
+void screen_history_scroll_to_absolute(Screen *self, double target_scrolled_by);
+bool screen_apply_pixel_scroll(Screen *self, double delta_pixels);
 PyObject* as_text_history_buf(HistoryBuf *self, PyObject *args, ANSIBuf *output);
 Line* screen_visual_line(Screen *self, index_type y);
 void screen_mark_url(Screen *self, index_type start_x, index_type start_y, index_type end_x, index_type end_y);
 void set_active_hyperlink(Screen*, char*, char*);
 hyperlink_id_type screen_mark_hyperlink(Screen*, index_type, index_type);
 void screen_handle_graphics_command(Screen *self, const GraphicsCommand *cmd, const uint8_t *payload);
+void screen_handle_multicell_command(Screen *self, const MultiCellCommand *cmd, const uint8_t *payload);
 bool screen_open_url(Screen*);
 bool screen_set_last_visited_prompt(Screen*, index_type);
 bool screen_select_cmd_output(Screen*, index_type);
 void screen_dirty_sprite_positions(Screen *self);
 void screen_rescale_images(Screen *self);
-void screen_report_size(Screen *, unsigned int which);
+void screen_report_size(Screen *, unsigned which, unsigned modifier);
 void screen_manipulate_title_stack(Screen *, unsigned int op, unsigned int which);
 bool screen_is_overlay_active(Screen *self);
 void screen_update_overlay_text(Screen *self, const char *utf8_text);
@@ -271,9 +303,11 @@ void screen_set_key_encoding_flags(Screen *self, uint32_t val, uint32_t how);
 void screen_push_key_encoding_flags(Screen *self, uint32_t val);
 void screen_pop_key_encoding_flags(Screen *self, uint32_t num);
 uint8_t screen_current_key_encoding_flags(Screen *self);
+void screen_modify_other_keys(Screen *self, unsigned, unsigned);
 void screen_report_key_encoding_flags(Screen *self);
 int screen_detect_url(Screen *screen, unsigned int x, unsigned int y);
 int screen_cursor_at_a_shell_prompt(const Screen *);
+bool screen_prompt_supports_click_events(const Screen *, bool *is_relative);
 bool screen_fake_move_cursor_to_position(Screen *, index_type x, index_type y);
 bool screen_send_signal_for_key(Screen *, char key);
 bool get_line_edge_colors(Screen *self, color_type *left, color_type *right);
@@ -281,6 +315,7 @@ bool parse_sgr(Screen *screen, const uint8_t *buf, unsigned int num, const char 
 bool screen_pause_rendering(Screen *self, bool pause, int for_in_ms);
 void screen_check_pause_rendering(Screen *self, monotonic_t now);
 void screen_designate_charset(Screen *self, uint32_t which, uint32_t as);
+void screen_multi_cursor(Screen *self, int queried_shape, int *params, unsigned num_params);
 #define DECLARE_CH_SCREEN_HANDLER(name) void screen_##name(Screen *screen);
 DECLARE_CH_SCREEN_HANDLER(bell)
 DECLARE_CH_SCREEN_HANDLER(backspace)

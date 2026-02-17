@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 type stream_response struct {
@@ -27,7 +27,11 @@ func is_stream_response(serialized_response []byte) bool {
 
 func do_chunked_io(io_data *rc_io_data) (serialized_response []byte, err error) {
 	serialized_response = make([]byte, 0)
-	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors)
+	// we cant do inbandresize notification as in the --no-response case the
+	// command can cause a resize and the loop can quit before the notification
+	// arrives, leading to the notification being sent to whatever is executed
+	// after us. Similarly no focus tracking.
+	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoInBandResizeNotifications, loop.NoFocusTracking)
 	if io_data.on_key_event != nil {
 		lp.FullKeyboardProtocol()
 	} else {

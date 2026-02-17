@@ -5,8 +5,9 @@ import re
 import sys
 from binascii import hexlify, unhexlify
 from contextlib import suppress
-from typing import Dict, Optional, Type
+from typing import get_args
 
+from kitty.conf.utils import OSNames, os_name
 from kitty.constants import appname, str_version
 from kitty.options.types import Options
 from kitty.terminfo import names
@@ -29,7 +30,7 @@ class Query:
     def query_code(self) -> str:
         return f"\x1bP+q{self.encoded_query_name}\x1b\\"
 
-    def decode_response(self, res: bytes) -> str:
+    def decode_response(self, res: bytes | memoryview) -> str:
         return unhexlify(res).decode('utf-8')
 
     def more_needed(self, buffer: bytes) -> bool:
@@ -51,10 +52,10 @@ class Query:
         raise NotImplementedError()
 
 
-all_queries: Dict[str, Type[Query]] = {}
+all_queries: dict[str, type[Query]] = {}
 
 
-def query(cls: Type[Query]) -> Type[Query]:
+def query(cls: type[Query]) -> type[Query]:
     all_queries[cls.name] = cls
     return cls
 
@@ -226,7 +227,17 @@ class ClipboardControl(Query):
         return ' '.join(opts.clipboard_control)
 
 
-def get_result(name: str, window_id: int, os_window_id: int) -> Optional[str]:
+@query
+class OSName(Query):
+    name: str = 'os_name'
+    help_text: str = f'The name of the OS the terminal is running on. kitty returns values: {", ".join(sorted(get_args(OSNames)))}'
+
+    @staticmethod
+    def get_result(opts: Options, window_id: int, os_window_id: int) -> OSNames:
+        return os_name()
+
+
+def get_result(name: str, window_id: int, os_window_id: int) -> str | None:
     from kitty.fast_data_types import get_options
     q = all_queries.get(name)
     if q is None:

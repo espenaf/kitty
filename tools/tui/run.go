@@ -4,7 +4,7 @@ package tui
 
 import (
 	"fmt"
-	"kitty"
+	"github.com/kovidgoyal/kitty"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,15 +13,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/process"
 	"golang.org/x/sys/unix"
 
-	"kitty/tools/config"
-	"kitty/tools/tty"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/shell_integration"
-	"kitty/tools/utils"
-	"kitty/tools/utils/shlex"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/shell_integration"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/shlex"
 )
 
 var _ = fmt.Print
@@ -30,7 +30,7 @@ type KittyOpts struct {
 	Shell, Shell_integration string
 }
 
-func read_relevant_kitty_opts(path string) KittyOpts {
+func read_relevant_kitty_opts() KittyOpts {
 	ans := KittyOpts{Shell: kitty.KittyConfigDefaults.Shell, Shell_integration: kitty.KittyConfigDefaults.Shell_integration}
 	handle_line := func(key, val string) error {
 		switch key {
@@ -41,8 +41,7 @@ func read_relevant_kitty_opts(path string) KittyOpts {
 		}
 		return nil
 	}
-	cp := config.ConfigParser{LineHandler: handle_line}
-	_ = cp.ParseFiles(path)
+	config.ReadKittyConfig(handle_line)
 	if ans.Shell == "" {
 		ans.Shell = kitty.KittyConfigDefaults.Shell
 	}
@@ -63,7 +62,7 @@ func get_effective_ksi_env_var(x string) string {
 }
 
 var relevant_kitty_opts = sync.OnceValue(func() KittyOpts {
-	return read_relevant_kitty_opts(filepath.Join(utils.ConfigDir(), "kitty.conf"))
+	return read_relevant_kitty_opts()
 })
 
 func get_shell_from_kitty_conf() (shell string) {
@@ -135,33 +134,49 @@ func get_shell_name(argv0 string) (ans string) {
 	return strings.TrimPrefix(ans, "-")
 }
 
-func rc_modification_allowed(ksi string) bool {
-	for _, x := range strings.Split(ksi, " ") {
+func rc_modification_allowed(ksi string) (allowed bool, set_ksi_env_var bool) {
+	allowed = ksi != ""
+	set_ksi_env_var = true
+	for x := range strings.SplitSeq(ksi, " ") {
 		switch x {
-		case "disabled", "no-rc":
-			return false
+		case "disabled":
+			allowed = false
+			set_ksi_env_var = false
+		case "no-rc":
+			allowed = false
 		}
 	}
-	return ksi != ""
+	return
+}
+
+func copy_os_env_as_dict() map[string]string {
+	oenv := os.Environ()
+	env := make(map[string]string, len(oenv))
+	for _, x := range oenv {
+		if k, v, found := strings.Cut(x, "="); found {
+			env[k] = v
+		}
+	}
+	return env
 }
 
 func RunShell(shell_cmd []string, shell_integration_env_var_val, cwd string) (err error) {
 	shell_name := get_shell_name(shell_cmd[0])
 	var shell_env map[string]string
-	if rc_modification_allowed(shell_integration_env_var_val) && shell_integration.IsSupportedShell(shell_name) {
-		oenv := os.Environ()
-		env := make(map[string]string, len(oenv))
-		for _, x := range oenv {
-			if k, v, found := strings.Cut(x, "="); found {
-				env[k] = v
+	if shell_integration.IsSupportedShell(shell_name) {
+		rc_mod_allowed, set_ksi_env_var := rc_modification_allowed(shell_integration_env_var_val)
+		if rc_mod_allowed {
+			// KITTY_SHELL_INTEGRATION is always set by this function
+			argv, env, err := shell_integration.Setup(shell_name, shell_integration_env_var_val, shell_cmd, copy_os_env_as_dict())
+			if err != nil {
+				return err
 			}
+			shell_cmd = argv
+			shell_env = env
+		} else if set_ksi_env_var {
+			shell_env = copy_os_env_as_dict()
+			shell_env["KITTY_SHELL_INTEGRATION"] = shell_integration_env_var_val
 		}
-		argv, env, err := shell_integration.Setup(shell_name, shell_integration_env_var_val, shell_cmd, env)
-		if err != nil {
-			return err
-		}
-		shell_cmd = argv
-		shell_env = env
 	}
 	exe := shell_cmd[0]
 	if runtime.GOOS == "darwin" && (os.Getenv("KITTY_RUNNING_SHELL_INTEGRATION_TEST") != "1" || os.Getenv("KITTY_RUNNING_BASH_INTEGRATION_TEST") != "") {
@@ -205,10 +220,8 @@ func RunCommandRestoringTerminalToSaneStateAfter(cmd []string) {
 			defer func() {
 				_, _ = term.WriteString(strings.Join([]string{
 					loop.RESTORE_PRIVATE_MODE_VALUES,
-					"\x1b[=u",                      // reset kitty keyboard protocol to legacy
-					"\x1b[1 q",                     // blinking block cursor
-					loop.DECTCEM.EscapeCodeToSet(), // cursor visible
-					"\x1b]112\a",                   // reset cursor color
+					"\x1b[=u", // reset kitty keyboard protocol to legacy
+					"\x1bP@kitty-restore-cursor-appearance|\a",
 				}, ""))
 				_ = term.Tcsetattr(tty.TCSANOW, &state_before)
 				term.Close()
@@ -217,17 +230,17 @@ func RunCommandRestoringTerminalToSaneStateAfter(cmd []string) {
 			defer term.Close()
 		}
 	}
-	func() {
-		if err = c.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, cmd[0], "failed to start with error:", err)
-			return
-		}
-		// Ignore SIGINT as the kernel tends to send it to us as well as the
-		// subprocess on Ctrl+C
-		signal.Ignore(os.Interrupt)
-		defer signal.Reset(os.Interrupt)
-		err = c.Wait()
-	}()
+	// Ignore SIGINT as the kernel tends to send it to us as well as the
+	// subprocess on Ctrl+C. We cant use signal.Ignore as it doesnt reset
+	// sigprocmask so subsequent unix.Exec will inherit blocked SIGINT
+	ignore_sigint_channel := make(chan os.Signal, 512)
+	if err = c.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, cmd[0], "failed to start with error:", err)
+		return
+	}
+	signal.Notify(ignore_sigint_channel, os.Interrupt)
+	err = c.Wait()
+	signal.Reset(os.Interrupt)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, cmd[0], "failed with error:", err)
 	}

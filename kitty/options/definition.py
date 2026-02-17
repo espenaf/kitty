@@ -7,6 +7,7 @@ import string
 
 from kitty.conf.types import Action, Definition
 from kitty.constants import website_url
+from kitty.options.utils import pointer_shape_names
 
 definition = Definition(
     'kitty',
@@ -19,6 +20,7 @@ definition.add_deprecation('deprecated_hide_window_decorations_aliases', 'x11_hi
 definition.add_deprecation('deprecated_macos_show_window_title_in_menubar_alias', 'macos_show_window_title_in_menubar')
 definition.add_deprecation('deprecated_send_text', 'send_text')
 definition.add_deprecation('deprecated_adjust_line_height', 'adjust_line_height', 'adjust_column_width', 'adjust_baseline')
+definition.add_deprecation('deprecated_scrollback_indicator_opacity', 'scrollback_indicator_opacity')
 
 agr = definition.add_group
 egr = definition.end_group
@@ -182,6 +184,7 @@ For example::
 
     modify_font underline_position -2
     modify_font underline_thickness 150%
+    modify_font strikethrough_thickness 200%
     modify_font strikethrough_position 2px
 
 Additionally, you can modify the size of the cell in which each font glyph is
@@ -199,7 +202,7 @@ might cause rendering artifacts, so use with care.
 ''')
 
 opt('box_drawing_scale', '0.001, 1, 1.5, 2',
-    option_type='box_drawing_scale',
+    option_type='box_drawing_scale', ctype='!box_drawing_scale',
     long_text='''
 The sizes of the lines used for the box drawing Unicode characters. These values
 are in pts. They will be scaled by the monitor DPI to arrive at a pixel value.
@@ -208,15 +211,28 @@ lines.
 '''
     )
 
-opt('undercurl_style', 'thin-sparse',
+opt('undercurl_style', 'thin-sparse', ctype='undercurl_style',
     choices=('thin-sparse', 'thin-dense', 'thick-sparse', 'thick-dense'),
     long_text='''
 The style with which undercurls are rendered. This option takes the form
 :code:`(thin|thick)-(sparse|dense)`. Thin and thick control the thickness of the
 undercurl. Sparse and dense control how often the curl oscillates. With sparse
-the curl will peak once per character, with dense twice.
+the curl will peak once per character, with dense twice. Changing this
+option dynamically via reloading the config or remote control is undefined.
 '''
     )
+
+
+opt('underline_exclusion', '1', option_type='underline_exclusion', ctype='!underline_exclusion', long_text='''
+By default kitty renders gaps in underlines when they overlap with descenders
+(the parts of letters below the baseline, such as for y, q, p etc.). This option
+controls the thickness of the gaps. It can be either a unitless number in which
+case it is a fraction of the underline thickness as specified in the font or
+it can have a suffix of :code:`px` for pixels or :code:`pt` for points. Set to zero
+to disable the gaps. Changing this option dynamically via reloading the config or remote
+control is undefined.
+''')
+
 
 opt('text_composition_strategy', 'platform',
     ctype='!text_composition_strategy',
@@ -251,21 +267,32 @@ Then adjust the second parameter until it looks good. Then switch to a light the
 and adjust the first parameter until the perceived thickness matches the dark theme.
 ''')
 
-opt('text_fg_override_threshold', 0, option_type='float', long_text='''
-The minimum accepted difference in luminance between the foreground and background
-color, below which kitty will override the foreground color. It is percentage
-ranging from :code:`0` to :code:`100`. If the difference in luminance of the
+opt('text_fg_override_threshold', '0', option_type='text_fg_override_threshold', long_text='''
+A setting to prevent low contrast between foreground and background colors.
+Useful when working with applications that use colors that do not contrast
+well with your preferred color scheme. The default value is :code:`0`, which means no color overriding is performed.
+There are two modes of operation:
+
+A value with the suffix :code:`ratio` represents the minimum accepted contrast ratio between the foreground and background color.
+Possible values range from :code:`0.0 ratio` to :code:`21.0 ratio`.
+For example, to meet :link:`WCAG level AA <https://en.wikipedia.org/wiki/Web_Content_Accessibility_Guidelines>`
+a value of :code:`4.5 ratio` can be provided.
+The algorithm is implemented using :link:`HSLuv <https://www.hsluv.org/>` which enables it to change
+the perceived lightness of a color just as much as needed without really changing its hue and saturation.
+
+A value with the suffix :code:`%` represents the minimum accepted difference in luminance
+between the foreground and background color, below which kitty will override the foreground color.
+It is percentage ranging from :code:`0 %` to :code:`100 %`. If the difference in luminance of the
 foreground and background is below this threshold, the foreground color will be set
-to white if the background is dark or black if the background is light. The default
-value is :code:`0`, which means no overriding is performed. Useful when working with applications
-that use colors that do not contrast well with your preferred color scheme.
+to white if the background is dark or black if the background is light.
 
 WARNING: Some programs use characters (such as block characters) for graphics
 display and may expect to be able to set the foreground and background to the
-same color (or similar colors).  If you see unexpected stripes, dots, lines,
+same color (or similar colors). If you see unexpected stripes, dots, lines,
 incorrect color, no color where you expect color, or any kind of graphic
 display problem try setting :opt:`text_fg_override_threshold` to :code:`0` to
-see if this is the cause of the problem.
+see if this is the cause of the problem or consider using the :code:`ratio` mode of operation
+described above instead of the :code:`%` mode of operation.
 ''')
 
 egr()  # }}}
@@ -315,7 +342,7 @@ cursor shape to :code:`beam` at shell prompts. You can avoid this by setting
 opt('cursor_shape_unfocused', 'hollow', option_type='to_cursor_unfocused_shape', ctype='int', long_text='''
 Defines the text cursor shape when the OS window is not focused. The unfocused
 cursor shape can be one of :code:`block`, :code:`beam`, :code:`underline`,
-:code:`hollow`.
+:code:`hollow` and :code:`unchanged` (leave the cursor shape as it is).
 ''')
 
 opt('cursor_beam_thickness', '1.5',
@@ -338,20 +365,68 @@ it will go from opaque to transparent and then back again over the next half. Yo
 different easing functions for the two halves, for example: :code:`-1 linear ease-out`. kitty
 supports all the :link:`CSS easing functions <https://developer.mozilla.org/en-US/docs/Web/CSS/easing-function>`.
 Note that turning on animations uses extra power as it means the screen is redrawn multiple times
-per blink interval. See also, :opt:`cursor_stop_blinking_after`.
-'''
-    )
+per blink interval. See also, :opt:`cursor_stop_blinking_after`. This setting also controls blinking
+text, which blinks in exact rhythm with the cursor.
+''')
 
 opt('cursor_stop_blinking_after', '15.0',
     option_type='positive_float', ctype='time',
     long_text='''
 Stop blinking cursor after the specified number of seconds of keyboard
-inactivity. Set to zero to never stop blinking.
-'''
-    )
+inactivity. Set to zero to never stop blinking. This setting also controls
+blinking text, which blinks in exact rhythm with the cursor.
+''')
+
+opt('cursor_trail', '0',
+    option_type='positive_int', ctype='time-ms',
+    long_text='''
+Set this to a value larger than zero to enable a "cursor trail" animation.
+This is an animation that shows a "trail" following the movement of the text cursor.
+It makes it easy to follow large cursor jumps and makes for a cool visual effect
+of the cursor zooming around the screen. The actual value of this option
+controls when the animation is triggered. It is a number of milliseconds. The
+trail animation only follows cursors that have stayed in their position for longer
+than the specified number of milliseconds. This prevents trails from appearing
+for cursors that rapidly change their positions during UI updates in complex applications.
+See :opt:`cursor_trail_decay` to control the animation speed and :opt:`cursor_trail_start_threshold`
+to control when a cursor trail is started.
+''')
+
+opt('cursor_trail_decay', '0.1 0.4',
+    option_type='cursor_trail_decay',
+    ctype='!cursor_trail_decay',
+    long_text='''
+Controls the decay times for the cursor trail effect when the :opt:`cursor_trail`
+is enabled. This option accepts two positive float values specifying the
+fastest and slowest decay times in seconds. The first value corresponds to the
+fastest decay time (minimum), and the second value corresponds to the slowest
+decay time (maximum). The second value must be equal to or greater than the
+first value. Smaller values result in a faster decay of the cursor trail.
+Adjust these values to control how quickly the cursor trail fades away.
+''')
+
+opt('cursor_trail_start_threshold', '2',
+    option_type='positive_int', ctype='int',
+    long_text='''
+Set the distance threshold for starting the cursor trail. This option accepts a
+positive integer value that represents the minimum number of cells the
+cursor must move before the trail is started. When the cursor moves less than
+this threshold, the trail is skipped, reducing unnecessary cursor trail
+animation.
+''')
+
+opt('cursor_trail_color', 'none',
+    option_type='to_color_or_none',
+    ctype='!cursor_trail_color',
+    long_text='''
+Set the color of the cursor trail when :opt:`cursor_trail` is enabled.
+If set to 'none' (the default), the cursor trail will use the cursor's
+background color. Otherwise, specify a color value (e.g., #ff0000 for red,
+or a named color like 'red'). This allows you to customize the appearance
+of the cursor trail independently of the cursor color.
+''')
 
 egr()  # }}}
-
 
 # scrollback {{{
 agr('scrollback', 'Scrollback')
@@ -368,13 +443,81 @@ is changed it will only affect newly created windows, not existing ones.
 '''
     )
 
-opt('scrollback_indicator_opacity', '1.0',
-    option_type='unit_float', ctype='float', long_text='''
-The opacity of the scrollback indicator which is a small colored rectangle that moves
-along the right hand side of the window as you scroll, indicating what fraction you
-have scrolled. The default is one which means fully opaque, aka visible.
-Set to a value between zero and one to make the indicator less visible.''')
+opt('scrollbar', 'scrolled', ctype='scrollbar', choices=(
+    'scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered'), long_text='''\
+Control when the scrollbar is displayed.
 
+:code:`scrolled`
+    means when the scrolling backwards has started.
+:code:`hovered`
+    means when the mouse is hovering on the right edge of the window.
+:code:`scrolled-and-hovered`
+    means when the mouse is over the scrollbar region *and* scrolling backwards has started.
+:code:`always`
+    means whenever any scrollback is present
+:code:`never`
+    means disable the scrollbar.
+''')
+
+opt('scrollbar_interactive', 'yes', option_type='to_bool', ctype='bool', long_text='''
+If disabled, the scrollbar will not be controllable via the mouse and all mouse events
+will pass through the scrollbar.''')
+
+opt('scrollbar_jump_on_click', 'yes', option_type='to_bool', ctype='bool', long_text='''
+When enabled clicking in the scrollbar track will cause the scroll position to
+jump to the clicked location, otherwise the scroll position will only move
+towards the position by a single screenful, which is how traditional scrollbars behave.''')
+
+opt('scrollbar_width', '0.5', option_type='positive_float', ctype='float', long_text='''
+The width of the scroll bar in units of cell width.
+''')
+
+opt('scrollbar_hover_width', '1', option_type='positive_float', ctype='float', long_text='''
+The width of the scroll bar when the mouse is hovering over it, in units of cell width.
+''')
+
+opt('scrollbar_handle_opacity', '0.5', option_type='positive_float', ctype='float', long_text='''
+The opacity of the scrollbar handle, 0 being fully transparent and 1 being full opaque.
+''')
+
+opt('scrollbar_radius', '0.3', option_type='positive_float', ctype='float', long_text='''
+The radius (curvature) of the scrollbar handle in units of cell width. Should be less than
+:opt:`scrollbar_width`.
+''')
+
+opt('scrollbar_gap', '0.1', option_type='positive_float', ctype='float', long_text='''
+The gap between the scrollbar and the window edge in units of cell width.
+''')
+
+opt('scrollbar_min_handle_height', '1', option_type='positive_float', ctype='float', long_text='''
+The minimum height of the scrollbar handle in units of cell height. Prevents the handle
+from becoming too small when there is a lot of scrollback.''')
+
+opt('scrollbar_hitbox_expansion', '0.25', option_type='positive_float', ctype='float', long_text='''
+The extra area around the handle to allow easier grabbing of the scollbar in units of cell width.''')
+
+opt('scrollbar_track_opacity', '0', option_type='positive_float', ctype='float', long_text='''
+The opacity of the scrollbar track, 0 being fully transparent and 1 being full opaque.
+''')
+
+opt('scrollbar_track_hover_opacity', '0.1', option_type='positive_float', ctype='float', long_text='''
+The opacity of the scrollbar track when the mouse is over the scrollbar,
+0 being fully transparent and 1 being full opaque.
+''')
+
+opt('scrollbar_handle_color', 'foreground', option_type='scrollbar_color', ctype='uint', long_text='''
+The color of the scrollbar handle. A value of :code:`foreground` means to use
+the current foreground text color, a value of :code:`selection_background` means to
+use the current selection background color. Also, you can use an
+arbitrary color, such as :code:`#12af59` or :code:`red`.
+''')
+
+opt('scrollbar_track_color', 'foreground', option_type='scrollbar_color', ctype='uint', long_text='''
+The color of the scrollbar track. A value of :code:`foreground` means to use
+the current foreground text color, a value of :code:`selection_background` means to
+use the current selection background color. Also, you can use an
+arbitrary color, such as :code:`#12af59` or :code:`red`.
+''')
 
 opt('scrollback_pager', 'less --chop-long-lines --RAW-CONTROL-CHARS +INPUT_LINE_NUMBER',
     option_type='to_cmdline',
@@ -387,6 +530,14 @@ representing which line should be at the top of the screen. Similarly
 CURSOR_LINE and CURSOR_COLUMN will be replaced by the current cursor position or
 set to 0 if there is no cursor, for example, when showing the last command
 output.
+
+If you would rather use neovim to view the scrollback, use something like this::
+
+    scrollback_pager nvim --cmd 'set eventignore=FileType' +'nnoremap q ZQ' +'call nvim_open_term(0, {})' +'set nomodified nolist' +'$' -
+
+The above works for neovim 0.12 and newer. There is also a dedicated plugin
+:link:`kitty-scrollback.nvim <https://github.com/mikesmithgh/kitty-scrollback.nvim>`
+you can use with more features that works with older neovim as well.
 '''
     )
 
@@ -438,6 +589,23 @@ only used for high precision scrolling devices on platforms such as macOS and
 Wayland. Use negative numbers to change scroll direction.
 '''
     )
+
+opt('pixel_scroll', 'yes', option_type='to_bool', ctype='bool', long_text='''
+Enable per-pixel scrolling, in the kitty scrollback buffer, when using high precision
+input devices (for example touchpads). When enabled, kitty's own scrollback will move
+by sub-line increments instead of only whole lines. This does not affect applications
+running inside the terminal (for example full-screen TUIs) that handle scrolling
+themselves.
+''')
+
+opt('momentum_scroll', '0.96', option_type='unit_float', ctype='float', long_text='''
+The amount of friction to apply to slow down momentum (inertial) scrolling. A number
+from 0 to 1, with 0 meaning no momentum scrolling and 1 meaning infinite scrolling.
+Note that this setting only applies on platforms such as Wayland, that do not provide
+native momentum scrolling. On macOS, the native OS based momentum scrolling is used.
+Also, momentum scrolling only applies to "finger" based devices such as touchpads
+and touchscreens. Changes to this setting only take effect after a kitty restart.
+''')
 egr()  # }}}
 
 
@@ -446,13 +614,50 @@ agr('mouse', 'Mouse')
 
 opt('mouse_hide_wait', '3.0',
     macos_default='0.0',
-    option_type='float', ctype='time',
+    option_type='mouse_hide_wait', ctype='!mouse_hide_wait',
     long_text='''
 Hide mouse cursor after the specified number of seconds of the mouse not being
 used. Set to zero to disable mouse cursor hiding. Set to a negative value to
 hide the mouse cursor immediately when typing text. Disabled by default on macOS
 as getting it to work robustly with the ever-changing sea of bugs that is Cocoa
 is too much effort.
+
+By default, once the cursor is hidden, it is immediately unhidden on any
+further mouse events.
+
+Two formats are supported:
+ - :code:`<hide-wait>`
+ - :code:`<hide-wait> <unhide-wait> <unhide-threshold> <scroll-unhide>`
+
+To change the unhide behavior, the optional parameters :code:`<unhide-wait>`,
+:code:`<unhide-threshold>`, and :code:`<scroll-unhide>` may be set.
+
+:code:`<unhide-wait>`
+    Waits for the specified number of seconds after mouse events before unhiding the
+    mouse cursor. Set to zero to unhide mouse cursor immediately on mouse activity.
+    This is useful to prevent the mouse cursor from unhiding on accidental swipes on
+    the trackpad.
+
+:code:`<unhide-threshold>`
+    Sets the threshold of mouse activity required to unhide the mouse cursor, when
+    the <unhide-wait> option is non-zero. When <unhide-wait> is zero, this has no
+    effect.
+
+    For example, if :code:`<unhide-threshold>` is 40 and :code:`<unhide-wait>` is 2.5, when kitty
+    detects a mouse event, it records the number of mouse events in the next 2.5
+    seconds, and checks if that exceeds 40 * 2.5 = 100. If it does, then the mouse
+    cursor is unhidden, otherwise nothing happens.
+
+:code:`<scroll-unhide>`
+    Controls what mouse events may unhide the mouse cursor. If enabled, both scroll
+    and movement events may unhide the cursor. If disabled, only mouse movements can
+    unhide the cursor.
+
+Examples of valid values:
+ - :code:`0.0`
+ - :code:`1.0`
+ - :code:`-1.0`
+ - :code:`0.1 3.0 40 yes`
 '''
     )
 
@@ -521,7 +726,8 @@ opt('underline_hyperlinks', 'hover', choices=('hover', 'always', 'never'),
     ctype='underline_hyperlinks', long_text='''
 Control how hyperlinks are underlined. They can either be underlined on mouse
 :code:`hover`, :code:`always` (i.e. permanently underlined) or :code:`never` which means
-that kitty will not apply any underline styling to hyperlinks.
+that kitty will not apply any underline styling to hyperlinks. Note that the value of :code:`always`
+only applies to real (OSC 8) hyperlinks not text that is detected to be a URL on mouse hover.
 Uses the :opt:`url_style` and :opt:`url_color` settings for the underline style. Note
 that reloading the config and changing this value to/from :code:`always` will only
 affect text subsequently received by kitty.
@@ -548,10 +754,21 @@ clipboard.
 '''
     )
 
+opt('clear_selection_on_clipboard_loss', 'no', option_type='to_bool', long_text='''
+When the contents of the clipboard no longer reflect the current selection, clear it.
+This is primarily useful on platforms such as Linux where selecting text automatically
+copies it to a special "primary selection" clipboard or if you have :opt:`copy_on_select`
+set to :code:`clipboard`.
+
+Note that on macOS the system does not provide notifications when the clipboard owner
+is changed, so there, copying to clipboard in a non-kitty application will not clear
+selections even if :opt:`copy_on_select` is enabled.
+''')
+
 opt('paste_actions', 'quote-urls-at-prompt,confirm',
     option_type='paste_actions',
     long_text='''
-A comma separated list of actions to take when pasting text into the terminal.
+A comma separated list of actions to take when pasting or dropping text into the terminal.
 The supported paste actions are:
 
 :code:`quote-urls-at-prompt`:
@@ -625,43 +842,6 @@ mouse enters it.
 '''
     )
 
-pointer_shape_names = (
-# start pointer shape names (auto generated by gen-key-constants.py do not edit)
-    'arrow',
-    'beam',
-    'text',
-    'pointer',
-    'hand',
-    'help',
-    'wait',
-    'progress',
-    'crosshair',
-    'cell',
-    'vertical-text',
-    'move',
-    'e-resize',
-    'ne-resize',
-    'nw-resize',
-    'n-resize',
-    'se-resize',
-    'sw-resize',
-    's-resize',
-    'w-resize',
-    'ew-resize',
-    'ns-resize',
-    'nesw-resize',
-    'nwse-resize',
-    'zoom-in',
-    'zoom-out',
-    'alias',
-    'copy',
-    'not-allowed',
-    'no-drop',
-    'grab',
-    'grabbing',
-# end pointer shape names
-)
-
 opt('pointer_shape_when_grabbed', 'arrow',
     choices=pointer_shape_names, ctype='pointer_shape',
     long_text='''
@@ -677,10 +857,9 @@ The default shape of the mouse pointer.
 '''
     )
 
-opt('pointer_shape_when_dragging', 'beam',
-    choices=pointer_shape_names, ctype='pointer_shape',
-    long_text='''
-The default shape of the mouse pointer when dragging across text.
+opt('pointer_shape_when_dragging', 'beam crosshair', option_type='pointer_shape_when_dragging', ctype='!dragging_pointer_shape', long_text='''
+The default shape of the mouse pointer when dragging across text. The optional second value
+sets the shape when dragging in rectangular selection mode.
 '''
     )
 
@@ -956,14 +1135,18 @@ opt('bell_path', 'none',
 Path to a sound file to play as the bell sound. If set to :code:`none`, the
 system default bell sound is used. Must be in a format supported by the
 operating systems sound API, such as WAV or OGA on Linux (libcanberra) or AIFF,
-MP3 or WAV on macOS (NSSound).
+MP3 or WAV on macOS (NSSound). Relative paths are resolved
+with respect to the kitty config directory.
 '''
     )
 
 opt('linux_bell_theme', '__custom', ctype='!bell_theme',
     long_text='''
 The XDG Sound Theme kitty will use to play the bell sound.
-Defaults to the custom theme name specified in the
+On Wayland, when the compositor supports it, it is asked to play the system default
+bell sound, and this setting has no effect. Note that Hyprland claims to support this
+protocol, but :link:`does not actually play a sound <https://github.com/hyprwm/Hyprland/issues/10488>`.
+This setting defaults to the custom theme name specified in the
 :link:`XDG Sound theme specification <https://specifications.freedesktop.org/sound-theme-spec/latest/sound_lookup.html>,
 falling back to the default freedesktop theme if it does not exist.
 To change your sound theme desktop wide, create :file:`~/.local/share/sounds/__custom/index.theme` with the contents:
@@ -1000,6 +1183,18 @@ opt('initial_window_width', '640',
 
 opt('initial_window_height', '400',
     option_type='window_size',
+    )
+
+opt('remember_window_position', 'no',
+    option_type='to_bool',
+    long_text='''
+If enabled, the :term:`OS Window <os_window>` position will be remembered so that
+new instances of kitty will have the same position as the previous instance.
+If disabled, the :term:`OS Window <os_window>` will be placed by the window manager.
+Note that remembering of position only works if the underlying desktop environment/window
+manager supports it. It never works on Wayland. See also :option:`kitty --position` to
+specify the position when launching kitty.
+'''
     )
 
 opt('enabled_layouts', '*',
@@ -1044,6 +1239,19 @@ Draw only the minimum borders needed. This means that only the borders that
 separate the window from a neighbor are drawn. Note that setting a
 non-zero :opt:`window_margin_width` overrides this and causes all borders to be
 drawn.
+'''
+    )
+
+opt('draw_window_borders_for_single_window', 'no',
+    option_type='to_bool',
+    long_text='''
+Draw borders around a window even when there is only a single window visible. When
+enabled and there is only a single window, full borders are drawn around it (as if
+:opt:`draw_minimal_borders` is false). The border will show in the active color when
+the window is focused and the OS window has focus, and in the inactive color when the
+OS window loses focus. This provides a clear visual indicator of whether the kitty
+window is focused. When there are multiple windows visible, this option has no effect
+and normal border drawing rules apply.
 '''
     )
 
@@ -1172,7 +1380,7 @@ faded and one being fully opaque.
 
 opt('window_logo_scale', '0', option_type='window_logo_scale', ctype='!window_logo_scale', long_text='''
 The percentage (0-100] of the window size to which the logo should scale. Using a single
-number means the logo is scaled to that percentage of the shortest window dimension, while preseving
+number means the logo is scaled to that percentage of the shortest window dimension, while preserving
 aspect ratio of the logo image.
 
 Using two numbers means the width and height of the logo are scaled to the respective
@@ -1219,9 +1427,7 @@ Specify your preference as a string of characters.
 '''
     )
 
-opt('confirm_os_window_close', '-1',
-    option_type='int',
-    long_text='''
+opt('confirm_os_window_close', '-1', option_type='confirm_close', long_text='''
 Ask for confirmation when closing an OS window or a tab with at least this
 number of kitty windows in it by window manager (e.g. clicking the window close
 button or pressing the operating system shortcut to close windows) or by the
@@ -1230,10 +1436,11 @@ also applies to requests to quit the entire application (all OS windows, via the
 :ac:`quit` action). Negative values are converted to positive ones, however,
 with :opt:`shell_integration` enabled, using negative values means windows
 sitting at a shell prompt are not counted, only windows where some command is
-currently running. Note that if you want confirmation when closing individual
-windows, you can map the :ac:`close_window_with_confirmation` action.
-'''
-    )
+currently running. You can also have backgrounded jobs prevent closing,
+by adding :code:`count-background` to the setting, for example: :code:`-1 count-background`.
+Note that if you want confirmation when closing individual windows,
+you can map the :ac:`close_window_with_confirmation` action.
+''')
 egr()  # }}}
 
 
@@ -1289,6 +1496,18 @@ The tab bar style, can be one of:
 '''
     )
 
+opt('tab_bar_filter', '', long_text='''
+A :ref:`search expression <search_syntax>`. Only tabs that match this expression
+will be shown in the tab bar. The currently active tab is :italic:`always` shown,
+regardless of whether it matches or not. When using this option, the tab bar may
+be displayed with less tabs than specified in :opt:`tab_bar_min_tabs`, as evaluating
+the filter is expensive and is done only at display time. This is most useful when
+using :ref:`sessions <sessions>`. An expression of :code:`session:~ or session:^$`
+will show only tabs that belong to the current session or no session. The various
+tab navigation actions such as :ac:`goto_tab`, :ac:`next_tab`, :ac:`previous_tab`, etc.
+are automatically restricted to work only on matching tabs.
+''')
+
 opt('tab_bar_align', 'left',
     choices=('left', 'center', 'right'),
     long_text='''
@@ -1297,10 +1516,9 @@ The horizontal alignment of the tab bar, can be one of: :code:`left`,
 '''
     )
 
-opt('tab_bar_min_tabs', '2',
-    option_type='tab_bar_min_tabs', ctype='uint',
+opt('tab_bar_min_tabs', '2', option_type='tab_bar_min_tabs',
     long_text='The minimum number of tabs that must exist before the tab bar is shown.'
-    )
+)
 
 opt('tab_switch_strategy', 'previous',
     choices=('last', 'left', 'previous', 'right'),
@@ -1359,7 +1577,7 @@ A value of zero means that no limit is applied.
 '''
     )
 
-opt('tab_title_template', '"{fmt.fg.red}{bell_symbol}{activity_symbol}{fmt.fg.tab}{title}"',
+opt('tab_title_template', '"{fmt.fg.red}{bell_symbol}{activity_symbol}{fmt.fg.tab}{tab.last_focused_progress_percent}{title}"',
     option_type='tab_title_template',
     long_text='''
 A template to render the tab title. The default just renders the title with
@@ -1374,22 +1592,40 @@ use :code:`{sup.index}`. All data available is:
     The tab index usable with :ac:`goto_tab N <goto_tab>` shortcuts.
 :code:`layout_name`
     The current layout name.
+:code:`session_name`
+    The name of the kitty session file from which this tab was created, if any.
+:code:`active_session_name`
+    The name of the kitty session file from which the active window in this tab was created, if any.
 :code:`num_windows`
     The number of windows in the tab.
 :code:`num_window_groups`
     The number of window groups (a window group is a window and all of its overlay windows) in the tab.
 :code:`tab.active_wd`
     The working directory of the currently active window in the tab
-    (expensive, requires syscall). Use :code:`active_oldest_wd` to get
+    (expensive, requires syscall). Use :code:`tab.active_oldest_wd` to get
     the directory of the oldest foreground process rather than the newest.
 :code:`tab.active_exe`
     The name of the executable running in the foreground of the currently
     active window in the tab (expensive, requires syscall). Use
-    :code:`active_oldest_exe` for the oldest foreground process.
+    :code:`tab.active_oldest_exe` for the oldest foreground process.
 :code:`max_title_length`
     The maximum title length available.
 :code:`keyboard_mode`
     The name of the current :ref:`keyboard mode <modal_mappings>` or the empty string if no keyboard mode is active.
+:code:`tab.last_focused_progress_percent`
+    If a command running in a window reports the progress for a task, show this progress as a percentage
+    from the most recently focused window in the tab. Empty string if no progress is reported.
+:code:`tab.progress_percent`
+    If a command running in a window reports the progress for a task, show this progress as a percentage
+    from all windows in the tab, averaged. Empty string is no progress is reported.
+:code:`custom`
+    This will call a function named :code:`draw_title(data)` from the file :file:`tab_bar.py` placed in
+    the kitty config directory. The function will be passed a dictionary of data, the same data that
+    can be used in this template. It can then perform arbitrarily complex processing and return a string.
+    For example: :code:`tab_title_template "{custom}"` will use the output of the function as the tab title.
+    Any print statements in the :code:`draw_title()` will print to the STDOUT of the kitty process, useful
+    for debugging.
+
 
 Note that formatting is done by Python's string formatting machinery, so you can
 use, for instance, :code:`{layout_name[:2].upper()}` to show only the first two
@@ -1398,6 +1634,7 @@ use styling directives, for example:
 ``{fmt.fg.red}red{fmt.fg.tab}normal{fmt.bg._00FF00}greenbg{fmt.bg.tab}``.
 Similarly, for bold and italic:
 ``{fmt.bold}bold{fmt.nobold}normal{fmt.italic}italic{fmt.noitalic}``.
+The 256 eight terminal colors can be used as ``fmt.fg.color0`` through ``fmt.fg.color255``.
 Note that for backward compatibility, if :code:`{bell_symbol}` or
 :code:`{activity_symbol}` are not present in the template, they are prepended to
 it.
@@ -1468,10 +1705,13 @@ opt('background', '#000000',
     option_type='to_color', ctype='color_as_int',
     )
 
-opt('background_opacity', '1.0',
-    option_type='unit_float', ctype='float',
-    long_text='''
-The opacity of the background. A number between zero and one, where one is
+opt(
+    'background_opacity',
+    '1.0',
+    option_type='unit_float',
+    ctype='float',
+    long_text="""
+The opacity of the terminal background color. A number between zero and one, where one is
 opaque and zero is fully transparent. This will only work if supported by the
 OS (for instance, when using a compositor under X11). Note that it only sets
 the background color's opacity in cells that have the same background color as
@@ -1481,18 +1721,22 @@ theme with a background color in your editor, it will not be rendered as
 transparent. Instead you should change the default background color in your
 kitty config and not use a background color in the editor color scheme. Or use
 the escape codes to set the terminals default colors in a shell script to
-launch your editor. See also :opt:`second_transparent_bg`.
+launch your editor. See also :opt:`transparent_background_colors`.
 Be aware that using a value less than 1.0 is a (possibly
 significant) performance hit. When using a low value for this setting, it is
 desirable that you set the :opt:`background` color to a color the matches the
-general color of the desktop background, for best text rendering.  If you want
-to dynamically change transparency of windows, set
+general color of the desktop background, for best text rendering. Note also,
+that this setting does not apply to the :opt:`background_image`, if any. The
+background image can itself have transparency via its alpha channel if desired,
+and that will be respected.
+
+If you want to dynamically change transparency of windows, set
 :opt:`dynamic_background_opacity` to :code:`yes` (this is off by default as it
 has a performance cost). Changing this option when reloading the config will
 only work if :opt:`dynamic_background_opacity` was enabled in the original
 config.
-'''
-    )
+""",
+)
 
 opt('background_blur', '0', option_type='int', ctype='int',
     long_text='''
@@ -1506,35 +1750,23 @@ depending on how the platform implements it, so use with care. Currently support
 on macOS and KDE.
 ''')
 
-opt('background_image', 'none',
-    option_type='config_or_absolute_path', ctype='!background_image',
-    long_text='Path to a background image. Must be in PNG/JPEG/WEBP/TIFF/GIF/BMP format.'
-    )
+opt('transparent_background_colors', '', option_type='transparent_background_colors', long_text='''
+A space separated list of upto 7 colors, with opacity. When the background color of a cell matches one of these colors,
+it is rendered semi-transparent using the specified opacity.
 
-opt('background_image_layout', 'tiled',
-    choices=('mirror-tiled', 'scaled', 'tiled', 'clamped', 'centered', 'cscaled'),
-    ctype='bglayout',
-    long_text='''
-Whether to tile, scale or clamp the background image. The value can be one of
-:code:`tiled`, :code:`mirror-tiled`, :code:`scaled`, :code:`clamped`, :code:`centered`
-or :code:`cscaled`. The :code:`scaled` and :code:`cscaled` values scale the image to the
-window size, with :code:`cscaled` preserving the image aspect ratio.
-'''
-    )
-
-opt('background_image_linear', 'no',
-    option_type='to_bool', ctype='bool',
-    long_text='When background image is scaled, whether linear interpolation should be used.'
-    )
-
-opt('second_transparent_bg', 'none', option_type='to_color_or_none', long_text='''
-When the background color matches this color, :opt:`background_opacity` is applied to it
-to render it as semi-transparent, just as for colors matching the background color.
 Useful in more complex UIs like editors where you could want more than a single background color
-to be rendered as transparent, for instance, for a cursor highlight line background.
+to be rendered as transparent, for instance, for a cursor highlight line background or a highlighted block.
 Terminal applications can set this color using :ref:`The kitty color control <color_control>`
 escape code.
-''')
+
+The syntax for specifying colors is: :code:`color@opacity`, where the :code:`@opacity`
+part is optional. When unspecified, the value of :opt:`background_opacity` is used. For example::
+
+    transparent_background_colors red@0.5 #00ff00@0.3
+
+Note that you must also set :opt:`background_opacity` to something less than 1 for this setting to work properly.
+'''
+)
 
 opt('dynamic_background_opacity', 'no',
     option_type='to_bool', ctype='bool',
@@ -1546,13 +1778,38 @@ this option by reloading the config is not supported.
 '''
     )
 
+
+opt('background_image', 'none',
+    option_type='config_or_absolute_path', ctype='!background_image',
+    long_text='Path to a background image. Must be in PNG/JPEG/WEBP/TIFF/GIF/BMP format.'
+    ' Note that when using :ref:`auto_color_scheme` this option is overridden by the color scheme file and must be set inside it to take effect.'
+    )
+
+opt('background_image_layout', 'tiled',
+    choices=('mirror-tiled', 'scaled', 'tiled', 'clamped', 'centered', 'cscaled'),
+    ctype='bglayout',
+    long_text='''
+Whether to tile, scale or clamp the background image. The value can be one of
+:code:`tiled`, :code:`mirror-tiled`, :code:`scaled`, :code:`clamped`, :code:`centered`
+or :code:`cscaled`. The :code:`scaled` and :code:`cscaled` values scale the image to the
+window size, with :code:`cscaled` preserving the image aspect ratio.
+Note that when using :ref:`auto_color_scheme` this option is overridden by the color scheme file and must be set inside it to take effect.
+'''
+    )
+
+opt('background_image_linear', 'no',
+    option_type='to_bool', ctype='bool',
+    long_text='When background image is scaled, whether linear interpolation should be used.'
+' Note that when using :ref:`auto_color_scheme` this option is overridden by the color scheme file and must be set inside it to take effect.'
+    )
+
 opt('background_tint', '0.0',
     option_type='unit_float', ctype='float',
     long_text='''
 How much to tint the background image by the background color. This option
 makes it easier to read the text. Tinting is done using the current background
-color for each window. This option applies only if :opt:`background_opacity` is
-set and transparent windows are supported or :opt:`background_image` is set.
+color for each window. This option applies only if :opt:`background_image` is set.
+Note that when using :ref:`auto_color_scheme` this option is overridden by the color scheme file and must be set inside it to take effect.
 '''
     )
 
@@ -1563,6 +1820,7 @@ How much to tint the background image at the window gaps by the background
 color, after applying :opt:`background_tint`. Since this is multiplicative
 with :opt:`background_tint`, it can be used to lighten the tint over the window
 gaps for a *separated* look.
+Note that when using :ref:`auto_color_scheme` this option is overridden by the color scheme file and must be set inside it to take effect.
 '''
     )
 
@@ -2900,6 +3158,18 @@ opt('color255', '#eeeeee',
     documented=False,
     )
 egr()  # }}}
+
+# colors.wide_gamut {{{
+agr('colors.wide_gamut', 'Wide gamut color formats', '''
+kitty supports modern wide gamut color formats including OKLCH and CIE LAB for precise
+color specification. These formats can be used anywhere a color value is accepted
+(foreground, background, color0-color255, etc.).
+
+For detailed documentation on wide gamut color formats, syntax, and examples,
+see :doc:`/wide-gamut-colors`.
+''')
+
+egr()  # }}}
 egr()  # }}}
 
 
@@ -2946,7 +3216,7 @@ their stdout/stderr/stdin no longer work.
 
 opt('+remote_control_password', '',
     option_type='remote_control_password',
-    add_to_default=False,
+    add_to_default=False, has_secret=True,
     long_text='''
 Allow other programs to control kitty using passwords. This option can be
 specified multiple times to add multiple passwords. If no passwords are present
@@ -3029,7 +3299,9 @@ Changing this option by reloading the config is not supported.
 '''
     )
 
-opt('+env', '',
+opt(
+    '+env',
+    '',
     option_type='env',
     add_to_default=False,
     long_text='''
@@ -3043,8 +3315,17 @@ recursively, for example::
     env VAR2=${HOME}/${VAR1}/b
 
 The value of :code:`VAR2` will be :code:`<path to home directory>/a/b`.
-'''
-    )
+
+Use the special
+value :code:`read_from_shell` to have kitty read the specified variables from
+your :opt:`login shell <shell>` configuration.
+Useful if your shell startup files setup a bunch of environment variables that you want available to kitty and
+in kitty session files. Each variable name is treated as a glob pattern to match. For example:
+:code:`env read_from_shell=PATH LANG LC_* XDG_* EDITOR VISUAL`. Note that these variables are only
+read after the configuration is fully processed, thus they are not available for recursive expansion and
+they will override any variables set by other :opt:`env` directives.
+''',
+)
 
 opt('+filter_notification', '', option_type='filter_notification', add_to_default=False, long_text='''
 Specify rules to filter out notifications sent by applications running in kitty.
@@ -3056,7 +3337,7 @@ using Boolean operators. Some examples::
 
     filter_notification title:hello or body:"abc.*def"
     # filter out notification from vim except for ones about updates, (?i)
-    # makes matching case insesitive.
+    # makes matching case insensitive.
     filter_notification app:"[ng]?vim" and not body:"(?i)update"
     # filter out all notifications
     filter_notification all
@@ -3154,8 +3435,7 @@ is applied. See also :opt:`clipboard_control`.
 '''
     )
 
-opt('file_transfer_confirmation_bypass', '',
-    long_text='''
+opt('file_transfer_confirmation_bypass', '', has_secret=True, long_text='''
 The password that can be supplied to the :doc:`file transfer kitten
 </kittens/transfer>` to skip the transfer confirmation prompt. This should only
 be used when initiating transfers from trusted computers, over trusted networks
@@ -3238,7 +3518,8 @@ The possible values are:
 :code:`invisible`
     Only send a notification when the window both is unfocused and not visible
     to the user, for example, because it is in an inactive tab or its OS window
-    is not currently active.
+    is not currently visible (on platforms that support OS window visibility querying
+    this considers an OS Window visible iff it is active).
 
 :code:`always`
     Always send a notification, regardless of window state.
@@ -3254,10 +3535,20 @@ and exits will spam a notification.
 Second, the action to perform. The default is :code:`notify`. The possible values are:
 
 :code:`notify`
-    Send a desktop notification.
+    Send a desktop notification. The subsequent arguments are optional and specify when
+    the notification is automatically cleared. The set of possible events when the notification is
+    cleared are: :code:`focus` and :code:`next`. :code:`focus` means that when the notification
+    policy is :code:`unfocused` or :code:`invisible` the notification is automatically cleared
+    when the window regains focus. The value of :code:`next` means that the previous notification
+    is cleared when the next notification is shown. The default when no arguments are specified
+    is: :code:`focus next`.
 
 :code:`bell`
     Ring the terminal bell.
+
+:code:`notify-bell`
+    Send a desktop notification and ring the terminal bell.
+    The arguments are the same as for `notify`.
 
 :code:`command`
     Run a custom command. All subsequent arguments are the cmdline to run.
@@ -3273,6 +3564,9 @@ Some more examples::
     # Run 'notify-send' when a command takes more than 10 seconds in a invisible window
     # Here %c is replaced by the current command line and %s by the job exit code
     notify_on_cmd_finish invisible 10.0 command notify-send "job finished with status: %s" %c
+    # Do not clear previous notification when next command finishes or window regains focus
+    notify_on_cmd_finish invisible 5.0 notify
+
 '''
     )
 
@@ -3303,12 +3597,14 @@ note that not all software supports this. A value of :code:`none` means do not t
 
 
 opt('forward_stdio', 'no', option_type='to_bool', long_text='''
-Forward STDOUT and STDERR of the kitty process to child processes
-as file descriptors 3 and 4. This is useful for debugging as it
+Forward STDOUT and STDERR of the kitty process to child processes.
+This is useful for debugging as it
 allows child processes to print to kitty's STDOUT directly. For example,
-:code:`echo hello world >&3` in a shell will print to the parent kitty's
-STDOUT. When enabled, this also sets the :code:`KITTY_STDIO_FORWARDED=3`
-environment variable so child processes know about the forwarding.
+:code:`echo hello world >&$KITTY_STDIO_FORWARDED` in a shell will print
+to the parent kitty's STDOUT. Sets the :code:`KITTY_STDIO_FORWARDED=fdnum`
+environment variable so child processes know about the forwarding. Note that
+on macOS this prevents the shell from being run via the login utility so getlogin()
+will not work in programs run in this session.
 ''')
 
 opt('+menu_map', '',
@@ -3346,12 +3642,7 @@ The color of the kitty window's titlebar on macOS. A value of
 :code:`dark` can also be used to set it explicitly. A value of
 :code:`background` means to use the background color of the currently active
 window and finally you can use an arbitrary color, such as :code:`#12af59` or
-:code:`red`. WARNING: This option works by using a hack when arbitrary color (or
-:code:`background`) is configured, as there is no proper Cocoa API for it. It
-sets the background color of the entire window and makes the titlebar
-transparent. As such it is incompatible with :opt:`background_opacity`. If you
-want to use both, you are probably better off just hiding the titlebar with
-:opt:`hide_window_decorations`.
+:code:`red`.
 '''
     )
 
@@ -3566,10 +3857,12 @@ There is also a :ac:`copy_or_interrupt` action that can be optionally mapped
 to :kbd:`Ctrl+C`. It will copy only if there is a selection and send an
 interrupt otherwise. Similarly, :ac:`copy_and_clear_or_interrupt` will copy
 and clear the selection or send an interrupt if there is no selection.
+The :ac:`copy_or_noop` action will copy if there is a selection and pass
+the key through to the application running in the terminal if there is no selection.
 '''
     )
-map('Copy to clipboard',
-    'copy_to_clipboard cmd+c copy_to_clipboard',
+map('Copy to clipboard or pass through',
+    'copy_or_noop cmd+c copy_or_noop',
     only='macos',
     )
 
@@ -3723,6 +4016,22 @@ To get the output of the last jumped to command, use :code:`@last_visited_cmd_ou
 Requires :ref:`shell integration <shell_integration>` to work.
 '''
     )
+
+map('Search the scrollback within a pager',
+    'search_scrollback kitty_mod+/ search_scrollback',
+    long_text='''
+Search for currently selected text in the scrollback using the configured :opt:`scrollback_pager`.
+Assumes that pressing the :kbd:`/` key triggers search mode in the pager. If you want to create
+a manual mapping with a special pager for this, you can use something like:
+
+    map f1 combine : launch --stdin-source=@screen_scrollback --stdin-add-formatting --type=overlay mypager : send_key /
+
+For more sophisticated control, such as using the current selection, use :ac:`remote_control_script`.
+''')
+
+map('Search the scrollback within a pager', 'search_scrollback cmd+f search_scrollback', only='macos')
+
+
 egr()  # }}}
 
 
@@ -3968,8 +4277,9 @@ map('Set tab title',
 egr('''
 You can also create shortcuts to go to specific :term:`tabs <tab>`, with
 :code:`1` being the first tab, :code:`2` the second tab and :code:`-1` being the
-previously active tab, and any number larger than the last tab being the last
-tab::
+previously active tab, :code:`-2` being the tab active before the previously active tab and so on.
+Any number larger than the number of tabs goes to the last tab and any number less
+than the number of previously used tabs in the history goes to the oldest previously used tab in the history::
 
     map ctrl+alt+1 goto_tab 1
     map ctrl+alt+2 goto_tab 2
@@ -4065,6 +4375,11 @@ To setup shortcuts for specific font sizes::
 To setup shortcuts to change only the current OS window's font size::
 
     map kitty_mod+f6 change_font_size current 10.0
+
+To setup shortcuts to multiply/divide the font size::
+
+    map kitty_mod+f6 change_font_size all *2.0
+    map kitty_mod+f6 change_font_size all /2.0
 ''')  # }}}
 
 
@@ -4095,6 +4410,23 @@ map('Open selected path',
     'open_selected_path kitty_mod+p>shift+f kitten hints --type path',
     long_text='Select a path/filename and open it with the default open program.'
     )
+
+map('Insert chosen file',
+    'insert_chosen_file kitty_mod+p>c kitten choose-files',
+    long_text='''
+Select a file using the :doc:`choose-files </kittens/choose-files>` kitten and insert
+it into the terminal.
+'''
+    )
+
+map('Insert chosen directory',
+    'insert_chosen_directory kitty_mod+p>d kitten choose-files --mode=dir',
+    long_text='''
+Select a directory using the :doc:`choose-files </kittens/choose-files>` kitten and insert
+it into the terminal.
+'''
+    )
+
 
 map('Insert selected line',
     'insert_selected_line kitty_mod+p>l kitten hints --type line --program -',
@@ -4161,6 +4493,9 @@ map('Toggle macOS secure keyboard entry',
     only='macos',
     )
 
+map('macOS Cycle through OS Windows', 'macos_cycle_through_os_windows cmd+` macos_cycle_through_os_windows', only='macos')
+map('macOS Cycle through OS Windows backwards', 'macos_cycle_through_os_windows_backwards cmd+shift+` macos_cycle_through_os_windows_backwards', only='macos')
+
 map('Unicode input',
     'input_unicode_character kitty_mod+u kitten unicode_input',
     )
@@ -4218,6 +4553,8 @@ You can create shortcuts to clear/reset the terminal. For example::
     map f1 clear_terminal to_cursor active
     # Same as above except cleared lines are moved into scrollback
     map f1 clear_terminal to_cursor_scroll active
+    # Erase the last command and its output (needs shell integration to work)
+    map f1 clear_terminal last_command active
 
 If you want to operate on all kitty windows instead of just the current one, use
 :italic:`all` instead of :italic:`active`.
@@ -4254,7 +4591,7 @@ the screen, instead of just clearing the screen. For ZSH, in :file:`~/.zshrc`, a
     bindkey '^l' ctrl_l
 
 Alternatively, you can just add :code:`map ctrl+l clear_terminal to_cursor_scroll active` to :file:`kitty.conf` which
-works with no changes to the shell rc files, but only clears up to the prompt, it does not clear anytext at the prompt itself.
+works with no changes to the shell rc files, but only clears up to the prompt, it does not clear any text at the prompt itself.
 '''
     )
 
@@ -4263,10 +4600,27 @@ map('Reset the terminal',
     only='macos',
     )
 
-map('Clear up to cursor line',
+map('Clear to start',
     'clear_terminal_and_scrollback cmd+k clear_terminal to_cursor active',
     only='macos',
     )
+
+map('Clear scrollback',
+    'clear_scrollback option+cmd+k clear_terminal scrollback active',
+    only='macos',
+    )
+
+map('Clear the last command',
+    'clear_last_command cmd+l clear_terminal last_command active',
+    only='macos',
+    )
+
+map('Clear screen',
+    'clear_screen cmd+ctrl+l clear_terminal to_cursor_scroll active',
+    only='macos',
+    )
+
+
 
 map('Reload kitty.conf',
     'reload_config_file kitty_mod+f5 load_config_file',

@@ -4,33 +4,33 @@ package diff
 
 import (
 	"fmt"
-	"path/filepath"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
 
-	"kitty"
-	"kitty/tools/config"
-	"kitty/tools/tty"
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
 
 type KittyOpts struct {
-	Wheel_scroll_multiplier int
+	Wheel_scroll_multiplier float64
 	Copy_on_select          bool
 }
 
-func read_relevant_kitty_opts(path string) KittyOpts {
+func read_relevant_kitty_opts() KittyOpts {
 	ans := KittyOpts{Wheel_scroll_multiplier: kitty.KittyConfigDefaults.Wheel_scroll_multiplier}
 	handle_line := func(key, val string) error {
 		switch key {
 		case "wheel_scroll_multiplier":
-			v, err := strconv.Atoi(val)
+			v, err := strconv.ParseFloat(val, 64)
 			if err == nil {
 				ans.Wheel_scroll_multiplier = v
 			}
@@ -39,17 +39,19 @@ func read_relevant_kitty_opts(path string) KittyOpts {
 		}
 		return nil
 	}
-	cp := config.ConfigParser{LineHandler: handle_line}
-	_ = cp.ParseFiles(path)
+	config.ReadKittyConfig(handle_line)
 	return ans
 }
 
 var RelevantKittyOpts = sync.OnceValue(func() KittyOpts {
-	return read_relevant_kitty_opts(filepath.Join(utils.ConfigDir(), "kitty.conf"))
+	return read_relevant_kitty_opts()
 })
 
 func (self *Handler) handle_wheel_event(up bool) {
-	amt := RelevantKittyOpts().Wheel_scroll_multiplier
+	amt := int(math.Round(RelevantKittyOpts().Wheel_scroll_multiplier))
+	if amt == 0 {
+		amt = 1
+	}
 	if up {
 		amt *= -1
 	}
@@ -69,6 +71,7 @@ func (self *line_pos) Equal(other tui.LinePos) bool {
 	}
 	return false
 }
+
 func (self *line_pos) LessThan(other tui.LinePos) bool {
 	if o, ok := other.(*line_pos); ok {
 		return self.y.Less(o.y)
@@ -113,7 +116,6 @@ func (self *Handler) drag_scroll_tick(timer_id loop.IdType) error {
 }
 
 var debugprintln = tty.DebugPrintln
-var _ = debugprintln
 
 func (self *Handler) update_mouse_selection(ev *loop.MouseEvent) {
 	if !self.mouse_selection.IsActive() {
@@ -146,6 +148,12 @@ func (self *Handler) text_for_current_mouse_selection() string {
 	}
 	text := make([]byte, 0, 2048)
 	start_pos, end_pos := *self.mouse_selection.StartLine().(*line_pos), *self.mouse_selection.EndLine().(*line_pos)
+
+	// if start is after end, swap them
+	if end_pos.y.Less(start_pos.y) {
+		start_pos, end_pos = end_pos, start_pos
+	}
+
 	start, end := start_pos.y, end_pos.y
 	is_left := start_pos.min_x == self.logical_lines.margin_size
 

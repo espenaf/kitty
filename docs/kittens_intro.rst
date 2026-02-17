@@ -13,6 +13,9 @@ Extend with kittens
    kittens/themes
    kittens/choose-fonts
    kittens/hints
+   kittens/quick-access-terminal
+   kittens/choose-files
+   kittens/panel
    kittens/remote_file
    kittens/hyperlinked_grep
    kittens/transfer
@@ -51,6 +54,20 @@ Some prominent kittens:
     filenames, words, lines, etc. from the terminal screen.
 
 
+:doc:`Quick access terminal <kittens/quick-access-terminal>`
+    Get access to a quick access floating, semi-transparent kitty window
+    with a single keypress.
+
+
+:doc:`Panel <kittens/panel>`
+    Draw the desktop wallpaper or docks and panels using arbitrary
+    terminal programs.
+
+
+:doc:`Choose files <kittens/choose-files>`
+    Preview and select files at the speed of thought
+
+
 :doc:`Remote file <kittens/remote_file>`
     Edit, open, or download remote files over SSH easily, by simply clicking on
     the filename.
@@ -77,11 +94,6 @@ Some prominent kittens:
     SSH with automatic :ref:`shell integration <shell_integration>`, connection
     re-use for low latency and easy cloning of local shell and editor
     configuration to the remote host.
-
-
-:doc:`Panel <kittens/panel>`
-    Draw a GPU accelerated dock panel on your desktop showing the output from an
-    arbitrary terminal program.
 
 
 :doc:`Clipboard <kittens/clipboard>`

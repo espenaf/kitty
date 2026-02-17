@@ -10,9 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kovidgoyal/kitty"
 	"io"
 	"io/fs"
-	"kitty"
 	"maps"
 	"net/url"
 	"os"
@@ -25,18 +25,19 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"kitty/tools/cli"
-	"kitty/tools/themes"
-	"kitty/tools/tty"
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/shell_integration"
-	"kitty/tools/utils"
-	"kitty/tools/utils/secrets"
-	"kitty/tools/utils/shlex"
-	"kitty/tools/utils/shm"
+	"github.com/kovidgoyal/go-shm"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/themes"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/shell_integration"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/secrets"
+	"github.com/kovidgoyal/kitty/tools/utils/shlex"
 
 	"golang.org/x/sys/unix"
 )
@@ -71,7 +72,7 @@ func get_destination(hostname string) (username, hostname_for_match string) {
 
 func read_data_from_shared_memory(shm_name string) ([]byte, error) {
 	data, err := shm.ReadWithSizeAndUnlink(shm_name, func(s fs.FileInfo) error {
-		if stat, ok := s.Sys().(unix.Stat_t); ok {
+		if stat, ok := s.Sys().(syscall.Stat_t); ok {
 			if os.Getuid() != int(stat.Uid) || os.Getgid() != int(stat.Gid) {
 				return fmt.Errorf("Incorrect owner on SHM file")
 			}
@@ -144,7 +145,7 @@ func connection_sharing_args(kitty_pid int) ([]string, error) {
 	}, nil
 }
 
-func set_askpass() (need_to_request_data bool) {
+func set_askpass(hostname_for_match, uname string, overrides []string) (need_to_request_data bool) {
 	need_to_request_data = true
 	sentinel := filepath.Join(utils.CacheDir(), "openssh-is-new-enough-for-askpass")
 	_, err := os.Stat(sentinel)
@@ -159,6 +160,11 @@ func set_askpass() (need_to_request_data bool) {
 	if err == nil {
 		os.Setenv("SSH_ASKPASS", exe)
 		os.Setenv("KITTY_KITTEN_RUN_MODULE", "ssh_askpass")
+		// Provide data to askpass so it can lookup auth settings in ssh.conf
+		os.Setenv("KITTY_SSH_ASKPASS_HOST", hostname_for_match)
+		os.Setenv("KITTY_SSH_ASKPASS_USER", uname)
+		ov, _ := json.Marshal(overrides)
+		os.Setenv("KITTY_SSH_ASKPASS_OVERRIDES", string(ov))
 		if !need_to_request_data {
 			os.Setenv("SSH_ASKPASS_REQUIRE", "force")
 		}
@@ -620,6 +626,11 @@ func run_ssh(ssh_args, server_args, found_extra_args []string) (rc int, err erro
 	if err != nil {
 		return 1, err
 	}
+	// check the secrets syntax here as askpass has no good way to report errors to
+	// the user
+	if err = resolve_secrets(host_opts, true); err != nil {
+		return 1, err
+	}
 	if len(bad_lines) > 0 {
 		for _, x := range bad_lines {
 			fmt.Fprintf(os.Stderr, "Ignoring bad config line: %s:%d with error: %s", filepath.Base(x.Src_file), x.Line_number, x.Err)
@@ -648,7 +659,7 @@ func run_ssh(ssh_args, server_args, found_extra_args []string) (rc int, err erro
 	use_kitty_askpass := host_opts.Askpass == Askpass_native || (host_opts.Askpass == Askpass_unless_set && os.Getenv("SSH_ASKPASS") == "")
 	need_to_request_data := true
 	if use_kitty_askpass {
-		need_to_request_data = set_askpass()
+		need_to_request_data = set_askpass(hostname_for_match, uname, overrides)
 	}
 	master_is_functional := func() bool {
 		if master_checked {
@@ -725,12 +736,12 @@ func run_ssh(ssh_args, server_args, found_extra_args []string) (rc int, err erro
 	cd.hostname_for_match, cd.username = hostname_for_match, uname
 	escape_codes_to_set_colors, err := change_colors(cd.host_opts.Color_scheme)
 	if err == nil {
-		err = term.WriteAllString(escape_codes_to_set_colors + loop.SAVE_PRIVATE_MODE_VALUES + loop.HANDLE_TERMIOS_SIGNALS.EscapeCodeToSet())
+		err = term.WriteAllString(escape_codes_to_set_colors + loop.SAVE_PRIVATE_MODE_VALUES + loop.PUSH_KEY_FLAGS + loop.HANDLE_TERMIOS_SIGNALS.EscapeCodeToSet())
 	}
 	if err != nil {
 		return 1, err
 	}
-	restore_escape_codes := loop.RESTORE_PRIVATE_MODE_VALUES + loop.HANDLE_TERMIOS_SIGNALS.EscapeCodeToReset()
+	restore_escape_codes := loop.RESTORE_PRIVATE_MODE_VALUES + loop.POP_KEY_FLAGS + loop.HANDLE_TERMIOS_SIGNALS.EscapeCodeToReset()
 	if escape_codes_to_set_colors != "" {
 		restore_escape_codes += "\x1b[#Q"
 	}

@@ -7,18 +7,24 @@
 
 #pragma once
 
+#ifdef _POSIX_C_SOURCE
+#error "Must include \"data-types.h\" before any system headers"
+#endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+
 #include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <poll.h>
 #include <pthread.h>
+#include <locale.h>
 #include "glfw-wrapper.h"
 #include "banned.h"
 // Required minimum OpenGL version
 #define OPENGL_REQUIRED_VERSION_MAJOR 3
 #ifdef __APPLE__
+#include <xlocale.h>
 #define OPENGL_REQUIRED_VERSION_MINOR 3
 #else
 #define OPENGL_REQUIRED_VERSION_MINOR 1
@@ -44,6 +50,7 @@
 #define zero_at_ptr(p) memset((p), 0, sizeof((p)[0]))
 #define literal_strlen(x) (sizeof(x)-1)
 #define zero_at_ptr_count(p, count) memset((p), 0, (count) * sizeof((p)[0]))
+#define C0_EXCEPT_NL_SPACE_TAB_DEL 0x0 ... 0x8: case 0xb ... 0x1f
 #define C0_EXCEPT_NL_SPACE_TAB 0x0 ... 0x8: case 0xb ... 0x1f: case 0x7f
 void log_error(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 #define fatal(...) { log_error(__VA_ARGS__); exit(EXIT_FAILURE); }
@@ -52,13 +59,11 @@ static inline void cleanup_free(void *p) { free(*(void**)p); }
 static inline void cleanup_decref(PyObject **p) { Py_CLEAR(*p); }
 #define RAII_PyObject(name, initializer) __attribute__((cleanup(cleanup_decref))) PyObject *name = initializer
 #define RAII_PY_BUFFER(name) __attribute__((cleanup(PyBuffer_Release))) Py_buffer name = {0}
-#if PY_VERSION_HEX < 0x030a0000
-static inline PyObject* Py_NewRef(PyObject *o) { Py_INCREF(o); return o; }
-static inline PyObject* Py_XNewRef(PyObject *o) { Py_XINCREF(o); return o; }
-#endif
 
 typedef unsigned long long id_type;
 typedef uint32_t char_type;
+static_assert(sizeof(Py_UCS4) == sizeof(char_type), "PyUCS4 and char_type dont match");
+#define MAX_CHAR_TYPE_VALUE UINT32_MAX
 typedef uint32_t color_type;
 typedef uint16_t hyperlink_id_type;
 typedef int key_type;
@@ -67,8 +72,8 @@ typedef uint16_t combining_type;
 typedef uint16_t glyph_index;
 typedef uint32_t pixel;
 typedef unsigned int index_type;
-typedef uint16_t sprite_index;
-typedef enum CursorShapes { NO_CURSOR_SHAPE, CURSOR_BLOCK, CURSOR_BEAM, CURSOR_UNDERLINE, NUM_OF_CURSOR_SHAPES } CursorShape;
+typedef uint32_t sprite_index;
+typedef enum CursorShapes { NO_CURSOR_SHAPE, CURSOR_BLOCK, CURSOR_BEAM, CURSOR_UNDERLINE, CURSOR_HOLLOW, NUM_OF_CURSOR_SHAPES } CursorShape;
 typedef enum { DISABLE_LIGATURES_NEVER, DISABLE_LIGATURES_CURSOR, DISABLE_LIGATURES_ALWAYS } DisableLigature;
 
 #define ERROR_PREFIX "[PARSE ERROR]"
@@ -110,6 +115,7 @@ typedef enum MouseShapes {
 /* end mouse shapes */
 } MouseShape;
 typedef enum { NONE, MENUBAR, WINDOW, ALL } WindowTitleIn;
+typedef enum { SCROLLBAR_NEVER, SCROLLBAR_ON_SCROLLED, SCROLLBAR_ON_HOVERED, SCROLLBAR_ON_SCROLL_AND_HOVER, SCROLLBAR_ALWAYS } ScrollbarVisibilityPolicy;
 typedef enum { TILING, SCALED, MIRRORED, CLAMPED, CENTER_CLAMPED, CENTER_SCALED } BackgroundImageLayout;
 typedef struct ImageAnchorPosition {
     float canvas_x, canvas_y, image_x, image_y;
@@ -119,7 +125,6 @@ typedef struct ImageAnchorPosition {
 #define BLANK_CHAR 0
 #define COL_MASK 0xFFFFFFFF
 #define DECORATION_FG_CODE 58
-#define CHAR_IS_BLANK(ch) ((ch) == 32 || (ch) == 0)
 
 // PUA character used as an image placeholder.
 #define IMAGE_PLACEHOLDER_CHAR 0x10EEEE
@@ -178,7 +183,7 @@ typedef struct ImageAnchorPosition {
 
 #define IGNORE_PEDANTIC_WARNINGS START_IGNORE_DIAGNOSTIC("-Wpedantic")
 #define END_IGNORE_PEDANTIC_WARNINGS END_IGNORE_DIAGNOSTIC
-#define ALLOW_UNUSED_RESULT IGNORE_DIAGNOSTIC("-Wunused-result")
+#define ALLOW_UNUSED_RESULT START_IGNORE_DIAGNOSTIC("-Wunused-result")
 #define END_ALLOW_UNUSED_RESULT END_IGNORE_DIAGNOSTIC
 #define START_ALLOW_CASE_RANGE IGNORE_PEDANTIC_WARNINGS
 #define END_ALLOW_CASE_RANGE END_IGNORE_PEDANTIC_WARNINGS
@@ -194,87 +199,11 @@ typedef struct ImageAnchorPosition {
 typedef enum UTF8State { UTF8_ACCEPT = 0, UTF8_REJECT = 1} UTF8State;
 
 typedef struct {
+    // right = left + width, bottom = top + height
     uint32_t left, top, right, bottom;
 } Region;
 
-typedef union CellAttrs {
-    struct {
-        uint16_t width : 2;
-        uint16_t decoration : 3;
-        uint16_t bold : 1;
-        uint16_t italic : 1;
-        uint16_t reverse : 1;
-        uint16_t strike : 1;
-        uint16_t dim : 1;
-        uint16_t mark : 2;
-        uint16_t next_char_was_wrapped : 1;
-    };
-    uint16_t val;
-} CellAttrs;
-#define MARK_MASK (3u)
-#define WIDTH_MASK (3u)
-#define DECORATION_MASK (7u)
-#define NUM_UNDERLINE_STYLES (5u)
-#define SGR_MASK (~(((CellAttrs){.width=WIDTH_MASK, .mark=MARK_MASK, .next_char_was_wrapped=1}).val))
-
-typedef struct {
-    color_type fg, bg, decoration_fg;
-    sprite_index sprite_x, sprite_y, sprite_z;
-    CellAttrs attrs;
-} GPUCell;
-static_assert(sizeof(GPUCell) == 20, "Fix the ordering of GPUCell");
-
-typedef struct {
-    char_type ch;
-    hyperlink_id_type hyperlink_id;
-    combining_type cc_idx[3];
-} CPUCell;
-static_assert(sizeof(CPUCell) == 12, "Fix the ordering of CPUCell");
-
 typedef enum { UNKNOWN_PROMPT_KIND = 0, PROMPT_START = 1, SECONDARY_PROMPT = 2, OUTPUT_START = 3 } PromptKind;
-typedef union LineAttrs {
-    struct {
-        uint8_t is_continued : 1;
-        uint8_t has_dirty_text : 1;
-        uint8_t has_image_placeholders : 1;
-        PromptKind prompt_kind : 2;
-    };
-    uint8_t val;
-} LineAttrs ;
-
-typedef struct {
-    PyObject_HEAD
-
-    GPUCell *gpu_cells;
-    CPUCell *cpu_cells;
-    index_type xnum, ynum;
-    bool needs_free;
-    LineAttrs attrs;
-} Line;
-
-
-typedef struct {
-    PyObject_HEAD
-
-    GPUCell *gpu_cell_buf;
-    CPUCell *cpu_cell_buf;
-    index_type xnum, ynum, *line_map, *scratch;
-    LineAttrs *line_attrs;
-    Line *line;
-} LineBuf;
-
-typedef struct {
-    GPUCell *gpu_cells;
-    CPUCell *cpu_cells;
-    LineAttrs *line_attrs;
-} HistoryBufSegment;
-
-typedef struct {
-    void *ringbuf;
-    size_t maximum_size;
-    bool rewrap_needed;
-} PagerHistoryBuf;
-
 typedef struct {int x;} *HYPERLINK_POOL_HANDLE;
 typedef struct {
     Py_UCS4 *buf;
@@ -285,29 +214,23 @@ typedef struct {
 
 typedef struct {
     PyObject_HEAD
-
-    index_type xnum, ynum, num_segments;
-    HistoryBufSegment *segments;
-    PagerHistoryBuf *pagerhist;
-    Line *line;
-    index_type start_of_data, count;
-} HistoryBuf;
-
-typedef struct {
-    PyObject_HEAD
-
-    bool bold, italic, reverse, strikethrough, dim, non_blinking;
+    monotonic_t position_changed_by_client_at;
     unsigned int x, y;
-    uint8_t decoration;
+    bool non_blinking;
     CursorShape shape;
-    color_type fg, bg, decoration_fg;
+
+    struct {
+        bool bold, italic, reverse, strikethrough, dim, blink;
+        uint8_t decoration;
+        color_type fg, bg, decoration_fg;
+    } sgr;
 } Cursor;
 
 typedef struct {
-    bool is_focused, render_even_when_unfocused;
+    bool is_focused, render_even_when_unfocused, is_visible;
     CursorShape shape;
-    unsigned int x, y;
-    float opacity;
+    unsigned x, y, multicursor_count;
+    float cursor_opacity, text_blink_opacity;
 } CursorRenderInfo;
 
 typedef enum DynamicColorType {
@@ -323,15 +246,23 @@ typedef union DynamicColor {
 } DynamicColor;
 
 typedef struct {
-    DynamicColor default_fg, default_bg, cursor_color, cursor_text_color, highlight_fg, highlight_bg, visual_bell_color, second_transparent_bg;
+    DynamicColor default_fg, default_bg, cursor_color, cursor_text_color, highlight_fg, highlight_bg, visual_bell_color;
 } DynamicColors;
+
+typedef struct TransparentDynamicColor {
+    color_type color; float opacity; bool is_set;
+} TransparentDynamicColor;
+
+
+#define MARK_MASK (3u)
 
 typedef struct {
     PyObject_HEAD
 
     bool dirty;
     uint32_t color_table[256], orig_color_table[256];
-    struct { DynamicColors dynamic_colors; uint32_t color_table[256]; } *color_stack;
+    TransparentDynamicColor configured_transparent_colors[8], overriden_transparent_colors[8];
+    struct { DynamicColors dynamic_colors; uint32_t color_table[256]; TransparentDynamicColor transparent_colors[8]; } *color_stack;
     unsigned int color_stack_idx, color_stack_sz;
     DynamicColors configured, overridden;
     color_type mark_foregrounds[MARK_MASK+1], mark_backgrounds[MARK_MASK+1];
@@ -342,10 +273,14 @@ typedef struct {
 } CellPixelSize;
 
 typedef struct {int x;} *SPRITE_MAP_HANDLE;
-#define FONTS_DATA_HEAD SPRITE_MAP_HANDLE sprite_map; double logical_dpi_x, logical_dpi_y, font_sz_in_pts; unsigned int cell_width, cell_height;
+
+typedef struct FontCellMetrics {
+    unsigned int cell_width, cell_height, baseline, underline_position, underline_thickness, strikethrough_position, strikethrough_thickness;
+} FontCellMetrics;
+#define FONTS_DATA_HEAD SPRITE_MAP_HANDLE sprite_map; double logical_dpi_x, logical_dpi_y, font_sz_in_pts; FontCellMetrics fcm;
 typedef struct {FONTS_DATA_HEAD} *FONTS_DATA_HANDLE;
 
-#define clear_sprite_position(cell) (cell).sprite_x = 0; (cell).sprite_y = 0; (cell).sprite_z = 0;
+#define clear_sprite_position(cell) (cell).sprite_idx = 0;
 
 #define ensure_space_for(base, array, type, num, capacity, initial_cap, zero_mem) \
     if ((base)->capacity < num) { \
@@ -362,28 +297,8 @@ typedef struct {FONTS_DATA_HEAD} *FONTS_DATA_HANDLE;
         memmove((array) + (i), (array) + (i) + 1, sizeof((array)[0]) * ((count) - (i))); \
     }}
 
-static inline CellAttrs
-cursor_to_attrs(const Cursor *c, const uint16_t width) {
-    CellAttrs ans = {
-        .width=width, .decoration=c->decoration, .bold=c->bold, .italic=c->italic, .reverse=c->reverse,
-        .strike=c->strikethrough, .dim=c->dim};
-    return ans;
-}
-
-#define cursor_as_gpu_cell(cursor) {.attrs=cursor_to_attrs(cursor, 0), .fg=(cursor->fg & COL_MASK), .bg=(cursor->bg & COL_MASK), .decoration_fg=cursor->decoration_fg & COL_MASK}
-
-static inline void
-attrs_to_cursor(const CellAttrs attrs, Cursor *c) {
-    c->decoration = attrs.decoration; c->bold = attrs.bold;  c->italic = attrs.italic;
-    c->reverse = attrs.reverse; c->strikethrough = attrs.strike; c->dim = attrs.dim;
-}
-
-
 // Global functions
-Line* alloc_line(void);
 Cursor* alloc_cursor(void);
-LineBuf* alloc_linebuf(unsigned int, unsigned int);
-HistoryBuf* alloc_historybuf(unsigned int, unsigned int, unsigned int);
 ColorProfile* alloc_color_profile(void);
 void copy_color_profile(ColorProfile*, ColorProfile*);
 PyObject* parse_bytes_dump(PyObject UNUSED *, PyObject *);
@@ -393,8 +308,6 @@ Cursor* cursor_copy(Cursor*);
 void cursor_copy_to(Cursor *src, Cursor *dest);
 void cursor_reset_display_attrs(Cursor*);
 void cursor_from_sgr(Cursor *self, int *params, unsigned int count, bool is_group);
-void apply_sgr_to_cells(GPUCell *first_cell, unsigned int cell_count, int *params, unsigned int count, bool is_group);
-const char* cell_as_sgr(const GPUCell *, const GPUCell *);
 const char* cursor_as_sgr(const Cursor *);
 
 PyObject* cm_thread_write(PyObject *self, PyObject *args);
@@ -403,6 +316,8 @@ bool schedule_write_to_child_python(unsigned long id, const char *prefix, PyObje
 bool set_iutf8(int, bool);
 
 DynamicColor colorprofile_to_color(const ColorProfile *self, DynamicColor entry, DynamicColor defval);
+void colorprofile_reset(ColorProfile *self);
+bool colorprofile_to_transparent_color(const ColorProfile *self, unsigned index, color_type *color, float *opacity);
 color_type
 colorprofile_to_color_with_fallback(ColorProfile *self, DynamicColor entry, DynamicColor defval, DynamicColor fallback, DynamicColor falback_defval);
 void copy_color_table_to_buffer(ColorProfile *self, color_type *address, int offset, size_t stride);
@@ -411,17 +326,19 @@ bool colorprofile_pop_colors(ColorProfile*, unsigned int);
 void colorprofile_report_stack(ColorProfile*, unsigned int*, unsigned int*);
 
 void set_mouse_cursor(MouseShape);
-void enter_event(void);
+void enter_event(int modifiers);
+void leave_event(int modifiers);
 void mouse_event(const int, int, int);
 void focus_in_event(void);
-void scroll_event(double, double, int, int);
-void on_key_input(GLFWkeyevent *ev);
+void scroll_event(const GLFWScrollEvent *ev);
+void on_key_input(const GLFWkeyevent *ev);
 void request_window_attention(id_type, bool);
+locale_t get_c_locale(void);
 #ifndef __APPLE__
 void play_canberra_sound(const char *which_sound, const char *event_id, bool is_path, const char *role, const char *theme_name);
 #endif
-SPRITE_MAP_HANDLE alloc_sprite_map(unsigned int, unsigned int);
-SPRITE_MAP_HANDLE free_sprite_map(SPRITE_MAP_HANDLE);
+SPRITE_MAP_HANDLE alloc_sprite_map(void);
+void free_sprite_data(FONTS_DATA_HANDLE);
 const char* get_hyperlink_for_id(const HYPERLINK_POOL_HANDLE, hyperlink_id_type id, bool only_url);
 
 #define memset_array(array, val, count) if ((count) > 0) { \

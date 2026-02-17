@@ -5,15 +5,16 @@
 import os
 import subprocess
 import traceback
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 from kitty.types import run_once
 from kitty.utils import SSHConnectionData
 
 
 @run_once
-def ssh_options() -> Dict[str, str]:
+def ssh_options() -> dict[str, str]:
     try:
         p = subprocess.run(['ssh'], stderr=subprocess.PIPE, encoding='utf-8')
         raw = p.stderr or ''
@@ -28,10 +29,10 @@ def ssh_options() -> Dict[str, str]:
             'S': 'ctl_path', 'W': 'host:port', 'w': 'local_tun[:remote_tun]'
         }
 
-    ans: Dict[str, str] = {}
+    ans: dict[str, str] = {}
     pos = 0
     while True:
-        pos = raw.find('[', pos)
+        pos = raw.find('[', pos)  # ]
         if pos < 0:
             break
         num = 1
@@ -40,7 +41,7 @@ def ssh_options() -> Dict[str, str]:
             epos += 1
             if raw[epos] not in '[]':
                 continue
-            num += 1 if raw[epos] == '[' else -1
+            num += 1 if raw[epos] == '[' else -1  # ]
         q = raw[pos+1:epos]
         pos = epos
         if len(q) < 2 or q[0] != '-':
@@ -68,7 +69,7 @@ def is_kitten_cmdline(q: Sequence[str]) -> bool:
     return q[1:3] == ['+runpy', 'from kittens.runner import main; main()'] and len(q) >= 6 and q[5] == 'ssh'
 
 
-def patch_cmdline(key: str, val: str, argv: List[str]) -> None:
+def patch_cmdline(key: str, val: str, argv: list[str]) -> None:
     for i, arg in enumerate(tuple(argv)):
         if arg.startswith(f'--kitten={key}='):
             argv[i] = f'--kitten={key}={val}'
@@ -80,7 +81,26 @@ def patch_cmdline(key: str, val: str, argv: List[str]) -> None:
     argv.insert(idx + 1, f'--kitten={key}={val}')
 
 
-def set_cwd_in_cmdline(cwd: str, argv: List[str]) -> None:
+def remove_env_var_from_cmdline(key: str, argv: list[str]) -> None:
+    while True:
+        for i, arg in enumerate(tuple(argv)):
+            if arg.startswith(f'--kitten=env={key}='):
+                del argv[i]
+                break
+            elif i > 0 and argv[i-1] == '--kitten' and (arg.startswith(f'env={key}=') or arg.startswith(f'env {key}=')):
+                del argv[i-1:i+1]
+                break
+        else:
+            break
+
+
+def set_single_env_var_in_cmdline(key: str, val: str, argv: list[str]) -> None:
+    remove_env_var_from_cmdline(key, argv)
+    idx = argv.index('ssh')
+    argv.insert(idx+1, f'--kitten=env={key}={val}')
+
+
+def set_cwd_in_cmdline(cwd: str, argv: list[str]) -> None:
     patch_cmdline('cwd', cwd, argv)
 
 
@@ -88,12 +108,14 @@ def create_shared_memory(data: Any, prefix: str) -> str:
     import atexit
     import json
 
+    from kitty.fast_data_types import get_boss
     from kitty.shm import SharedMemory
     db = json.dumps(data).encode('utf-8')
     with SharedMemory(size=len(db) + SharedMemory.num_bytes_for_size, prefix=prefix) as shm:
         shm.write_data_with_size(db)
         shm.flush()
-        atexit.register(shm.unlink)
+        atexit.register(shm.close)  # keeps shm alive till exit
+        get_boss().atexit.shm_unlink(shm.name)
     return shm.name
 
 
@@ -112,7 +134,7 @@ def read_data_from_shared_memory(shm_name: str) -> Any:
         return json.loads(shm.read_data_with_size())
 
 
-def get_ssh_data(msgb: memoryview, request_id: str) -> Iterator[bytes]:
+def get_ssh_data(msgb: memoryview, request_id: str) -> Iterator[bytes|memoryview]:
     from base64 import standard_b64decode
     yield b'\nKITTY_DATA_START\n'  # to discard leading data
     try:
@@ -133,7 +155,7 @@ def get_ssh_data(msgb: memoryview, request_id: str) -> Iterator[bytes]:
                 raise ValueError(f'Incorrect request id: {rq_id!r} expecting the KITTY_PID-KITTY_WINDOW_ID for the current kitty window')
         except Exception as e:
             traceback.print_exc()
-            yield f'{e}\n'.encode('utf-8')
+            yield f'{e}\n'.encode()
         else:
             yield b'OK\n'
             encoded_data = memoryview(env_data['tarfile'].encode('ascii'))
@@ -148,12 +170,12 @@ def get_ssh_data(msgb: memoryview, request_id: str) -> Iterator[bytes]:
             yield b'KITTY_DATA_END\n'
 
 
-def set_env_in_cmdline(env: Dict[str, str], argv: List[str], clone: bool = True) -> None:
+def set_env_in_cmdline(env: dict[str, str], argv: list[str], clone: bool = True) -> None:
     from kitty.options.utils import DELETE_ENV_VAR
     if clone:
         patch_cmdline('clone_env', create_shared_memory(env, 'ksse-'), argv)
         return
-    idx = argv.index('ssh')
+    idx = argv.index('ssh') - 1
     for i in range(idx, len(argv)):
         if argv[i] == '--kitten':
             idx = i + 1
@@ -169,9 +191,9 @@ def set_env_in_cmdline(env: Dict[str, str], argv: List[str], clone: bool = True)
     argv[idx+1:idx+1] = env_dirs
 
 
-def get_ssh_cli() -> Tuple[Set[str], Set[str]]:
-    other_ssh_args: Set[str] = set()
-    boolean_ssh_args: Set[str] = set()
+def get_ssh_cli() -> tuple[set[str], set[str]]:
+    other_ssh_args: set[str] = set()
+    boolean_ssh_args: set[str] = set()
     for k, v in ssh_options().items():
         k = f'-{k}'
         if v:
@@ -181,7 +203,7 @@ def get_ssh_cli() -> Tuple[Set[str], Set[str]]:
     return boolean_ssh_args, other_ssh_args
 
 
-def is_extra_arg(arg: str, extra_args: Tuple[str, ...]) -> str:
+def is_extra_arg(arg: str, extra_args: tuple[str, ...]) -> str:
     for x in extra_args:
         if arg == x or arg.startswith(f'{x}='):
             return x
@@ -192,14 +214,14 @@ passthrough_args = {f'-{x}' for x in 'NnfGT'}
 
 
 def set_server_args_in_cmdline(
-    server_args: List[str], argv: List[str],
-    extra_args: Tuple[str, ...] = ('--kitten',),
+    server_args: list[str], argv: list[str],
+    extra_args: tuple[str, ...] = ('--kitten',),
     allocate_tty: bool = False
 ) -> None:
     boolean_ssh_args, other_ssh_args = get_ssh_cli()
     ssh_args = []
     expecting_option_val = False
-    found_extra_args: List[str] = []
+    found_extra_args: list[str] = []
     expecting_extra_val = ''
     ans = list(argv)
     found_ssh = False
@@ -255,15 +277,15 @@ def set_server_args_in_cmdline(
     argv[:] = ans + server_args
 
 
-def get_connection_data(args: List[str], cwd: str = '', extra_args: Tuple[str, ...] = ()) -> Optional[SSHConnectionData]:
+def get_connection_data(args: list[str], cwd: str = '', extra_args: tuple[str, ...] = ()) -> SSHConnectionData | None:
     boolean_ssh_args, other_ssh_args = get_ssh_cli()
-    port: Optional[int] = None
+    port: int | None = None
     expecting_port = expecting_identity = False
     expecting_option_val = False
     expecting_hostname = False
     expecting_extra_val = ''
     host_name = identity_file = found_ssh = ''
-    found_extra_args: List[Tuple[str, str]] = []
+    found_extra_args: list[tuple[str, str]] = []
 
     for i, arg in enumerate(args):
         if not found_ssh:

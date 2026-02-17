@@ -2,6 +2,7 @@
 
 # isort: skip_file
 import typing
+import collections.abc  # noqa: F401, RUF100
 from array import array
 from kitty.constants import is_macos
 import kitty.constants
@@ -10,7 +11,7 @@ import kitty.fast_data_types
 from kitty.fonts import FontSpec
 import kitty.fonts
 from kitty.options.utils import (
-    AliasMap, KeyDefinition, KeyboardModeMap, MouseMap, MouseMapping, NotifyOnCmdFinish,
+    AliasMap, KeyDefinition, KeyboardModeMap, MouseHideWait, MouseMap, MouseMapping, NotifyOnCmdFinish,
     TabBarMarginHeight
 )
 import kitty.options.utils
@@ -25,8 +26,8 @@ choices_for_linux_display_server = typing.Literal['auto', 'wayland', 'x11']
 choices_for_macos_colorspace = typing.Literal['srgb', 'default', 'displayp3']
 choices_for_macos_show_window_title_in = typing.Literal['all', 'menubar', 'none', 'window']
 choices_for_placement_strategy = typing.Literal['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right']
-choices_for_pointer_shape_when_dragging = choices_for_default_pointer_shape
 choices_for_pointer_shape_when_grabbed = choices_for_default_pointer_shape
+choices_for_scrollbar = typing.Literal['scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered']
 choices_for_strip_trailing_spaces = typing.Literal['always', 'never', 'smart']
 choices_for_tab_bar_align = typing.Literal['left', 'center', 'right']
 choices_for_tab_bar_style = typing.Literal['fade', 'hidden', 'powerline', 'separator', 'slant', 'custom']
@@ -37,451 +38,476 @@ choices_for_undercurl_style = typing.Literal['thin-sparse', 'thin-dense', 'thick
 choices_for_underline_hyperlinks = typing.Literal['hover', 'always', 'never']
 choices_for_window_logo_position = choices_for_placement_strategy
 
-option_names = (  # {{{
- 'action_alias',
- 'active_border_color',
- 'active_tab_background',
- 'active_tab_font_style',
- 'active_tab_foreground',
- 'active_tab_title_template',
- 'allow_cloning',
- 'allow_hyperlinks',
- 'allow_remote_control',
- 'background',
- 'background_blur',
- 'background_image',
- 'background_image_layout',
- 'background_image_linear',
- 'background_opacity',
- 'background_tint',
- 'background_tint_gaps',
- 'bell_border_color',
- 'bell_on_tab',
- 'bell_path',
- 'bold_font',
- 'bold_italic_font',
- 'box_drawing_scale',
- 'clear_all_mouse_actions',
- 'clear_all_shortcuts',
- 'click_interval',
- 'clipboard_control',
- 'clipboard_max_size',
- 'clone_source_strategies',
- 'close_on_child_death',
- 'color0',
- 'color1',
- 'color2',
- 'color3',
- 'color4',
- 'color5',
- 'color6',
- 'color7',
- 'color8',
- 'color9',
- 'color10',
- 'color11',
- 'color12',
- 'color13',
- 'color14',
- 'color15',
- 'color16',
- 'color17',
- 'color18',
- 'color19',
- 'color20',
- 'color21',
- 'color22',
- 'color23',
- 'color24',
- 'color25',
- 'color26',
- 'color27',
- 'color28',
- 'color29',
- 'color30',
- 'color31',
- 'color32',
- 'color33',
- 'color34',
- 'color35',
- 'color36',
- 'color37',
- 'color38',
- 'color39',
- 'color40',
- 'color41',
- 'color42',
- 'color43',
- 'color44',
- 'color45',
- 'color46',
- 'color47',
- 'color48',
- 'color49',
- 'color50',
- 'color51',
- 'color52',
- 'color53',
- 'color54',
- 'color55',
- 'color56',
- 'color57',
- 'color58',
- 'color59',
- 'color60',
- 'color61',
- 'color62',
- 'color63',
- 'color64',
- 'color65',
- 'color66',
- 'color67',
- 'color68',
- 'color69',
- 'color70',
- 'color71',
- 'color72',
- 'color73',
- 'color74',
- 'color75',
- 'color76',
- 'color77',
- 'color78',
- 'color79',
- 'color80',
- 'color81',
- 'color82',
- 'color83',
- 'color84',
- 'color85',
- 'color86',
- 'color87',
- 'color88',
- 'color89',
- 'color90',
- 'color91',
- 'color92',
- 'color93',
- 'color94',
- 'color95',
- 'color96',
- 'color97',
- 'color98',
- 'color99',
- 'color100',
- 'color101',
- 'color102',
- 'color103',
- 'color104',
- 'color105',
- 'color106',
- 'color107',
- 'color108',
- 'color109',
- 'color110',
- 'color111',
- 'color112',
- 'color113',
- 'color114',
- 'color115',
- 'color116',
- 'color117',
- 'color118',
- 'color119',
- 'color120',
- 'color121',
- 'color122',
- 'color123',
- 'color124',
- 'color125',
- 'color126',
- 'color127',
- 'color128',
- 'color129',
- 'color130',
- 'color131',
- 'color132',
- 'color133',
- 'color134',
- 'color135',
- 'color136',
- 'color137',
- 'color138',
- 'color139',
- 'color140',
- 'color141',
- 'color142',
- 'color143',
- 'color144',
- 'color145',
- 'color146',
- 'color147',
- 'color148',
- 'color149',
- 'color150',
- 'color151',
- 'color152',
- 'color153',
- 'color154',
- 'color155',
- 'color156',
- 'color157',
- 'color158',
- 'color159',
- 'color160',
- 'color161',
- 'color162',
- 'color163',
- 'color164',
- 'color165',
- 'color166',
- 'color167',
- 'color168',
- 'color169',
- 'color170',
- 'color171',
- 'color172',
- 'color173',
- 'color174',
- 'color175',
- 'color176',
- 'color177',
- 'color178',
- 'color179',
- 'color180',
- 'color181',
- 'color182',
- 'color183',
- 'color184',
- 'color185',
- 'color186',
- 'color187',
- 'color188',
- 'color189',
- 'color190',
- 'color191',
- 'color192',
- 'color193',
- 'color194',
- 'color195',
- 'color196',
- 'color197',
- 'color198',
- 'color199',
- 'color200',
- 'color201',
- 'color202',
- 'color203',
- 'color204',
- 'color205',
- 'color206',
- 'color207',
- 'color208',
- 'color209',
- 'color210',
- 'color211',
- 'color212',
- 'color213',
- 'color214',
- 'color215',
- 'color216',
- 'color217',
- 'color218',
- 'color219',
- 'color220',
- 'color221',
- 'color222',
- 'color223',
- 'color224',
- 'color225',
- 'color226',
- 'color227',
- 'color228',
- 'color229',
- 'color230',
- 'color231',
- 'color232',
- 'color233',
- 'color234',
- 'color235',
- 'color236',
- 'color237',
- 'color238',
- 'color239',
- 'color240',
- 'color241',
- 'color242',
- 'color243',
- 'color244',
- 'color245',
- 'color246',
- 'color247',
- 'color248',
- 'color249',
- 'color250',
- 'color251',
- 'color252',
- 'color253',
- 'color254',
- 'color255',
- 'command_on_bell',
- 'confirm_os_window_close',
- 'copy_on_select',
- 'cursor',
- 'cursor_beam_thickness',
- 'cursor_blink_interval',
- 'cursor_shape',
- 'cursor_shape_unfocused',
- 'cursor_stop_blinking_after',
- 'cursor_text_color',
- 'cursor_underline_thickness',
- 'default_pointer_shape',
- 'detect_urls',
- 'dim_opacity',
- 'disable_ligatures',
- 'draw_minimal_borders',
- 'dynamic_background_opacity',
- 'editor',
- 'enable_audio_bell',
- 'enabled_layouts',
- 'env',
- 'exe_search_path',
- 'file_transfer_confirmation_bypass',
- 'filter_notification',
- 'focus_follows_mouse',
- 'font_family',
- 'font_features',
- 'font_size',
- 'force_ltr',
- 'foreground',
- 'forward_stdio',
- 'hide_window_decorations',
- 'inactive_border_color',
- 'inactive_tab_background',
- 'inactive_tab_font_style',
- 'inactive_tab_foreground',
- 'inactive_text_alpha',
- 'initial_window_height',
- 'initial_window_width',
- 'input_delay',
- 'italic_font',
- 'kitten_alias',
- 'kitty_mod',
- 'linux_bell_theme',
- 'linux_display_server',
- 'listen_on',
- 'macos_colorspace',
- 'macos_custom_beam_cursor',
- 'macos_hide_from_tasks',
- 'macos_menubar_title_max_length',
- 'macos_option_as_alt',
- 'macos_quit_when_last_window_closed',
- 'macos_show_window_title_in',
- 'macos_thicken_font',
- 'macos_titlebar_color',
- 'macos_traditional_fullscreen',
- 'macos_window_resizable',
- 'map',
- 'mark1_background',
- 'mark1_foreground',
- 'mark2_background',
- 'mark2_foreground',
- 'mark3_background',
- 'mark3_foreground',
- 'menu_map',
- 'modify_font',
- 'mouse_hide_wait',
- 'mouse_map',
- 'narrow_symbols',
- 'notify_on_cmd_finish',
- 'open_url_with',
- 'paste_actions',
- 'placement_strategy',
- 'pointer_shape_when_dragging',
- 'pointer_shape_when_grabbed',
- 'remember_window_size',
- 'remote_control_password',
- 'repaint_delay',
- 'resize_debounce_time',
- 'resize_in_steps',
- 'scrollback_fill_enlarged_window',
- 'scrollback_indicator_opacity',
- 'scrollback_lines',
- 'scrollback_pager',
- 'scrollback_pager_history_size',
- 'second_transparent_bg',
- 'select_by_word_characters',
- 'select_by_word_characters_forward',
- 'selection_background',
- 'selection_foreground',
- 'shell',
- 'shell_integration',
- 'show_hyperlink_targets',
- 'single_window_margin_width',
- 'single_window_padding_width',
- 'startup_session',
- 'strip_trailing_spaces',
- 'symbol_map',
- 'sync_to_monitor',
- 'tab_activity_symbol',
- 'tab_bar_align',
- 'tab_bar_background',
- 'tab_bar_edge',
- 'tab_bar_margin_color',
- 'tab_bar_margin_height',
- 'tab_bar_margin_width',
- 'tab_bar_min_tabs',
- 'tab_bar_style',
- 'tab_fade',
- 'tab_powerline_style',
- 'tab_separator',
- 'tab_switch_strategy',
- 'tab_title_max_length',
- 'tab_title_template',
- 'term',
- 'terminfo_type',
- 'text_composition_strategy',
- 'text_fg_override_threshold',
- 'touch_scroll_multiplier',
- 'undercurl_style',
- 'underline_hyperlinks',
- 'update_check_interval',
- 'url_color',
- 'url_excluded_characters',
- 'url_prefixes',
- 'url_style',
- 'visual_bell_color',
- 'visual_bell_duration',
- 'visual_window_select_characters',
- 'watcher',
- 'wayland_enable_ime',
- 'wayland_titlebar_color',
- 'wheel_scroll_min_lines',
- 'wheel_scroll_multiplier',
- 'window_alert_on_bell',
- 'window_border_width',
- 'window_logo_alpha',
- 'window_logo_path',
- 'window_logo_position',
- 'window_logo_scale',
- 'window_margin_width',
- 'window_padding_width',
- 'window_resize_step_cells',
- 'window_resize_step_lines')  # }}}
+option_names = (
+    'action_alias',
+    'active_border_color',
+    'active_tab_background',
+    'active_tab_font_style',
+    'active_tab_foreground',
+    'active_tab_title_template',
+    'allow_cloning',
+    'allow_hyperlinks',
+    'allow_remote_control',
+    'background',
+    'background_blur',
+    'background_image',
+    'background_image_layout',
+    'background_image_linear',
+    'background_opacity',
+    'background_tint',
+    'background_tint_gaps',
+    'bell_border_color',
+    'bell_on_tab',
+    'bell_path',
+    'bold_font',
+    'bold_italic_font',
+    'box_drawing_scale',
+    'clear_all_mouse_actions',
+    'clear_all_shortcuts',
+    'clear_selection_on_clipboard_loss',
+    'click_interval',
+    'clipboard_control',
+    'clipboard_max_size',
+    'clone_source_strategies',
+    'close_on_child_death',
+    'color0',
+    'color1',
+    'color2',
+    'color3',
+    'color4',
+    'color5',
+    'color6',
+    'color7',
+    'color8',
+    'color9',
+    'color10',
+    'color11',
+    'color12',
+    'color13',
+    'color14',
+    'color15',
+    'color16',
+    'color17',
+    'color18',
+    'color19',
+    'color20',
+    'color21',
+    'color22',
+    'color23',
+    'color24',
+    'color25',
+    'color26',
+    'color27',
+    'color28',
+    'color29',
+    'color30',
+    'color31',
+    'color32',
+    'color33',
+    'color34',
+    'color35',
+    'color36',
+    'color37',
+    'color38',
+    'color39',
+    'color40',
+    'color41',
+    'color42',
+    'color43',
+    'color44',
+    'color45',
+    'color46',
+    'color47',
+    'color48',
+    'color49',
+    'color50',
+    'color51',
+    'color52',
+    'color53',
+    'color54',
+    'color55',
+    'color56',
+    'color57',
+    'color58',
+    'color59',
+    'color60',
+    'color61',
+    'color62',
+    'color63',
+    'color64',
+    'color65',
+    'color66',
+    'color67',
+    'color68',
+    'color69',
+    'color70',
+    'color71',
+    'color72',
+    'color73',
+    'color74',
+    'color75',
+    'color76',
+    'color77',
+    'color78',
+    'color79',
+    'color80',
+    'color81',
+    'color82',
+    'color83',
+    'color84',
+    'color85',
+    'color86',
+    'color87',
+    'color88',
+    'color89',
+    'color90',
+    'color91',
+    'color92',
+    'color93',
+    'color94',
+    'color95',
+    'color96',
+    'color97',
+    'color98',
+    'color99',
+    'color100',
+    'color101',
+    'color102',
+    'color103',
+    'color104',
+    'color105',
+    'color106',
+    'color107',
+    'color108',
+    'color109',
+    'color110',
+    'color111',
+    'color112',
+    'color113',
+    'color114',
+    'color115',
+    'color116',
+    'color117',
+    'color118',
+    'color119',
+    'color120',
+    'color121',
+    'color122',
+    'color123',
+    'color124',
+    'color125',
+    'color126',
+    'color127',
+    'color128',
+    'color129',
+    'color130',
+    'color131',
+    'color132',
+    'color133',
+    'color134',
+    'color135',
+    'color136',
+    'color137',
+    'color138',
+    'color139',
+    'color140',
+    'color141',
+    'color142',
+    'color143',
+    'color144',
+    'color145',
+    'color146',
+    'color147',
+    'color148',
+    'color149',
+    'color150',
+    'color151',
+    'color152',
+    'color153',
+    'color154',
+    'color155',
+    'color156',
+    'color157',
+    'color158',
+    'color159',
+    'color160',
+    'color161',
+    'color162',
+    'color163',
+    'color164',
+    'color165',
+    'color166',
+    'color167',
+    'color168',
+    'color169',
+    'color170',
+    'color171',
+    'color172',
+    'color173',
+    'color174',
+    'color175',
+    'color176',
+    'color177',
+    'color178',
+    'color179',
+    'color180',
+    'color181',
+    'color182',
+    'color183',
+    'color184',
+    'color185',
+    'color186',
+    'color187',
+    'color188',
+    'color189',
+    'color190',
+    'color191',
+    'color192',
+    'color193',
+    'color194',
+    'color195',
+    'color196',
+    'color197',
+    'color198',
+    'color199',
+    'color200',
+    'color201',
+    'color202',
+    'color203',
+    'color204',
+    'color205',
+    'color206',
+    'color207',
+    'color208',
+    'color209',
+    'color210',
+    'color211',
+    'color212',
+    'color213',
+    'color214',
+    'color215',
+    'color216',
+    'color217',
+    'color218',
+    'color219',
+    'color220',
+    'color221',
+    'color222',
+    'color223',
+    'color224',
+    'color225',
+    'color226',
+    'color227',
+    'color228',
+    'color229',
+    'color230',
+    'color231',
+    'color232',
+    'color233',
+    'color234',
+    'color235',
+    'color236',
+    'color237',
+    'color238',
+    'color239',
+    'color240',
+    'color241',
+    'color242',
+    'color243',
+    'color244',
+    'color245',
+    'color246',
+    'color247',
+    'color248',
+    'color249',
+    'color250',
+    'color251',
+    'color252',
+    'color253',
+    'color254',
+    'color255',
+    'command_on_bell',
+    'confirm_os_window_close',
+    'copy_on_select',
+    'cursor',
+    'cursor_beam_thickness',
+    'cursor_blink_interval',
+    'cursor_shape',
+    'cursor_shape_unfocused',
+    'cursor_stop_blinking_after',
+    'cursor_text_color',
+    'cursor_trail',
+    'cursor_trail_color',
+    'cursor_trail_decay',
+    'cursor_trail_start_threshold',
+    'cursor_underline_thickness',
+    'default_pointer_shape',
+    'detect_urls',
+    'dim_opacity',
+    'disable_ligatures',
+    'draw_minimal_borders',
+    'draw_window_borders_for_single_window',
+    'dynamic_background_opacity',
+    'editor',
+    'enable_audio_bell',
+    'enabled_layouts',
+    'env',
+    'exe_search_path',
+    'file_transfer_confirmation_bypass',
+    'filter_notification',
+    'focus_follows_mouse',
+    'font_family',
+    'font_features',
+    'font_size',
+    'force_ltr',
+    'foreground',
+    'forward_stdio',
+    'hide_window_decorations',
+    'inactive_border_color',
+    'inactive_tab_background',
+    'inactive_tab_font_style',
+    'inactive_tab_foreground',
+    'inactive_text_alpha',
+    'initial_window_height',
+    'initial_window_width',
+    'input_delay',
+    'italic_font',
+    'kitten_alias',
+    'kitty_mod',
+    'linux_bell_theme',
+    'linux_display_server',
+    'listen_on',
+    'macos_colorspace',
+    'macos_custom_beam_cursor',
+    'macos_hide_from_tasks',
+    'macos_menubar_title_max_length',
+    'macos_option_as_alt',
+    'macos_quit_when_last_window_closed',
+    'macos_show_window_title_in',
+    'macos_thicken_font',
+    'macos_titlebar_color',
+    'macos_traditional_fullscreen',
+    'macos_window_resizable',
+    'map',
+    'mark1_background',
+    'mark1_foreground',
+    'mark2_background',
+    'mark2_foreground',
+    'mark3_background',
+    'mark3_foreground',
+    'menu_map',
+    'modify_font',
+    'momentum_scroll',
+    'mouse_hide_wait',
+    'mouse_map',
+    'narrow_symbols',
+    'notify_on_cmd_finish',
+    'open_url_with',
+    'paste_actions',
+    'pixel_scroll',
+    'placement_strategy',
+    'pointer_shape_when_dragging',
+    'pointer_shape_when_grabbed',
+    'remember_window_position',
+    'remember_window_size',
+    'remote_control_password',
+    'repaint_delay',
+    'resize_debounce_time',
+    'resize_in_steps',
+    'scrollback_fill_enlarged_window',
+    'scrollback_lines',
+    'scrollback_pager',
+    'scrollback_pager_history_size',
+    'scrollbar',
+    'scrollbar_gap',
+    'scrollbar_handle_color',
+    'scrollbar_handle_opacity',
+    'scrollbar_hitbox_expansion',
+    'scrollbar_hover_width',
+    'scrollbar_interactive',
+    'scrollbar_jump_on_click',
+    'scrollbar_min_handle_height',
+    'scrollbar_radius',
+    'scrollbar_track_color',
+    'scrollbar_track_hover_opacity',
+    'scrollbar_track_opacity',
+    'scrollbar_width',
+    'select_by_word_characters',
+    'select_by_word_characters_forward',
+    'selection_background',
+    'selection_foreground',
+    'shell',
+    'shell_integration',
+    'show_hyperlink_targets',
+    'single_window_margin_width',
+    'single_window_padding_width',
+    'startup_session',
+    'strip_trailing_spaces',
+    'symbol_map',
+    'sync_to_monitor',
+    'tab_activity_symbol',
+    'tab_bar_align',
+    'tab_bar_background',
+    'tab_bar_edge',
+    'tab_bar_filter',
+    'tab_bar_margin_color',
+    'tab_bar_margin_height',
+    'tab_bar_margin_width',
+    'tab_bar_min_tabs',
+    'tab_bar_style',
+    'tab_fade',
+    'tab_powerline_style',
+    'tab_separator',
+    'tab_switch_strategy',
+    'tab_title_max_length',
+    'tab_title_template',
+    'term',
+    'terminfo_type',
+    'text_composition_strategy',
+    'text_fg_override_threshold',
+    'touch_scroll_multiplier',
+    'transparent_background_colors',
+    'undercurl_style',
+    'underline_exclusion',
+    'underline_hyperlinks',
+    'update_check_interval',
+    'url_color',
+    'url_excluded_characters',
+    'url_prefixes',
+    'url_style',
+    'visual_bell_color',
+    'visual_bell_duration',
+    'visual_window_select_characters',
+    'watcher',
+    'wayland_enable_ime',
+    'wayland_titlebar_color',
+    'wheel_scroll_min_lines',
+    'wheel_scroll_multiplier',
+    'window_alert_on_bell',
+    'window_border_width',
+    'window_logo_alpha',
+    'window_logo_path',
+    'window_logo_position',
+    'window_logo_scale',
+    'window_margin_width',
+    'window_padding_width',
+    'window_resize_step_cells',
+    'window_resize_step_lines',
+)
 
 
 class Options:
-    active_border_color: typing.Optional[kitty.fast_data_types.Color] = Color(0, 255, 0)
+    active_border_color: kitty.fast_data_types.Color | None = Color(0, 255, 0)
     active_tab_background: Color = Color(238, 238, 238)
-    active_tab_font_style: typing.Tuple[bool, bool] = (True, True)
+    active_tab_font_style: tuple[bool, bool] = (True, True)
     active_tab_foreground: Color = Color(0, 0, 0)
-    active_tab_title_template: typing.Optional[str] = None
+    active_tab_title_template: str | None = None
     allow_cloning: choices_for_allow_cloning = 'ask'
     allow_hyperlinks: int = 1
     allow_remote_control: choices_for_allow_remote_control = 'no'
     background: Color = Color(0, 0, 0)
     background_blur: int = 0
-    background_image: typing.Optional[str] = None
+    background_image: str | None = None
     background_image_layout: choices_for_background_image_layout = 'tiled'
     background_image_linear: bool = False
     background_opacity: float = 1.0
@@ -489,37 +515,43 @@ class Options:
     background_tint_gaps: float = 1.0
     bell_border_color: Color = Color(255, 90, 0)
     bell_on_tab: str = '🔔 '
-    bell_path: typing.Optional[str] = None
+    bell_path: str | None = None
     bold_font: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='auto', axes=(), variable_name=None, features=(), created_from_string='auto')
     bold_italic_font: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='auto', axes=(), variable_name=None, features=(), created_from_string='auto')
-    box_drawing_scale: typing.Tuple[float, float, float, float] = (0.001, 1.0, 1.5, 2.0)
+    box_drawing_scale: tuple[float, float, float, float] = (0.001, 1.0, 1.5, 2.0)
     clear_all_mouse_actions: bool = False
     clear_all_shortcuts: bool = False
+    clear_selection_on_clipboard_loss: bool = False
     click_interval: float = -1.0
-    clipboard_control: typing.Tuple[str, ...] = ('write-clipboard', 'write-primary', 'read-clipboard-ask', 'read-primary-ask')
+    clipboard_control: tuple[str, ...] = ('write-clipboard', 'write-primary', 'read-clipboard-ask', 'read-primary-ask')
     clipboard_max_size: float = 512.0
-    clone_source_strategies: typing.FrozenSet[str] = frozenset({'conda', 'env_var', 'path', 'venv'})
+    clone_source_strategies: frozenset[str] = frozenset({'conda', 'env_var', 'path', 'venv'})
     close_on_child_death: bool = False
-    command_on_bell: typing.List[str] = ['none']
-    confirm_os_window_close: int = -1
+    command_on_bell: list[str] = ['none']
+    confirm_os_window_close: tuple[int, bool] = (-1, False)
     copy_on_select: str = ''
-    cursor: typing.Optional[kitty.fast_data_types.Color] = Color(204, 204, 204)
+    cursor: kitty.fast_data_types.Color | None = Color(204, 204, 204)
     cursor_beam_thickness: float = 1.5
-    cursor_blink_interval: typing.Tuple[float, kitty.options.utils.EasingFunction, kitty.options.utils.EasingFunction] = (-1.0, kitty.options.utils.EasingFunction(), kitty.options.utils.EasingFunction())
+    cursor_blink_interval: tuple[float, kitty.options.utils.EasingFunction, kitty.options.utils.EasingFunction] = (-1.0, kitty.options.utils.EasingFunction(), kitty.options.utils.EasingFunction())
     cursor_shape: int = 1
-    cursor_shape_unfocused: int = 0
+    cursor_shape_unfocused: int = 4
     cursor_stop_blinking_after: float = 15.0
-    cursor_text_color: typing.Optional[kitty.fast_data_types.Color] = Color(17, 17, 17)
+    cursor_text_color: kitty.fast_data_types.Color | None = Color(17, 17, 17)
+    cursor_trail: int = 0
+    cursor_trail_color: kitty.fast_data_types.Color | None = None
+    cursor_trail_decay: tuple[float, float] = (0.1, 0.4)
+    cursor_trail_start_threshold: int = 2
     cursor_underline_thickness: float = 2.0
     default_pointer_shape: choices_for_default_pointer_shape = 'beam'
     detect_urls: bool = True
     dim_opacity: float = 0.4
     disable_ligatures: int = 0
     draw_minimal_borders: bool = True
+    draw_window_borders_for_single_window: bool = False
     dynamic_background_opacity: bool = False
     editor: str = '.'
     enable_audio_bell: bool = True
-    enabled_layouts: typing.List[str] = ['fat', 'grid', 'horizontal', 'splits', 'stack', 'tall', 'vertical']
+    enabled_layouts: list[str] = ['fat', 'grid', 'horizontal', 'splits', 'stack', 'tall', 'vertical']
     file_transfer_confirmation_bypass: str = ''
     focus_follows_mouse: bool = False
     font_family: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='monospace', axes=(), variable_name=None, features=(), created_from_string='monospace')
@@ -530,11 +562,11 @@ class Options:
     hide_window_decorations: int = 0
     inactive_border_color: Color = Color(204, 204, 204)
     inactive_tab_background: Color = Color(153, 153, 153)
-    inactive_tab_font_style: typing.Tuple[bool, bool] = (False, False)
+    inactive_tab_font_style: tuple[bool, bool] = (False, False)
     inactive_tab_foreground: Color = Color(68, 68, 68)
     inactive_text_alpha: float = 1.0
-    initial_window_height: typing.Tuple[int, str] = (400, 'px')
-    initial_window_width: typing.Tuple[int, str] = (640, 'px')
+    initial_window_height: tuple[int, str] = (400, 'px')
+    initial_window_width: tuple[int, str] = (640, 'px')
     input_delay: int = 3
     italic_font: FontSpec = FontSpec(family=None, style=None, postscript_name=None, full_name=None, system='auto', axes=(), variable_name=None, features=(), created_from_string='auto')
     kitty_mod: int = 5
@@ -558,95 +590,113 @@ class Options:
     mark2_foreground: Color = Color(0, 0, 0)
     mark3_background: Color = Color(242, 116, 188)
     mark3_foreground: Color = Color(0, 0, 0)
-    mouse_hide_wait: float = 0.0 if is_macos else 3.0
-    notify_on_cmd_finish: NotifyOnCmdFinish = NotifyOnCmdFinish(when='never', duration=5.0, action='notify', cmdline=())
-    open_url_with: typing.List[str] = ['default']
-    paste_actions: typing.FrozenSet[str] = frozenset({'confirm', 'quote-urls-at-prompt'})
+    momentum_scroll: float = 0.96
+    mouse_hide_wait: MouseHideWait = MouseHideWait(hide_wait=0.0, show_wait=0.0, show_threshold=40, scroll_show=True) if is_macos else MouseHideWait(hide_wait=3.0, show_wait=0.0, show_threshold=40, scroll_show=True)
+    notify_on_cmd_finish: NotifyOnCmdFinish = NotifyOnCmdFinish(when='never', duration=5.0, action='notify', cmdline=(), clear_on=('focus', 'next'))
+    open_url_with: list[str] = ['default']
+    paste_actions: frozenset[str] = frozenset({'confirm', 'quote-urls-at-prompt'})
+    pixel_scroll: bool = True
     placement_strategy: choices_for_placement_strategy = 'center'
-    pointer_shape_when_dragging: choices_for_pointer_shape_when_dragging = 'beam'
+    pointer_shape_when_dragging: tuple[str, str] = ('beam', 'crosshair')
     pointer_shape_when_grabbed: choices_for_pointer_shape_when_grabbed = 'arrow'
+    remember_window_position: bool = False
     remember_window_size: bool = True
     repaint_delay: int = 10
-    resize_debounce_time: typing.Tuple[float, float] = (0.1, 0.5)
+    resize_debounce_time: tuple[float, float] = (0.1, 0.5)
     resize_in_steps: bool = False
     scrollback_fill_enlarged_window: bool = False
-    scrollback_indicator_opacity: float = 1.0
     scrollback_lines: int = 2000
-    scrollback_pager: typing.List[str] = ['less', '--chop-long-lines', '--RAW-CONTROL-CHARS', '+INPUT_LINE_NUMBER']
+    scrollback_pager: list[str] = ['less', '--chop-long-lines', '--RAW-CONTROL-CHARS', '+INPUT_LINE_NUMBER']
     scrollback_pager_history_size: int = 0
-    second_transparent_bg: typing.Optional[kitty.fast_data_types.Color] = None
+    scrollbar: choices_for_scrollbar = 'scrolled'
+    scrollbar_gap: float = 0.1
+    scrollbar_handle_color: int = 0
+    scrollbar_handle_opacity: float = 0.5
+    scrollbar_hitbox_expansion: float = 0.25
+    scrollbar_hover_width: float = 1.0
+    scrollbar_interactive: bool = True
+    scrollbar_jump_on_click: bool = True
+    scrollbar_min_handle_height: float = 1.0
+    scrollbar_radius: float = 0.3
+    scrollbar_track_color: int = 0
+    scrollbar_track_hover_opacity: float = 0.1
+    scrollbar_track_opacity: float = 0
+    scrollbar_width: float = 0.5
     select_by_word_characters: str = '@-./_~?&=%+#'
     select_by_word_characters_forward: str = ''
-    selection_background: typing.Optional[kitty.fast_data_types.Color] = Color(255, 250, 205)
-    selection_foreground: typing.Optional[kitty.fast_data_types.Color] = Color(0, 0, 0)
+    selection_background: kitty.fast_data_types.Color | None = Color(255, 250, 205)
+    selection_foreground: kitty.fast_data_types.Color | None = Color(0, 0, 0)
     shell: str = '.'
-    shell_integration: typing.FrozenSet[str] = frozenset({'enabled'})
+    shell_integration: frozenset[str] = frozenset({'enabled'})
     show_hyperlink_targets: bool = False
     single_window_margin_width: FloatEdges = FloatEdges(left=-1.0, top=-1.0, right=-1.0, bottom=-1.0)
     single_window_padding_width: FloatEdges = FloatEdges(left=-1.0, top=-1.0, right=-1.0, bottom=-1.0)
-    startup_session: typing.Optional[str] = None
+    startup_session: str | None = None
     strip_trailing_spaces: choices_for_strip_trailing_spaces = 'never'
     sync_to_monitor: bool = True
     tab_activity_symbol: str = ''
     tab_bar_align: choices_for_tab_bar_align = 'left'
-    tab_bar_background: typing.Optional[kitty.fast_data_types.Color] = None
-    tab_bar_edge: int = 3
-    tab_bar_margin_color: typing.Optional[kitty.fast_data_types.Color] = None
+    tab_bar_background: kitty.fast_data_types.Color | None = None
+    tab_bar_edge: int = 8
+    tab_bar_filter: str = ''
+    tab_bar_margin_color: kitty.fast_data_types.Color | None = None
     tab_bar_margin_height: TabBarMarginHeight = TabBarMarginHeight(outer=0, inner=0)
     tab_bar_margin_width: float = 0
     tab_bar_min_tabs: int = 2
     tab_bar_style: choices_for_tab_bar_style = 'fade'
-    tab_fade: typing.Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
+    tab_fade: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
     tab_powerline_style: choices_for_tab_powerline_style = 'angled'
     tab_separator: str = ' ┇'
     tab_switch_strategy: choices_for_tab_switch_strategy = 'previous'
     tab_title_max_length: int = 0
-    tab_title_template: str = '{fmt.fg.red}{bell_symbol}{activity_symbol}{fmt.fg.tab}{title}'
+    tab_title_template: str = '{fmt.fg.red}{bell_symbol}{activity_symbol}{fmt.fg.tab}{tab.last_focused_progress_percent}{title}'
     term: str = 'xterm-kitty'
     terminfo_type: choices_for_terminfo_type = 'path'
     text_composition_strategy: str = 'platform'
-    text_fg_override_threshold: float = 0.0
+    text_fg_override_threshold: tuple[float, typing.Literal['%', 'ratio']] = (0.0, '%')
     touch_scroll_multiplier: float = 1.0
+    transparent_background_colors: tuple[tuple[kitty.fast_data_types.Color, float], ...] = ()
     undercurl_style: choices_for_undercurl_style = 'thin-sparse'
+    underline_exclusion: tuple[float, typing.Literal['', 'px', 'pt']] = (1.0, '')
     underline_hyperlinks: choices_for_underline_hyperlinks = 'hover'
     update_check_interval: float = 24.0
     url_color: Color = Color(0, 135, 189)
     url_excluded_characters: str = ''
-    url_prefixes: typing.Tuple[str, ...] = ('file', 'ftp', 'ftps', 'gemini', 'git', 'gopher', 'http', 'https', 'irc', 'ircs', 'kitty', 'mailto', 'news', 'sftp', 'ssh')
+    url_prefixes: tuple[str, ...] = ('file', 'ftp', 'ftps', 'gemini', 'git', 'gopher', 'http', 'https', 'irc', 'ircs', 'kitty', 'mailto', 'news', 'sftp', 'ssh')
     url_style: int = 3
-    visual_bell_color: typing.Optional[kitty.fast_data_types.Color] = None
-    visual_bell_duration: typing.Tuple[float, kitty.options.utils.EasingFunction, kitty.options.utils.EasingFunction] = (0.0, kitty.options.utils.EasingFunction(), kitty.options.utils.EasingFunction())
+    visual_bell_color: kitty.fast_data_types.Color | None = None
+    visual_bell_duration: tuple[float, kitty.options.utils.EasingFunction, kitty.options.utils.EasingFunction] = (0.0, kitty.options.utils.EasingFunction(), kitty.options.utils.EasingFunction())
     visual_window_select_characters: str = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     wayland_enable_ime: bool = True
     wayland_titlebar_color: int = 0
     wheel_scroll_min_lines: int = 1
     wheel_scroll_multiplier: float = 5.0
     window_alert_on_bell: bool = True
-    window_border_width: typing.Tuple[float, str] = (0.5, 'pt')
+    window_border_width: tuple[float, str] = (0.5, 'pt')
     window_logo_alpha: float = 0.5
-    window_logo_path: typing.Optional[str] = None
+    window_logo_path: str | None = None
     window_logo_position: choices_for_window_logo_position = 'bottom-right'
-    window_logo_scale: typing.Tuple[float, float] = (0, -1.0)
+    window_logo_scale: tuple[float, float] = (0, -1.0)
     window_margin_width: FloatEdges = FloatEdges(left=0, top=0, right=0, bottom=0)
     window_padding_width: FloatEdges = FloatEdges(left=0, top=0, right=0, bottom=0)
     window_resize_step_cells: int = 2
     window_resize_step_lines: int = 2
-    action_alias: typing.Dict[str, str] = {}
-    env: typing.Dict[str, str] = {}
-    exe_search_path: typing.Dict[str, str] = {}
-    filter_notification: typing.Dict[str, str] = {}
-    font_features: typing.Dict[str, typing.Tuple[kitty.fast_data_types.ParsedFontFeature, ...]] = {}
-    kitten_alias: typing.Dict[str, str] = {}
-    menu_map: typing.Dict[typing.Tuple[str, ...], str] = {}
-    modify_font: typing.Dict[str, kitty.fonts.FontModification] = {}
-    narrow_symbols: typing.Dict[typing.Tuple[int, int], int] = {}
-    remote_control_password: typing.Dict[str, typing.Sequence[str]] = {}
-    symbol_map: typing.Dict[typing.Tuple[int, int], str] = {}
-    watcher: typing.Dict[str, str] = {}
-    map: typing.List[kitty.options.utils.KeyDefinition] = []
+    action_alias: dict[str, str] = {}
+    env: dict[str, str] = {}
+    exe_search_path: dict[str, str] = {}
+    filter_notification: dict[str, str] = {}
+    font_features: dict[str, tuple[kitty.fast_data_types.ParsedFontFeature, ...]] = {}
+    kitten_alias: dict[str, str] = {}
+    menu_map: dict[tuple[str, ...], str] = {}
+    modify_font: dict[str, kitty.fonts.FontModification] = {}
+    narrow_symbols: dict[tuple[int, int], int] = {}
+    remote_control_password: dict[str, collections.abc.Sequence[str]] = {}
+    symbol_map: dict[tuple[int, int], str] = {}
+    watcher: dict[str, str] = {}
+    map: list[kitty.options.utils.KeyDefinition] = []
     keyboard_modes: KeyboardModeMap = {}
     alias_map: AliasMap = AliasMap()
-    mouse_map: typing.List[kitty.options.utils.MouseMapping] = []
+    mouse_map: list[kitty.options.utils.MouseMapping] = []
     mousemap: MouseMap = {}
     color_table: "array[int]" = array("L", (
         0x000000, 0xcc0403, 0x19cb00, 0xcecb00, 0x0d73cc, 0xcb1ed1, 0x0dcdcd, 0xdddddd,
@@ -682,11 +732,11 @@ class Options:
         0x585858, 0x626262, 0x6c6c6c, 0x767676, 0x808080, 0x8a8a8a, 0x949494, 0x9e9e9e,
         0xa8a8a8, 0xb2b2b2, 0xbcbcbc, 0xc6c6c6, 0xd0d0d0, 0xdadada, 0xe4e4e4, 0xeeeeee,
     ))
-    config_paths: typing.Tuple[str, ...] = ()
-    all_config_paths: typing.Tuple[str, ...] = ()
-    config_overrides: typing.Tuple[str, ...] = ()
+    config_paths: tuple[str, ...] = ()
+    all_config_paths: tuple[str, ...] = ()
+    config_overrides: tuple[str, ...] = ()
 
-    def __init__(self, options_dict: typing.Optional[typing.Dict[str, typing.Any]] = None) -> None:
+    def __init__(self, options_dict: dict[str, typing.Any] | None = None) -> None:
         self.color_table = array(self.color_table.typecode, self.color_table)
         if options_dict is not None:
             null = object()
@@ -696,7 +746,7 @@ class Options:
                     setattr(self, key, val)
 
     @property
-    def _fields(self) -> typing.Tuple[str, ...]:
+    def _fields(self) -> tuple[str, ...]:
         return option_names
 
     def __iter__(self) -> typing.Iterator[str]:
@@ -713,7 +763,7 @@ class Options:
             ans = ans[:]
         return ans
 
-    def _asdict(self) -> typing.Dict[str, typing.Any]:
+    def _asdict(self) -> dict[str, typing.Any]:
         return {k: self._copy_of_val(k) for k in self}
 
     def _replace(self, **kw: typing.Any) -> "Options":
@@ -724,7 +774,7 @@ class Options:
             setattr(ans, name, val)
         return ans
 
-    def __getitem__(self, key: typing.Union[int, str]) -> typing.Any:
+    def __getitem__(self, key: int | str) -> typing.Any:
         k = option_names[key] if isinstance(key, int) else key
         try:
             return getattr(self, k)
@@ -754,6 +804,7 @@ class Options:
 
 
 defaults = Options()
+
 defaults.action_alias = {}
 defaults.env = {}
 defaults.exe_search_path = {}
@@ -766,160 +817,168 @@ defaults.narrow_symbols = {}
 defaults.remote_control_password = {}
 defaults.symbol_map = {}
 defaults.watcher = {}
+
 defaults.map = [
     # copy_to_clipboard
-    KeyDefinition(trigger=SingleKey(mods=256, key=99), definition='copy_to_clipboard'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=99), definition='copy_to_clipboard'),
     # paste_from_clipboard
-    KeyDefinition(trigger=SingleKey(mods=256, key=118), definition='paste_from_clipboard'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=118), definition='paste_from_clipboard'),
     # paste_from_selection
-    KeyDefinition(trigger=SingleKey(mods=256, key=115), definition='paste_from_selection'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=115), definition='paste_from_selection'),
     # paste_from_selection
-    KeyDefinition(trigger=SingleKey(mods=1, key=57348), definition='paste_from_selection'), 
+    KeyDefinition(trigger=SingleKey(mods=1, key=57348), definition='paste_from_selection'),
     # pass_selection_to_program
-    KeyDefinition(trigger=SingleKey(mods=256, key=111), definition='pass_selection_to_program'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=111), definition='pass_selection_to_program'),
     # scroll_line_up
-    KeyDefinition(trigger=SingleKey(mods=256, key=57352), definition='scroll_line_up'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57352), definition='scroll_line_up'),
     # scroll_line_up
-    KeyDefinition(trigger=SingleKey(mods=256, key=107), definition='scroll_line_up'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=107), definition='scroll_line_up'),
     # scroll_line_down
-    KeyDefinition(trigger=SingleKey(mods=256, key=57353), definition='scroll_line_down'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57353), definition='scroll_line_down'),
     # scroll_line_down
-    KeyDefinition(trigger=SingleKey(mods=256, key=106), definition='scroll_line_down'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=106), definition='scroll_line_down'),
     # scroll_page_up
-    KeyDefinition(trigger=SingleKey(mods=256, key=57354), definition='scroll_page_up'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57354), definition='scroll_page_up'),
     # scroll_page_down
-    KeyDefinition(trigger=SingleKey(mods=256, key=57355), definition='scroll_page_down'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57355), definition='scroll_page_down'),
     # scroll_home
-    KeyDefinition(trigger=SingleKey(mods=256, key=57356), definition='scroll_home'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57356), definition='scroll_home'),
     # scroll_end
-    KeyDefinition(trigger=SingleKey(mods=256, key=57357), definition='scroll_end'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57357), definition='scroll_end'),
     # scroll_to_previous_prompt
-    KeyDefinition(trigger=SingleKey(mods=256, key=122), definition='scroll_to_prompt -1'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=122), definition='scroll_to_prompt -1'),
     # scroll_to_next_prompt
-    KeyDefinition(trigger=SingleKey(mods=256, key=120), definition='scroll_to_prompt 1'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=120), definition='scroll_to_prompt 1'),
     # show_scrollback
-    KeyDefinition(trigger=SingleKey(mods=256, key=104), definition='show_scrollback'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=104), definition='show_scrollback'),
     # show_last_command_output
-    KeyDefinition(trigger=SingleKey(mods=256, key=103), definition='show_last_command_output'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=103), definition='show_last_command_output'),
+    # search_scrollback
+    KeyDefinition(trigger=SingleKey(mods=256, key=47), definition='search_scrollback'),
     # new_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=57345), definition='new_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57345), definition='new_window'),
     # new_os_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=110), definition='new_os_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=110), definition='new_os_window'),
     # close_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=119), definition='close_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=119), definition='close_window'),
     # next_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=93), definition='next_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=93), definition='next_window'),
     # previous_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=91), definition='previous_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=91), definition='previous_window'),
     # move_window_forward
-    KeyDefinition(trigger=SingleKey(mods=256, key=102), definition='move_window_forward'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=102), definition='move_window_forward'),
     # move_window_backward
-    KeyDefinition(trigger=SingleKey(mods=256, key=98), definition='move_window_backward'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=98), definition='move_window_backward'),
     # move_window_to_top
-    KeyDefinition(trigger=SingleKey(mods=256, key=96), definition='move_window_to_top'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=96), definition='move_window_to_top'),
     # start_resizing_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=114), definition='start_resizing_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=114), definition='start_resizing_window'),
     # first_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=49), definition='first_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=49), definition='first_window'),
     # second_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=50), definition='second_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=50), definition='second_window'),
     # third_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=51), definition='third_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=51), definition='third_window'),
     # fourth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=52), definition='fourth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=52), definition='fourth_window'),
     # fifth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=53), definition='fifth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=53), definition='fifth_window'),
     # sixth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=54), definition='sixth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=54), definition='sixth_window'),
     # seventh_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=55), definition='seventh_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=55), definition='seventh_window'),
     # eighth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=56), definition='eighth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=56), definition='eighth_window'),
     # ninth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=57), definition='ninth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57), definition='ninth_window'),
     # tenth_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=48), definition='tenth_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=48), definition='tenth_window'),
     # focus_visible_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=57370), definition='focus_visible_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57370), definition='focus_visible_window'),
     # swap_with_window
-    KeyDefinition(trigger=SingleKey(mods=256, key=57371), definition='swap_with_window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57371), definition='swap_with_window'),
     # next_tab
-    KeyDefinition(trigger=SingleKey(mods=256, key=57351), definition='next_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57351), definition='next_tab'),
     # next_tab
-    KeyDefinition(trigger=SingleKey(mods=4, key=57346), definition='next_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=4, key=57346), definition='next_tab'),
     # previous_tab
-    KeyDefinition(trigger=SingleKey(mods=256, key=57350), definition='previous_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57350), definition='previous_tab'),
     # previous_tab
-    KeyDefinition(trigger=SingleKey(mods=5, key=57346), definition='previous_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=5, key=57346), definition='previous_tab'),
     # new_tab
-    KeyDefinition(trigger=SingleKey(mods=256, key=116), definition='new_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=116), definition='new_tab'),
     # close_tab
-    KeyDefinition(trigger=SingleKey(mods=256, key=113), definition='close_tab'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=113), definition='close_tab'),
     # move_tab_forward
-    KeyDefinition(trigger=SingleKey(mods=256, key=46), definition='move_tab_forward'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=46), definition='move_tab_forward'),
     # move_tab_backward
-    KeyDefinition(trigger=SingleKey(mods=256, key=44), definition='move_tab_backward'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=44), definition='move_tab_backward'),
     # set_tab_title
-    KeyDefinition(trigger=SingleKey(mods=258, key=116), definition='set_tab_title'), 
+    KeyDefinition(trigger=SingleKey(mods=258, key=116), definition='set_tab_title'),
     # next_layout
-    KeyDefinition(trigger=SingleKey(mods=256, key=108), definition='next_layout'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=108), definition='next_layout'),
     # increase_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=61), definition='change_font_size all +2.0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=61), definition='change_font_size all +2.0'),
     # increase_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=43), definition='change_font_size all +2.0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=43), definition='change_font_size all +2.0'),
     # increase_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=57413), definition='change_font_size all +2.0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57413), definition='change_font_size all +2.0'),
     # decrease_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=45), definition='change_font_size all -2.0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=45), definition='change_font_size all -2.0'),
     # decrease_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=57412), definition='change_font_size all -2.0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57412), definition='change_font_size all -2.0'),
     # reset_font_size
-    KeyDefinition(trigger=SingleKey(mods=256, key=57347), definition='change_font_size all 0'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57347), definition='change_font_size all 0'),
     # open_url
-    KeyDefinition(trigger=SingleKey(mods=256, key=101), definition='open_url_with_hints'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=101), definition='open_url_with_hints'),
     # insert_selected_path
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=102),), definition='kitten hints --type path --program -'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=102),), definition='kitten hints --type path --program -'),
     # open_selected_path
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(mods=1, key=102),), definition='kitten hints --type path'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(mods=1, key=102),), definition='kitten hints --type path'),
+    # insert_chosen_file
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=99),), definition='kitten choose-files'),
+    # insert_chosen_directory
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=100),), definition='kitten choose-files --mode=dir'),
     # insert_selected_line
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=108),), definition='kitten hints --type line --program -'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=108),), definition='kitten hints --type line --program -'),
     # insert_selected_word
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=119),), definition='kitten hints --type word --program -'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=119),), definition='kitten hints --type word --program -'),
     # insert_selected_hash
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=104),), definition='kitten hints --type hash --program -'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=104),), definition='kitten hints --type hash --program -'),
     # goto_file_line
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=110),), definition='kitten hints --type linenum'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=110),), definition='kitten hints --type linenum'),
     # open_selected_hyperlink
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=121),), definition='kitten hints --type hyperlink'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=112), rest=(SingleKey(key=121),), definition='kitten hints --type hyperlink'),
     # show_kitty_doc
-    KeyDefinition(trigger=SingleKey(mods=256, key=57364), definition='show_kitty_doc overview'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57364), definition='show_kitty_doc overview'),
     # toggle_fullscreen
-    KeyDefinition(trigger=SingleKey(mods=256, key=57374), definition='toggle_fullscreen'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57374), definition='toggle_fullscreen'),
     # toggle_maximized
-    KeyDefinition(trigger=SingleKey(mods=256, key=57373), definition='toggle_maximized'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57373), definition='toggle_maximized'),
     # input_unicode_character
-    KeyDefinition(trigger=SingleKey(mods=256, key=117), definition='kitten unicode_input'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=117), definition='kitten unicode_input'),
     # edit_config_file
-    KeyDefinition(trigger=SingleKey(mods=256, key=57365), definition='edit_config_file'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57365), definition='edit_config_file'),
     # kitty_shell
-    KeyDefinition(trigger=SingleKey(mods=256, key=57344), definition='kitty_shell window'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57344), definition='kitty_shell window'),
     # increase_background_opacity
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=109),), definition='set_background_opacity +0.1'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=109),), definition='set_background_opacity +0.1'),
     # decrease_background_opacity
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=108),), definition='set_background_opacity -0.1'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=108),), definition='set_background_opacity -0.1'),
     # full_background_opacity
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=49),), definition='set_background_opacity 1'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=49),), definition='set_background_opacity 1'),
     # reset_background_opacity
-    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=100),), definition='set_background_opacity default'), 
+    KeyDefinition(is_sequence=True, trigger=SingleKey(mods=256, key=97), rest=(SingleKey(key=100),), definition='set_background_opacity default'),
     # reset_terminal
-    KeyDefinition(trigger=SingleKey(mods=256, key=57349), definition='clear_terminal reset active'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57349), definition='clear_terminal reset active'),
     # reload_config_file
-    KeyDefinition(trigger=SingleKey(mods=256, key=57368), definition='load_config_file'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57368), definition='load_config_file'),
     # debug_config
-    KeyDefinition(trigger=SingleKey(mods=256, key=57369), definition='debug_config'), 
+    KeyDefinition(trigger=SingleKey(mods=256, key=57369), definition='debug_config'),
 ]
+
 if is_macos:
-    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=99), definition='copy_to_clipboard'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=99), definition='copy_or_noop'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=118), definition='paste_from_clipboard'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=57354), definition='scroll_line_up'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=57352), definition='scroll_line_up'))
@@ -929,6 +988,7 @@ if is_macos:
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=57355), definition='scroll_page_down'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=57356), definition='scroll_home'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=57357), definition='scroll_end'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=102), definition='search_scrollback'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=57345), definition='new_window'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=110), definition='new_os_window'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=9, key=100), definition='close_window'))
@@ -956,10 +1016,15 @@ if is_macos:
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=48), definition='change_font_size all 0'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=12, key=102), definition='toggle_fullscreen'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=115), definition='toggle_macos_secure_keyboard_entry'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=96), definition='macos_cycle_through_os_windows'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=9, key=96), definition='macos_cycle_through_os_windows_backwards'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=12, key=32), definition='kitten unicode_input'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=44), definition='edit_config_file'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=114), definition='clear_terminal reset active'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=107), definition='clear_terminal to_cursor active'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=107), definition='clear_terminal scrollback active'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=108), definition='clear_terminal last_command active'))
+    defaults.map.append(KeyDefinition(trigger=SingleKey(mods=12, key=108), definition='clear_terminal to_cursor_scroll active'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=12, key=44), definition='load_config_file'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=44), definition='debug_config'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=9, key=47), definition='open_url https://sw.kovidgoyal.net/kitty/'))
@@ -967,75 +1032,87 @@ if is_macos:
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=10, key=104), definition='hide_macos_other_apps'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=109), definition='minimize_macos_window'))
     defaults.map.append(KeyDefinition(trigger=SingleKey(mods=8, key=113), definition='quit'))
+
 defaults.mouse_map = [
     # click_url_or_select
-    MouseMapping(repeat_count=-2, definition='mouse_handle_click selection link prompt'), 
+    MouseMapping(repeat_count=-2, definition='mouse_handle_click selection link prompt'),
     # click_url_or_select_grabbed
-    MouseMapping(mods=1, repeat_count=-2, grabbed=True, definition='mouse_handle_click selection link prompt'), 
+    MouseMapping(mods=1, repeat_count=-2, grabbed=True, definition='mouse_handle_click selection link prompt'),
     # click_url_or_select_grabbed
-    MouseMapping(mods=1, repeat_count=-2, definition='mouse_handle_click selection link prompt'), 
+    MouseMapping(mods=1, repeat_count=-2, definition='mouse_handle_click selection link prompt'),
     # click_url
-    MouseMapping(mods=5, repeat_count=-1, grabbed=True, definition='mouse_handle_click link'), 
+    MouseMapping(mods=5, repeat_count=-1, grabbed=True, definition='mouse_handle_click link'),
     # click_url
-    MouseMapping(mods=5, repeat_count=-1, definition='mouse_handle_click link'), 
+    MouseMapping(mods=5, repeat_count=-1, definition='mouse_handle_click link'),
     # click_url_discard
-    MouseMapping(mods=5, grabbed=True, definition='discard_event'), 
+    MouseMapping(mods=5, grabbed=True, definition='discard_event'),
     # paste_selection
-    MouseMapping(button=2, repeat_count=-1, definition='paste_from_selection'), 
+    MouseMapping(button=2, repeat_count=-1, definition='paste_from_selection'),
     # start_simple_selection
-    MouseMapping(definition='mouse_selection normal'), 
+    MouseMapping(definition='mouse_selection normal'),
     # start_rectangle_selection
-    MouseMapping(mods=6, definition='mouse_selection rectangle'), 
+    MouseMapping(mods=6, definition='mouse_selection rectangle'),
     # select_word
-    MouseMapping(repeat_count=2, definition='mouse_selection word'), 
+    MouseMapping(repeat_count=2, definition='mouse_selection word'),
     # select_line
-    MouseMapping(repeat_count=3, definition='mouse_selection line'), 
+    MouseMapping(repeat_count=3, definition='mouse_selection line'),
     # select_line_from_point
-    MouseMapping(mods=6, repeat_count=3, definition='mouse_selection line_from_point'), 
+    MouseMapping(mods=6, repeat_count=3, definition='mouse_selection line_from_point'),
     # extend_selection
-    MouseMapping(button=1, definition='mouse_selection extend'), 
+    MouseMapping(button=1, definition='mouse_selection extend'),
     # paste_selection_grabbed
-    MouseMapping(button=2, mods=1, repeat_count=-1, grabbed=True, definition='paste_selection'), 
+    MouseMapping(button=2, mods=1, repeat_count=-1, grabbed=True, definition='paste_selection'),
     # paste_selection_grabbed
-    MouseMapping(button=2, mods=1, repeat_count=-1, definition='paste_selection'), 
+    MouseMapping(button=2, mods=1, repeat_count=-1, definition='paste_selection'),
     # paste_selection_grabbed
-    MouseMapping(button=2, mods=1, grabbed=True, definition='discard_event'), 
+    MouseMapping(button=2, mods=1, grabbed=True, definition='discard_event'),
     # start_simple_selection_grabbed
-    MouseMapping(mods=1, grabbed=True, definition='mouse_selection normal'), 
+    MouseMapping(mods=1, grabbed=True, definition='mouse_selection normal'),
     # start_simple_selection_grabbed
-    MouseMapping(mods=1, definition='mouse_selection normal'), 
+    MouseMapping(mods=1, definition='mouse_selection normal'),
     # start_rectangle_selection_grabbed
-    MouseMapping(mods=7, grabbed=True, definition='mouse_selection rectangle'), 
+    MouseMapping(mods=7, grabbed=True, definition='mouse_selection rectangle'),
     # start_rectangle_selection_grabbed
-    MouseMapping(mods=7, definition='mouse_selection rectangle'), 
+    MouseMapping(mods=7, definition='mouse_selection rectangle'),
     # select_word_grabbed
-    MouseMapping(mods=1, repeat_count=2, grabbed=True, definition='mouse_selection word'), 
+    MouseMapping(mods=1, repeat_count=2, grabbed=True, definition='mouse_selection word'),
     # select_word_grabbed
-    MouseMapping(mods=1, repeat_count=2, definition='mouse_selection word'), 
+    MouseMapping(mods=1, repeat_count=2, definition='mouse_selection word'),
     # select_line_grabbed
-    MouseMapping(mods=1, repeat_count=3, grabbed=True, definition='mouse_selection line'), 
+    MouseMapping(mods=1, repeat_count=3, grabbed=True, definition='mouse_selection line'),
     # select_line_grabbed
-    MouseMapping(mods=1, repeat_count=3, definition='mouse_selection line'), 
+    MouseMapping(mods=1, repeat_count=3, definition='mouse_selection line'),
     # select_line_from_point_grabbed
-    MouseMapping(mods=7, repeat_count=3, grabbed=True, definition='mouse_selection line_from_point'), 
+    MouseMapping(mods=7, repeat_count=3, grabbed=True, definition='mouse_selection line_from_point'),
     # select_line_from_point_grabbed
-    MouseMapping(mods=7, repeat_count=3, definition='mouse_selection line_from_point'), 
+    MouseMapping(mods=7, repeat_count=3, definition='mouse_selection line_from_point'),
     # extend_selection_grabbed
-    MouseMapping(button=1, mods=1, grabbed=True, definition='mouse_selection extend'), 
+    MouseMapping(button=1, mods=1, grabbed=True, definition='mouse_selection extend'),
     # extend_selection_grabbed
-    MouseMapping(button=1, mods=1, definition='mouse_selection extend'), 
+    MouseMapping(button=1, mods=1, definition='mouse_selection extend'),
     # show_clicked_cmd_output_ungrabbed
-    MouseMapping(button=1, mods=5, definition='mouse_show_command_output'), 
+    MouseMapping(button=1, mods=5, definition='mouse_show_command_output'),
 ]
 
+
 nullable_colors = frozenset({
-    'cursor'
-    'cursor_text_color'
-    'visual_bell_color'
-    'active_border_color'
-    'tab_bar_background'
-    'tab_bar_margin_color'
-    'second_transparent_bg'
-    'selection_foreground'
+    'cursor',
+    'cursor_text_color',
+    'cursor_trail_color',
+    'visual_bell_color',
+    'active_border_color',
+    'tab_bar_background',
+    'tab_bar_margin_color',
+    'selection_foreground',
     'selection_background'
 })
+
+special_colors = frozenset({
+    'scrollbar_handle_color',
+    'scrollbar_track_color',
+    'wayland_titlebar_color',
+    'macos_titlebar_color'
+})
+
+
+secret_options = ('remote_control_password', 'file_transfer_confirmation_bypass')

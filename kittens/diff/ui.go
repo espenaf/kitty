@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"strings"
 
-	"kitty/tools/config"
-	"kitty/tools/tui"
-	"kitty/tools/tui/graphics"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/readline"
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/graphics"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/readline"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -61,6 +61,7 @@ type Handler struct {
 	collection                                          *Collection
 	diff_map                                            map[string]*Patch
 	logical_lines                                       *LogicalLines
+	terminal_capabilities_received                      bool
 	lp                                                  *loop.Loop
 	current_context_count, original_context_count       int
 	added_count, removed_count                          int
@@ -111,9 +112,55 @@ func (self *Handler) finalize() {
 	image_collection.Finalize(self.lp)
 }
 
+func set_terminal_colors(lp *loop.Loop) {
+	create_formatters()
+	lp.SetDefaultColor(loop.FOREGROUND, resolved_colors.Foreground)
+	lp.SetDefaultColor(loop.CURSOR, resolved_colors.Foreground)
+	lp.SetDefaultColor(loop.BACKGROUND, resolved_colors.Background)
+	lp.SetDefaultColor(loop.SELECTION_BG, resolved_colors.Select_bg)
+	if resolved_colors.Select_fg.IsSet {
+		lp.SetDefaultColor(loop.SELECTION_FG, resolved_colors.Select_fg.Color)
+	}
+}
+
+func (self *Handler) on_capabilities_received(tc loop.TerminalCapabilities) {
+	var use_dark_colors bool
+	prev := use_light_colors
+	switch conf.Color_scheme {
+	case Color_scheme_auto:
+		use_dark_colors = tc.ColorPreference != loop.LIGHT_COLOR_PREFERENCE
+	case Color_scheme_light:
+		use_dark_colors = false
+	case Color_scheme_dark:
+		use_dark_colors = true
+	}
+	use_light_colors = !use_dark_colors
+	if use_light_colors != prev && (light_highlight_started || dark_highlight_started) {
+		self.highlight_all()
+	}
+	set_terminal_colors(self.lp)
+	self.terminal_capabilities_received = true
+	self.draw_screen()
+}
+
+func (self *Handler) on_color_scheme_change(cp loop.ColorPreference) error {
+	if conf.Color_scheme != Color_scheme_auto {
+		return nil
+	}
+	light := cp == loop.LIGHT_COLOR_PREFERENCE
+	if use_light_colors != light {
+		use_light_colors = light
+		set_terminal_colors(self.lp)
+		self.highlight_all()
+		self.draw_screen()
+	}
+	return nil
+}
+
 func (self *Handler) initialize() {
 	self.rl = readline.New(self.lp, readline.RlInit{DontMarkPrompts: true, Prompt: "/"})
 	self.lp.OnEscapeCode = self.on_escape_code
+	self.lp.OnColorSchemeChange = self.on_color_scheme_change
 	image_collection = graphics.NewImageCollection()
 	self.current_context_count = opts.Context
 	if self.current_context_count < 0 {
@@ -122,15 +169,9 @@ func (self *Handler) initialize() {
 	sz, _ := self.lp.ScreenSize()
 	self.update_screen_size(sz)
 	self.original_context_count = self.current_context_count
-	self.lp.SetDefaultColor(loop.FOREGROUND, conf.Foreground)
-	self.lp.SetDefaultColor(loop.CURSOR, conf.Foreground)
-	self.lp.SetDefaultColor(loop.BACKGROUND, conf.Background)
-	self.lp.SetDefaultColor(loop.SELECTION_BG, conf.Select_bg)
-	if conf.Select_fg.IsSet {
-		self.lp.SetDefaultColor(loop.SELECTION_FG, conf.Select_fg.Color)
-	}
 	self.async_results = make(chan AsyncResult, 32)
 	go func() {
+		self.lp.RecoverFromPanicInGoRoutine()
 		r := AsyncResult{}
 		r.collection, r.err = create_collection(self.left, self.right)
 		self.async_results <- r
@@ -151,6 +192,7 @@ func (self *Handler) generate_diff() {
 		return nil
 	})
 	go func() {
+		self.lp.RecoverFromPanicInGoRoutine()
 		r := AsyncResult{rtype: DIFF}
 		r.diff_map, r.err = diff(jobs, self.current_context_count)
 		self.async_results <- r
@@ -176,11 +218,23 @@ func (self *Handler) on_wakeup() error {
 	}
 }
 
+var dark_highlight_started bool
+var light_highlight_started bool
+
 func (self *Handler) highlight_all() {
+	if (use_light_colors && light_highlight_started) || (!use_light_colors && dark_highlight_started) {
+		return
+	}
+	if use_light_colors {
+		light_highlight_started = true
+	} else {
+		dark_highlight_started = true
+	}
 	text_files := utils.Filter(self.collection.paths_to_highlight.AsSlice(), is_path_text)
 	go func() {
+		self.lp.RecoverFromPanicInGoRoutine()
 		r := AsyncResult{rtype: HIGHLIGHT}
-		highlight_all(text_files)
+		highlight_all(text_files, use_light_colors)
 		self.async_results <- r
 		self.lp.WakeupMainThread()
 	}()
@@ -201,6 +255,7 @@ func (self *Handler) load_all_images() {
 	if self.image_count > 0 {
 		image_collection.Initialize(self.lp)
 		go func() {
+			self.lp.RecoverFromPanicInGoRoutine()
 			r := AsyncResult{rtype: IMAGE_LOAD}
 			image_collection.LoadAll()
 			self.async_results <- r
@@ -222,6 +277,7 @@ func (self *Handler) resize_all_images_if_needed() {
 	}
 	if sz != self.images_resized_to && self.image_count > 0 {
 		go func() {
+			self.lp.RecoverFromPanicInGoRoutine()
 			image_collection.ResizeForPageSize(sz.Width, sz.Height)
 			r := AsyncResult{rtype: IMAGE_RESIZE, page_size: sz}
 			self.async_results <- r
@@ -231,7 +287,7 @@ func (self *Handler) resize_all_images_if_needed() {
 }
 
 func (self *Handler) rerender_diff() error {
-	if self.diff_map != nil && self.collection != nil {
+	if self.diff_map != nil && self.collection != nil && self.terminal_capabilities_received {
 		err := self.render_diff()
 		if err != nil {
 			return err
@@ -249,6 +305,13 @@ func (self *Handler) handle_async_result(r AsyncResult) error {
 		self.highlight_all()
 		self.load_all_images()
 	case DIFF:
+		if !self.terminal_capabilities_received {
+			go func() {
+				self.async_results <- r
+				self.lp.WakeupMainThread()
+			}()
+			return nil
+		}
 		self.diff_map = r.diff_map
 		self.calculate_statistics()
 		self.clear_mouse_selection()
@@ -277,7 +340,7 @@ func (self *Handler) handle_async_result(r AsyncResult) error {
 func (self *Handler) on_resize(old_size, new_size loop.ScreenSize) error {
 	self.clear_mouse_selection()
 	self.update_screen_size(new_size)
-	if self.diff_map != nil && self.collection != nil {
+	if self.diff_map != nil && self.collection != nil && self.terminal_capabilities_received {
 		err := self.render_diff()
 		if err != nil {
 			return err
@@ -315,7 +378,7 @@ func (self *Handler) render_diff() (err error) {
 	return nil
 }
 
-func (self *Handler) draw_image(key string, num_rows, starting_row int) {
+func (self *Handler) draw_image(key string, _, starting_row int) {
 	image_collection.PlaceImageSubRect(self.lp, key, self.images_resized_to, 0, self.screen_size.cell_height*starting_row, -1, -1)
 }
 
@@ -345,7 +408,7 @@ func (self *Handler) draw_screen() {
 	}
 	lp.MoveCursorTo(1, 1)
 	lp.ClearToEndOfScreen()
-	if self.logical_lines == nil || self.diff_map == nil || self.collection == nil {
+	if self.logical_lines == nil || self.diff_map == nil || self.collection == nil || !self.terminal_capabilities_received {
 		lp.Println(`Calculating diff, please wait...`)
 		return
 	}
@@ -644,6 +707,9 @@ func (self *Handler) dispatch_action(name, args string) error {
 			done = self.scroll_to_next_match(strings.Contains(args, `prev`), false)
 		case strings.Contains(args, `page`):
 			amt := self.screen_size.num_lines
+			if strings.Contains(args, `half`) {
+				amt = amt / 2
+			}
 			if strings.Contains(args, `prev`) {
 				amt *= -1
 			}

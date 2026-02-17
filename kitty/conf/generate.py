@@ -4,16 +4,17 @@
 
 import inspect
 import os
-import pprint
 import re
 import textwrap
-from typing import Any, Callable, Dict, Iterator, List, Set, Tuple, Union, get_type_hints
+from collections.abc import Callable, Iterator
+from typing import Any, get_type_hints
 
 from kitty.conf.types import Definition, MultiOption, Option, ParserFuncType, unset
+from kitty.simple_cli_definitions import serialize_as_go_string
 from kitty.types import _T
 
 
-def chunks(lst: List[_T], n: int) -> Iterator[List[_T]]:
+def chunks(lst: list[_T], n: int) -> Iterator[list[_T]]:
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
@@ -22,20 +23,20 @@ def atoi(text: str) -> str:
     return f'{int(text):08d}' if text.isdigit() else text
 
 
-def natural_keys(text: str) -> Tuple[str, ...]:
+def natural_keys(text: str) -> tuple[str, ...]:
     return tuple(atoi(c) for c in re.split(r'(\d+)', text))
 
 
-def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
-    class_lines: List[str] = []
-    tc_lines: List[str] = []
+def generate_class(defn: Definition, loc: str) -> tuple[str, str]:
+    class_lines: list[str] = []
+    tc_lines: list[str] = []
     a = class_lines.append
     t = tc_lines.append
     a('class Options:')
     t('class Parser:')
     choices = {}
-    imports: Set[Tuple[str, str]] = set()
-    tc_imports: Set[Tuple[str, str]] = set()
+    imports: set[tuple[str, str]] = set()
+    tc_imports: set[tuple[str, str]] = set()
     ki_imports: 're.Pattern[str]' = re.compile(r'\b((?:kittens|kitty).+?)[,\]]')
 
     def option_type_as_str(x: Any) -> str:
@@ -50,7 +51,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
             imports.add((x.__module__, x.__name__))
         return ans
 
-    def option_type_data(option: Union[Option, MultiOption]) -> Tuple[Callable[[Any], Any], str]:
+    def option_type_data(option: Option | MultiOption) -> tuple[Callable[[Any], Any], str]:
         func = option.parser_func
         if func.__module__ == 'builtins':
             return func, func.__name__
@@ -59,7 +60,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
         typ = option_type_as_str(rettype)
         if isinstance(option, MultiOption):
             typ = typ[typ.index('[') + 1:-1]
-            typ = typ.replace('Tuple', 'Dict', 1)
+            typ = typ.replace('tuple', 'dict', 1)
             kq = ki_imports.search(typ)
             if kq is not None:
                 kqi = kq.group(1)
@@ -70,18 +71,18 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     is_mutiple_vars = {}
     option_names = set()
     color_table = list(map(str, range(256)))
-    choice_dedup: Dict[str, str] = {}
-    choice_parser_dedup: Dict[str, str] = {}
+    choice_dedup: dict[str, str] = {}
+    choice_parser_dedup: dict[str, str] = {}
 
     def parser_function_declaration(option_name: str) -> None:
         t('')
-        t(f'    def {option_name}(self, val: str, ans: typing.Dict[str, typing.Any]) -> None:')
+        t(f'    def {option_name}(self, val: str, ans: dict[str, typing.Any]) -> None:')
 
     for option in sorted(defn.iter_all_options(), key=lambda a: natural_keys(a.name)):
         option_names.add(option.name)
         parser_function_declaration(option.name)
         if isinstance(option, MultiOption):
-            mval: Dict[str, Dict[str, Any]] = {'macos': {}, 'linux': {}, '': {}}
+            mval: dict[str, dict[str, Any]] = {'macos': {}, 'linux': {}, '': {}}
             func, typ = option_type_data(option)
             for val in option:
                 if val.add_to_default:
@@ -179,7 +180,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
         rettype = th['return']
         typ = option_type_as_str(rettype)
         typ = typ[typ.index('[') + 1:-1]
-        a(f'    {aname}: typing.List[{typ}] = []')
+        a(f'    {aname}: list[{typ}] = []')
         for imp in action.imports:
             resolve_import(imp)
         for fname, ftype in action.fields.items():
@@ -198,11 +199,11 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
             a('        ' + ', '.join(grp) + ',')
         a('    ))')
 
-    a('    config_paths: typing.Tuple[str, ...] = ()')
-    a('    all_config_paths: typing.Tuple[str, ...] = ()')
-    a('    config_overrides: typing.Tuple[str, ...] = ()')
+    a('    config_paths: tuple[str, ...] = ()')
+    a('    all_config_paths: tuple[str, ...] = ()')
+    a('    config_overrides: tuple[str, ...] = ()')
     a('')
-    a('    def __init__(self, options_dict: typing.Optional[typing.Dict[str, typing.Any]] = None) -> None:')
+    a('    def __init__(self, options_dict: dict[str, typing.Any] | None = None) -> None:')
     if defn.has_color_table:
         a('        self.color_table = array(self.color_table.typecode, self.color_table)')
     a('        if options_dict is not None:')
@@ -214,7 +215,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
 
     a('')
     a('    @property')
-    a('    def _fields(self) -> typing.Tuple[str, ...]:')
+    a('    def _fields(self) -> tuple[str, ...]:')
     a('        return option_names')
 
     a('')
@@ -233,7 +234,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     a('        return ans')
 
     a('')
-    a('    def _asdict(self) -> typing.Dict[str, typing.Any]:')
+    a('    def _asdict(self) -> dict[str, typing.Any]:')
     a('        return {k: self._copy_of_val(k) for k in self}')
 
     a('')
@@ -246,7 +247,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     a('        return ans')
 
     a('')
-    a('    def __getitem__(self, key: typing.Union[int, str]) -> typing.Any:')
+    a('    def __getitem__(self, key: int | str) -> typing.Any:')
     a('        k = option_names[key] if isinstance(key, int) else key')
     a('        try:')
     a('            return getattr(self, k)')
@@ -279,6 +280,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     a('')
     a('')
     a('defaults = Options()')
+    a('')
     for option_name, (typ, mval) in is_mutiple_vars.items():
         a(f'defaults.{option_name} = {mval[""]!r}')
         if mval['macos']:
@@ -290,9 +292,10 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
             a('if not is_macos:')
             a(f'    defaults.{option_name}.update({mval["linux"]!r}')
 
+    a('')
     for aname, func in action_parsers.items():
         a(f'defaults.{aname} = [')
-        only: Dict[str, List[Tuple[str, Callable[..., Any]]]] = {}
+        only: dict[str, list[tuple[str, Callable[..., Any]]]] = {}
         for sc in defn.iter_all_maps(aname):
             if not sc.add_to_default:
                 continue
@@ -302,8 +305,9 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
             else:
                 for val in func(text):
                     a(f'    # {sc.name}')
-                    a(f'    {val!r}, ')
+                    a(f'    {val!r},')
         a(']')
+        a('')
         if only:
             imports.add(('kitty.constants', 'is_macos'))
             for cond, items in only.items():
@@ -312,10 +316,11 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
                 for (text, parser_func) in items:
                     for val in parser_func(text):
                         a(f'    defaults.{aname}.append({val!r})')
+                a('')
 
     t('')
     t('')
-    t('def create_result_dict() -> typing.Dict[str, typing.Any]:')
+    t('def create_result_dict() -> dict[str, typing.Any]:')
     t('    return {')
     for oname in is_mutiple_vars:
         t(f'        {oname!r}: {{}},')
@@ -325,10 +330,10 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
 
     t('')
     t('')
-    t(f'actions: typing.FrozenSet[str] = frozenset({tuple(defn.actions)!r})')
+    t(f'actions: frozenset[str] = frozenset({tuple(defn.actions)!r})')
     t('')
     t('')
-    t('def merge_result_dicts(defaults: typing.Dict[str, typing.Any], vals: typing.Dict[str, typing.Any]) -> typing.Dict[str, typing.Any]:')
+    t('def merge_result_dicts(defaults: dict[str, typing.Any], vals: dict[str, typing.Any]) -> dict[str, typing.Any]:')
     t('    ans = {}')
     t('    for k, v in defaults.items():')
     t('        if isinstance(v, dict):')
@@ -345,7 +350,7 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     t('parser = Parser()')
     t('')
     t('')
-    t('def parse_conf_item(key: str, val: str, ans: typing.Dict[str, typing.Any]) -> bool:')
+    t('def parse_conf_item(key: str, val: str, ans: dict[str, typing.Any]) -> bool:')
     t('    func = getattr(parser, key, None)')
     t('    if func is not None:')
     t('        func(val, ans)')
@@ -355,11 +360,12 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     preamble = ['# generated by gen-config.py DO NOT edit', '']
     a = preamble.append
 
-    def output_imports(imports: Set[Tuple[str, str]], add_module_imports: bool = True) -> None:
+    def output_imports(imports: set[tuple[str, str]], add_module_imports: bool = True) -> None:
         a('# isort: skip_file')
         a('import typing')
+        a('import collections.abc  # noqa: F401, RUF100')
         seen_mods = {'typing'}
-        mmap: Dict[str, List[str]] = {}
+        mmap: dict[str, list[str]] = {}
         for mod, name in imports:
             mmap.setdefault(mod, []).append(name)
         for mod in sorted(mmap):
@@ -385,8 +391,10 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
             a(f'{name} = {cdefn}')
 
     a('')
-    a('option_names = (  # {{''{')
-    a(' ' + pprint.pformat(tuple(sorted(option_names, key=natural_keys)))[1:] + '  # }}''}')
+    a('option_names = (')
+    for option_name in sorted(option_names, key=natural_keys):
+        a(f'    {option_name!r},')
+    a(')')
     class_def = '\n'.join(preamble + ['', ''] + class_lines)
 
     preamble = ['# generated by gen-config.py DO NOT edit', '']
@@ -396,8 +404,8 @@ def generate_class(defn: Definition, loc: str) -> Tuple[str, str]:
     return class_def, '\n'.join(preamble + ['', ''] + tc_lines)
 
 
-def generate_c_conversion(loc: str, ctypes: List[Union[Option, MultiOption]]) -> str:
-    lines: List[str] = []
+def generate_c_conversion(loc: str, ctypes: list[Option | MultiOption]) -> str:
+    lines: list[str] = []
     basic_converters = {
         'int': 'PyLong_AsLong', 'uint': 'PyLong_AsUnsignedLong', 'bool': 'PyObject_IsTrue',
         'float': 'PyFloat_AsFloat', 'double': 'PyFloat_AsDouble', 'percent': 'percent',
@@ -437,24 +445,29 @@ def generate_c_conversion(loc: str, ctypes: List[Union[Option, MultiOption]]) ->
 
 def write_output(loc: str, defn: Definition, extra_after_type_defn: str = '') -> None:
     cls, tc = generate_class(defn, loc)
-    with open(os.path.join(*loc.split('.'), 'options', 'types.py'), 'w') as f:
-        f.write(f'{cls}\n')
-        f.write(extra_after_type_defn)
-    with open(os.path.join(*loc.split('.'), 'options', 'parse.py'), 'w') as f:
-        f.write(f'{tc}\n')
     ctypes = []
+    has_secret = []
     for opt in defn.root_group.iter_all_non_groups():
         if isinstance(opt, (Option, MultiOption)) and opt.ctype:
             ctypes.append(opt)
+        if getattr(opt, 'has_secret', False):
+            has_secret.append(opt.name)
+    with open(os.path.join(*loc.split('.'), 'options', 'types.py'), 'w') as f:
+        f.write(f'{cls}\n')
+        f.write(extra_after_type_defn)
+        if has_secret:
+            f.write('\n\nsecret_options = ' + repr(tuple(has_secret)))
+    with open(os.path.join(*loc.split('.'), 'options', 'parse.py'), 'w') as f:
+        f.write(f'{tc}\n')
     if ctypes:
         c = generate_c_conversion(loc, ctypes)
         with open(os.path.join(*loc.split('.'), 'options', 'to-c-generated.h'), 'w') as f:
             f.write(f'{c}\n')
 
 
-def go_type_data(parser_func: ParserFuncType, ctype: str, is_multiple: bool = False) -> Tuple[str, str]:
-    if ctype:
-        if ctype == 'string':
+def go_type_data(parser_func: ParserFuncType, ctype: str, is_multiple: bool = False) -> tuple[str, str]:
+    if ctype or is_multiple:
+        if ctype in ('string', ''):
             if is_multiple:
                 return 'string', '[]string{val}, nil'
             return 'string', 'val, nil'
@@ -478,9 +491,9 @@ def go_type_data(parser_func: ParserFuncType, ctype: str, is_multiple: bool = Fa
     if p == 'positive_int':
         return 'uint64', 'strconv.ParseUint(val, 10, 64)'
     if p == 'positive_float':
-        return 'float64', 'config.PositiveFloat(val, 10, 64)'
+        return 'float64', 'config.PositiveFloat(val)'
     if p == 'unit_float':
-        return 'float64', 'config.UnitFloat(val, 10, 64)'
+        return 'float64', 'config.UnitFloat(val)'
     if p == 'python_string':
         return 'string', 'config.StringLiteral(val)'
     th = get_type_hints(parser_func)
@@ -527,7 +540,8 @@ def normalize_shortcuts(spec: str) -> Iterator[str]:
 
 
 def gen_go_code(defn: Definition) -> str:
-    lines = ['import "fmt"', 'import "strconv"', 'import "kitty/tools/config"', 'import "kitty/tools/utils/style"',
+    lines = ['import "fmt"', 'import "strconv"', 'import "github.com/kovidgoyal/kitty/tools/config"',
+             'import "github.com/kovidgoyal/kitty/tools/utils/style"',
              'var _ = fmt.Println', 'var _ = config.StringToBool', 'var _ = strconv.Atoi', 'var _ = style.ParseColor']
     a = lines.append
     keyboard_shortcuts = tuple(defn.iter_all_maps())
@@ -541,6 +555,11 @@ def gen_go_code(defn: Definition) -> str:
         if isinstance(option, MultiOption):
             go_types[name], go_parsers[name] = go_type_data(option.parser_func, option.ctype, True)
             multiopts.add(name)
+            defval = []
+            for x in option.items:
+                if x.add_to_default:
+                    defval.append(option.parser_func(x.defval_as_str))
+            defaults[name] = defval
         else:
             defaults[name] = option.parser_func(option.defval_as_string)
             if option.choices:
@@ -567,14 +586,9 @@ def gen_go_code(defn: Definition) -> str:
 
     a('func NewConfig() *Config {')
     a('return &Config{')
-    from kitty.cli import serialize_as_go_string
     from kitty.fast_data_types import Color
-    for name, pname in go_parsers.items():
-        if name in multiopts:
-            continue
-        d = defaults[name]
-        if not d:
-            continue
+
+    def basic_defval(d: Any) -> str:
         if isinstance(d, str):
             dval = f'{name}_{cval(d)}' if name in choices else f'`{d}`'
         elif isinstance(d, bool):
@@ -584,13 +598,23 @@ def gen_go_code(defn: Definition) -> str:
             for k, v in d.items():
                 dval += f'"{serialize_as_go_string(k)}": "{serialize_as_go_string(v)}",'
             dval += '}'
+        elif isinstance(d, list):
+            dval = '[]string{'
+            for k in d:
+                dval += f'"{serialize_as_go_string(k)}",'
+            dval += '}'
         elif isinstance(d, Color):
             dval = f'style.RGBA{{Red:{d.red}, Green: {d.green}, Blue: {d.blue}}}'
             if 'NullableColor' in go_types[name]:
                 dval = f'style.NullableColor{{IsSet: true, Color:{dval}}}'
         else:
             dval = repr(d)
-        a(f'{name}: {dval},')
+        return dval
+
+    for name, pname in go_parsers.items():
+        d = defaults[name]
+        if d:
+            a(f'{name}: {basic_defval(d)},')
     if keyboard_shortcuts:
         a('KeyboardShortcuts: []*config.KeyAction{')
         for sc in keyboard_shortcuts:
@@ -626,30 +650,36 @@ def gen_go_code(defn: Definition) -> str:
         a(f'default: return ans, fmt.Errorf("%#v is not a valid value for %s. Valid values are: %s", val, "{c}", "{vals}")')
         a('}''}')
 
+    has_parsers = bool(go_parsers or keyboard_shortcuts)
     a('func (c *Config) Parse(key, val string) (err error) {')
-    a('switch key {')
-    a('default: return fmt.Errorf("Unknown configuration key: %#v", key)')
-    for oname, pname in go_parsers.items():
-        ol = oname.lower()
-        is_multiple = oname in multiopts
-        a(f'case "{ol}":')
-        if is_multiple:
-            a(f'var temp_val []{go_types[oname]}')
-        else:
-            a(f'var temp_val {go_types[oname]}')
-        a(f'temp_val, err = {pname}')
-        a(f'if err != nil {{ return fmt.Errorf("Failed to parse {ol} = %#v with error: %w", val, err) }}')
-        if is_multiple:
-            a(f'c.{oname} = append(c.{oname}, temp_val...)')
-        else:
-            a(f'c.{oname} = temp_val')
-    if keyboard_shortcuts:
-        a('case "map":')
-        a('tempsc, err := config.ParseMap(val)')
-        a('if err != nil { return fmt.Errorf("Failed to parse map = %#v with error: %w", val, err) }')
-        a('c.KeyboardShortcuts = append(c.KeyboardShortcuts, tempsc)')
-    a('}')
-    a('return}')
+    if has_parsers:
+        if go_parsers:
+            a('switch key {')
+            a('default: return fmt.Errorf("Unknown configuration key: %#v", key)')
+            for oname, pname in go_parsers.items():
+                ol = oname.lower()
+                is_multiple = oname in multiopts
+                a(f'case "{ol}":')
+                if is_multiple:
+                    a(f'var temp_val []{go_types[oname]}')
+                else:
+                    a(f'var temp_val {go_types[oname]}')
+                a(f'temp_val, err = {pname}')
+                a(f'if err != nil {{ return fmt.Errorf("Failed to parse {ol} = %#v with error: %w", val, err) }}')
+                if is_multiple:
+                    a(f'c.{oname} = append(c.{oname}, temp_val...)')
+                else:
+                    a(f'c.{oname} = temp_val')
+        if keyboard_shortcuts:
+            a('case "map":')
+            a('tempsc, err := config.ParseMap(val)')
+            a('if err != nil { return fmt.Errorf("Failed to parse map = %#v with error: %w", val, err) }')
+            a('c.KeyboardShortcuts = append(c.KeyboardShortcuts, tempsc)')
+        a('}')
+        a('return}')
+    else:
+        a('return fmt.Errorf("Unknown configuration key: %#v", key)')
+        a('}')
     return '\n'.join(lines)
 
 

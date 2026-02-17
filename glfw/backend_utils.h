@@ -36,6 +36,10 @@
 #define HAS_EVENT_FD
 #include <sys/eventfd.h>
 #endif
+#if __has_include(<sys/timerfd.h>)
+#define HAS_TIMER_FD
+#include <sys/timerfd.h>
+#endif
 #else
 #define HAS_EVENT_FD
 #include <sys/eventfd.h>
@@ -65,17 +69,23 @@ typedef struct {
     bool repeats;
 } Timer;
 
+#define MAX_NUM_OF_WATCHED_FDS 64
 
 typedef struct {
-    struct pollfd fds[32];
+    struct pollfd fds[MAX_NUM_OF_WATCHED_FDS];
 #ifdef HAS_EVENT_FD
     int wakeupFd;
 #else
     int wakeupFds[2];
 #endif
-    bool wakeup_data_read, wakeup_fd_ready;
+#ifdef HAS_TIMER_FD
+    int key_repeat_fd;
+#else
+    int key_repeat_fds[2];
+#endif
+    bool wakeup_data_read, wakeup_fd_ready, key_repeat_fd_ready;
     nfds_t watches_count, timers_count;
-    Watch watches[32];
+    Watch watches[MAX_NUM_OF_WATCHED_FDS];
     Timer timers[128];
 } EventLoopData;
 

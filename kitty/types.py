@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # License: GPLv3 Copyright: 2021, Kovid Goyal <kovid at kovidgoyal.net>
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import Enum
 from functools import update_wrapper
-from typing import TYPE_CHECKING, Any, Callable, Generic, NamedTuple, Optional, TypedDict, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypedDict, TypeVar, Union
 
 if TYPE_CHECKING:
     from kitty.fast_data_types import SingleKey
@@ -18,13 +18,15 @@ class SingleInstanceData(TypedDict):
     cmdline_args_for_open: Sequence[str]
     cwd: str
     session_data: str
+    session_arg: str
+    session_path: str
     environ: Mapping[str, str]
-    notify_on_os_window_death: Optional[str]
+    notify_on_os_window_death: str | None
 
 
 class OverlayType(Enum):
-    transient: str = 'transient'
-    main: str = 'main'
+    transient = 'transient'
+    main = 'main'
 
 
 class ParsedShortcut(NamedTuple):
@@ -72,7 +74,17 @@ class LayerShellConfig(NamedTuple):
     edge: int = 0
     focus_policy: int = 0
     output_name: str = ''
-    size_in_cells: int = 0
+    x_size_in_pixels: int = 0
+    y_size_in_pixels: int = 0
+    x_size_in_cells: int = 0
+    y_size_in_cells: int = 0
+    requested_top_margin: int = 0
+    requested_left_margin: int = 0
+    requested_bottom_margin: int = 0
+    requested_right_margin: int = 0
+    requested_exclusive_zone: int = -1
+    override_exclusive_zone: bool = False
+    hide_on_focus_loss: bool = False
 
 
 def mod_to_names(mods: int, has_kitty_mod: bool = False, kitty_mod: int = 0) -> Iterator[str]:
@@ -203,7 +215,7 @@ def modmap() -> dict[str, int]:
 
 if TYPE_CHECKING:
     from typing import Literal
-    ActionGroup = Literal['cp', 'sc', 'win', 'tab', 'mouse', 'mk', 'lay', 'misc', 'debug']
+    ActionGroup = Literal['cp', 'sc', 'win', 'tab', 'mouse', 'mk', 'lay', 'misc', 'debug', 'session']
 else:
     ActionGroup = str
 
@@ -220,4 +232,12 @@ def ac(group: ActionGroup, doc: str) -> Callable[[_T], _T]:
     return w
 
 
+WindowMapper = Callable[[int], int | None]
 DecoratedFunc = TypeVar('DecoratedFunc', bound=Callable[..., Any])
+
+
+class NeighborsMap(TypedDict, total=False):
+    left: list[int]
+    top: list[int]
+    right: list[int]
+    bottom: list[int]

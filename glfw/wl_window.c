@@ -39,14 +39,27 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
+#include <assert.h>
+#include <unistd.h>
 
 #define debug debug_rendering
 
-static GLFWLayerShellConfig layer_shell_config_for_next_window = {0};
-
 static bool
 is_layer_shell(_GLFWwindow *window) { return window->wl.layer_shell.config.type != GLFW_LAYER_SHELL_NONE; }
+
+static void
+inhibit_shortcuts_for(_GLFWwindow *window, bool inhibit) {
+    if (inhibit) {
+        if (window->wl.keyboard_shortcuts_inhibitor) return;
+        window->wl.keyboard_shortcuts_inhibitor = zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(_glfw.wl.keyboard_shortcuts_inhibit_manager, window->wl.surface, _glfw.wl.seat);
+    } else {
+        if (!window->wl.keyboard_shortcuts_inhibitor) return;
+        zwp_keyboard_shortcuts_inhibitor_v1_destroy(window->wl.keyboard_shortcuts_inhibitor);
+        window->wl.keyboard_shortcuts_inhibitor = NULL;
+    }
+}
 
 static void
 activation_token_done(void *data, struct xdg_activation_token_v1 *xdg_token, const char *token) {
@@ -101,6 +114,19 @@ get_activation_token(
 #undef fail
 }
 
+static void
+convert_glfw_image_to_wayland_image(const GLFWimage* image, unsigned char *target) {
+    // convert RGBA non-premultiplied to ARGB pre-multiplied
+    unsigned char* source = (unsigned char*) image->pixels;
+    for (int i = 0;  i < image->width * image->height;  i++, source += 4) {
+        unsigned int alpha = source[3];
+        *target++ = (unsigned char) ((source[2] * alpha) / 255);
+        *target++ = (unsigned char) ((source[1] * alpha) / 255);
+        *target++ = (unsigned char) ((source[0] * alpha) / 255);
+        *target++ = (unsigned char) alpha;
+    }
+}
+
 static struct wl_buffer* createShmBuffer(const GLFWimage* image, bool is_opaque, bool init_data)
 {
     struct wl_shm_pool* pool;
@@ -108,7 +134,7 @@ static struct wl_buffer* createShmBuffer(const GLFWimage* image, bool is_opaque,
     int stride = image->width * 4;
     int length = image->width * image->height * 4;
     void* data;
-    int fd, i;
+    int fd;
 
     fd = createAnonymousFile(length);
     if (fd < 0)
@@ -131,19 +157,7 @@ static struct wl_buffer* createShmBuffer(const GLFWimage* image, bool is_opaque,
     pool = wl_shm_create_pool(_glfw.wl.shm, fd, length);
 
     close(fd);
-    if (init_data) {
-        unsigned char* source = (unsigned char*) image->pixels;
-        unsigned char* target = data;
-        for (i = 0;  i < image->width * image->height;  i++, source += 4)
-        {
-            unsigned int alpha = source[3];
-
-            *target++ = (unsigned char) ((source[2] * alpha) / 255);
-            *target++ = (unsigned char) ((source[1] * alpha) / 255);
-            *target++ = (unsigned char) ((source[0] * alpha) / 255);
-            *target++ = (unsigned char) alpha;
-        }
-    }
+    if (init_data) convert_glfw_image_to_wayland_image(image, data);
 
     buffer =
         wl_shm_pool_create_buffer(pool, 0,
@@ -251,8 +265,7 @@ setCursorImage(_GLFWwindow* window, bool on_theme_change) {
                 _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: late cursor load failed; proceeding with existing cursor");
             }
         }
-        if (!cursorWayland->cursor || !cursorWayland->cursor->image_count)
-            return;
+        if (!cursorWayland->cursor || !cursorWayland->cursor->image_count || !cursorWayland->cursor->images) return;
         if (cursorWayland->currentImage >= cursorWayland->cursor->image_count) cursorWayland->currentImage = 0;
         image = cursorWayland->cursor->images[cursorWayland->currentImage];
         if (!image) image = cursorWayland->cursor->images[0];
@@ -371,8 +384,8 @@ wait_for_swap_to_commit(_GLFWwindow *window) {
 static void
 resizeFramebuffer(_GLFWwindow* window) {
     GLFWwindow *ctx = glfwGetCurrentContext();
-    const bool ctx_changed = ctx != (GLFWwindow*)window;
-    if (ctx_changed) glfwMakeContextCurrent((GLFWwindow*)window);
+    bool ctx_changed = false;
+    if (ctx != (GLFWwindow*)window && window->context.client != GLFW_NO_API) { ctx_changed = true;  glfwMakeContextCurrent((GLFWwindow*)window); }
     double scale = _glfwWaylandWindowScale(window);
     int scaled_width = (int)round(window->wl.width * scale);
     int scaled_height = (int)round(window->wl.height * scale);
@@ -414,7 +427,7 @@ apply_scale_changes(_GLFWwindow *window, bool resize_framebuffer, bool update_cs
     double scale = _glfwWaylandWindowScale(window);
     if (resize_framebuffer) resizeFramebuffer(window);
     _glfwInputWindowContentScale(window, (float)scale, (float)scale);
-    if (update_csd) csd_set_visible(window, true);  // resize the csd iff the window currently has CSD
+    if (update_csd) csd_set_visible(window, csd_should_window_be_decorated(window));  // resize the csd iff the window currently has CSD
     int buffer_scale = window->wl.fractional_scale ? 1 : (int)scale;
     wl_surface_set_buffer_scale(window->wl.surface, buffer_scale);
 }
@@ -521,7 +534,7 @@ surface_preferred_buffer_scale(void *data, struct wl_surface *surface UNUSED, in
     if ((int)window->wl.integer_scale.preferred == scale && window->wl.window_fully_created) return;
     debug("Preferred integer buffer scale changed to: %d for window %llu\n", scale, window->id);
     window->wl.integer_scale.preferred = scale;
-    window->wl.window_fully_created = true;
+    window->wl.window_fully_created = window->wl.once.surface_configured;
     if (!window->wl.fractional_scale) apply_scale_changes(window, true, true);
 }
 
@@ -548,11 +561,12 @@ fractional_scale_preferred_scale(void *data, struct wp_fractional_scale_v1 *wp_f
     if (scale == window->wl.fractional_scale && window->wl.window_fully_created) return;
     debug("Fractional scale requested: %u/120 = %.2f for window %llu\n", scale, scale / 120., window->id);
     window->wl.fractional_scale = scale;
-    // Hyprland sends a fraction scale = 1 event before configuring the xdg surface and then another after with the correct scale
-    // labwc doesnt support preferred buffer scale, so we assume it's done fucking around with scales even if the scale is 120
-    // As far as I can tell from googling labwc has no way to specify scales other
-    // than 1 anyway, so no way to test what it will do in such cases. Sigh, more half baked Wayland shit.
-    window->wl.window_fully_created = window->wl.once.surface_configured || scale != 120 || !_glfw.wl.has_preferred_buffer_scale;
+    // niri and up-to-date mutter and up-to-date kwin all send the fractional
+    // scale before configure (as of Jan 2025). sway as of 1.10 and Hyprland send it after configure.
+    // https://github.com/hyprwm/Hyprland/issues/9126
+    // labwc doesnt support preferred buffer scale and seems to send only a
+    // single fraction scale event before configure https://github.com/kovidgoyal/kitty/issues/7540
+    window->wl.window_fully_created = window->wl.once.surface_configured;
     apply_scale_changes(window, true, true);
 }
 
@@ -560,17 +574,11 @@ static const struct wp_fractional_scale_v1_listener fractional_scale_listener = 
     .preferred_scale = &fractional_scale_preferred_scale,
 };
 
-static bool createSurface(_GLFWwindow* window,
-                              const _GLFWwndconfig* wndconfig)
-{
+static bool
+create_surface(_GLFWwindow* window, const _GLFWwndconfig* wndconfig) {
     window->wl.surface = wl_compositor_create_surface(_glfw.wl.compositor);
-    if (!window->wl.surface)
-        return false;
-
-    wl_surface_add_listener(window->wl.surface,
-                            &surfaceListener,
-                            window);
-
+    if (!window->wl.surface) return false;
+    wl_surface_add_listener(window->wl.surface, &surfaceListener, window);
     wl_surface_set_user_data(window->wl.surface, window);
 
     // If we already have been notified of the primary monitor scale, assume
@@ -617,6 +625,7 @@ static bool createSurface(_GLFWwindow* window,
     update_regions(window);
 
     wl_surface_set_buffer_scale(window->wl.surface, scale);
+    if (_glfw.keyboard_grabbed) inhibit_shortcuts_for(window, true);
     return true;
 }
 
@@ -677,6 +686,12 @@ xdgToplevelHandleConfigure(void* data,
             C(TOPLEVEL_STATE_TILED_BOTTOM);
 #ifdef XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION
             C(TOPLEVEL_STATE_SUSPENDED);
+#endif
+#ifdef XDG_TOPLEVEL_STATE_CONSTRAINED_LEFT_SINCE_VERSION
+            C(TOPLEVEL_STATE_CONSTRAINED_LEFT);
+            C(TOPLEVEL_STATE_CONSTRAINED_RIGHT);
+            C(TOPLEVEL_STATE_CONSTRAINED_TOP);
+            C(TOPLEVEL_STATE_CONSTRAINED_BOTTOM);
 #endif
 #undef C
         }
@@ -757,6 +772,15 @@ static const struct xdg_toplevel_listener xdgToplevelListener = {
 };
 
 static void
+update_fully_created_on_configure(_GLFWwindow *window) {
+    // See fractional_scale_preferred_scale() for logic
+    if (!window->wl.window_fully_created) {
+        window->wl.window_fully_created = window->wl.once.fractional_scale_received;
+        if (window->wl.window_fully_created) debug("Marked window as fully created in configure event\n");
+    }
+}
+
+static void
 apply_xdg_configure_changes(_GLFWwindow *window) {
     bool suspended_changed = false;
     if (window->wl.pending_state & PENDING_STATE_TOPLEVEL) {
@@ -767,6 +791,7 @@ apply_xdg_configure_changes(_GLFWwindow *window) {
             window->swaps_disallowed = false;
             wait_for_swap_to_commit(window);
             window->wl.once.surface_configured = true;
+            update_fully_created_on_configure(window);
         }
 
 #ifdef XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION
@@ -781,7 +806,6 @@ apply_xdg_configure_changes(_GLFWwindow *window) {
             window->wl.current.toplevel_states = new_states;
             window->wl.current.width = width;
             window->wl.current.height = height;
-            _glfwInputWindowFocus(window, window->wl.current.toplevel_states & TOPLEVEL_STATE_ACTIVATED);
             if (live_resize_done) report_live_resize(window, false);
         }
     }
@@ -797,7 +821,7 @@ apply_xdg_configure_changes(_GLFWwindow *window) {
         int width = window->wl.pending.width, height = window->wl.pending.height;
         csd_set_window_geometry(window, &width, &height);
         bool resized = dispatchChangesAfterConfigure(window, width, height);
-        csd_set_visible(window, !(window->wl.decorations.serverSide || window->monitor || window->wl.current.toplevel_states & TOPLEVEL_STATE_FULLSCREEN));
+        csd_set_visible(window, csd_should_window_be_decorated(window));
         debug("Final window %llu content size: %dx%d resized: %d\n", window->id, width, height, resized);
     }
 
@@ -824,7 +848,7 @@ create_single_color_buffer(int width, int height, pixel color) {
     if (width == 1 && height == 1 && _glfw.wl.wp_single_pixel_buffer_manager_v1) {
 #define C(x) (uint32_t)(((double)((uint64_t)color.alpha * color.x * UINT32_MAX)) / (255 * 255))
         struct wl_buffer *ans = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(
-            _glfw.wl.wp_single_pixel_buffer_manager_v1, C(red), C(green), C(blue), color.alpha * UINT32_MAX);
+            _glfw.wl.wp_single_pixel_buffer_manager_v1, C(red), C(green), C(blue), (uint32_t)((color.alpha / 255.) * UINT32_MAX));
 #undef C
         if (!ans) _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: failed to create single pixel buffer");
         return ans;
@@ -832,7 +856,7 @@ create_single_color_buffer(int width, int height, pixel color) {
     float alpha = color.alpha / 255.f;
     color.red = (uint8_t)(alpha * color.red); color.green = (uint8_t)(alpha * color.green); color.blue = (uint8_t)(alpha * color.blue);
     int shm_format = color.alpha == 0xff ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888;
-    const size_t size = 4 * width * height;
+    const size_t size = (size_t)4 * width * height;
     int fd = createAnonymousFile(size);
     if (fd < 0) {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: failed to create anonymous file");
@@ -940,7 +964,7 @@ setXdgDecorations(_GLFWwindow* window)
         zxdg_toplevel_decoration_v1_set_mode(window->wl.xdg.decoration, window->decorated ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE: ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE);
     } else {
         window->wl.decorations.serverSide = false;
-        csd_set_visible(window, window->decorated);
+        csd_set_visible(window, csd_should_window_be_decorated(window));
     }
 }
 
@@ -956,57 +980,130 @@ find_output_by_name(const char* name) {
     if (!name || !name[0]) return NULL;
     for (int i = 0; i < _glfw.monitorCount; i++) {
         _GLFWmonitor *m = _glfw.monitors[i];
-        if (strcmp(m->wl.friendly_name, name) == 0) return m->wl.output;
+        if (strcmp(m->name, name) == 0) return m->wl.output;
     }
     return NULL;
 }
 
+static enum zwlr_layer_shell_v1_layer
+get_layer_shell_layer(const _GLFWwindow *window) {
+    enum zwlr_layer_shell_v1_layer which_layer = ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND; // Default to background
+    switch (window->wl.layer_shell.config.type) {
+        case GLFW_LAYER_SHELL_BACKGROUND: case GLFW_LAYER_SHELL_NONE: break;
+        case GLFW_LAYER_SHELL_PANEL: which_layer = ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM; break;
+        case GLFW_LAYER_SHELL_TOP: which_layer = ZWLR_LAYER_SHELL_V1_LAYER_TOP; break;
+        case GLFW_LAYER_SHELL_OVERLAY: which_layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY; break;
+    }
+    return which_layer;
+}
+
 static void
-layer_set_properties(_GLFWwindow *window) {
+layer_set_properties(const _GLFWwindow *window, bool during_creation, uint32_t width, uint32_t height) {
+#define config window->wl.layer_shell.config
+#define surface window->wl.layer_shell.zwlr_layer_surface_v1
+    if (!surface) return;  // cannot set properties till a surface is created
     enum zwlr_layer_surface_v1_anchor which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
-    int exclusive_zone = -1;
+    int exclusive_zone = config.requested_exclusive_zone;
     enum zwlr_layer_surface_v1_keyboard_interactivity focus_policy = ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE;
-    switch(window->wl.layer_shell.config.focus_policy) {
+    switch(config.focus_policy) {
         case GLFW_FOCUS_NOT_ALLOWED: focus_policy = ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE; break;
         case GLFW_FOCUS_EXCLUSIVE: focus_policy = ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE; break;
         case GLFW_FOCUS_ON_DEMAND: focus_policy = ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND; break;
     }
     int panel_width = 0, panel_height = 0;
-    switch (window->wl.layer_shell.config.type) {
-        case GLFW_LAYER_SHELL_BACKGROUND: break; case GLFW_LAYER_SHELL_NONE: break;
+    switch (config.type) {
+        case GLFW_LAYER_SHELL_NONE: break;
+        case GLFW_LAYER_SHELL_BACKGROUND: exclusive_zone = -1; break;
+        case GLFW_LAYER_SHELL_TOP:
+        case GLFW_LAYER_SHELL_OVERLAY:
         case GLFW_LAYER_SHELL_PANEL:
-            switch (window->wl.layer_shell.config.edge) {
+            switch (config.edge) {
                 case GLFW_EDGE_TOP:
                     which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
-                    panel_height = window->wl.height;
-                    exclusive_zone = window->wl.height;
+                    panel_height = height;
+                    if (!config.override_exclusive_zone) exclusive_zone = height;
                     break;
                 case GLFW_EDGE_BOTTOM:
                     which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
-                    panel_height = window->wl.height;
-                    exclusive_zone = window->wl.height;
+                    panel_height = height;
+                    if (!config.override_exclusive_zone) exclusive_zone = height;
                     break;
                 case GLFW_EDGE_LEFT:
                     which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
-                    panel_width = window->wl.width;
-                    exclusive_zone = window->wl.width;
+                    panel_width = width;
+                    if (!config.override_exclusive_zone) exclusive_zone = width;
                     break;
                 case GLFW_EDGE_RIGHT:
                     which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT | ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
-                    panel_width = window->wl.width;
-                    exclusive_zone = window->wl.width;
+                    panel_width = width;
+                    if (!config.override_exclusive_zone) exclusive_zone = width;
+                    break;
+                case GLFW_EDGE_CENTER:
+                    break;
+                case GLFW_EDGE_CENTER_SIZED:
+                    which_anchor = 0;
+                    panel_width = width; panel_height = height;
+                    break;
+                case GLFW_EDGE_NONE:
+                    which_anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+                    panel_width = width; panel_height = height;
                     break;
             }
     }
-#define surface window->wl.layer_shell.zwlr_layer_surface_v1
     zwlr_layer_surface_v1_set_size(surface, panel_width, panel_height);
-    if (window->wl.wp_viewport) wp_viewport_set_destination(window->wl.wp_viewport, window->wl.width, window->wl.height);
-    debug("Compositor will be informed that layer size: %dx%d viewport: %dx%d at next surface commit\n", panel_width, panel_height, window->wl.width, window->wl.height);
+    debug("Compositor will be informed that layer size: %dx%d viewport: %dx%d at next surface commit\n", panel_width, panel_height, width, height);
     zwlr_layer_surface_v1_set_anchor(surface, which_anchor);
     zwlr_layer_surface_v1_set_exclusive_zone(surface, exclusive_zone);
-    zwlr_layer_surface_v1_set_margin(surface, 0, 0, 0, 0);
+    zwlr_layer_surface_v1_set_margin(surface, config.requested_top_margin, config.requested_right_margin, config.requested_bottom_margin, config.requested_left_margin);
+    if (!during_creation) zwlr_layer_surface_v1_set_layer(surface, get_layer_shell_layer(window));
     zwlr_layer_surface_v1_set_keyboard_interactivity(surface, focus_policy);
 #undef surface
+#undef config
+}
+
+static void
+calculate_layer_size(_GLFWwindow *window, uint32_t *width, uint32_t *height) {
+    const GLFWLayerShellConfig *config = &window->wl.layer_shell.config;
+    GLFWvidmode m = {0};
+    if (window->wl.monitorsCount) _glfwPlatformGetVideoMode(window->wl.monitors[0], &m);
+    int monitor_width = m.width, monitor_height = m.height;
+    const int y_margin = config->requested_bottom_margin + config->requested_top_margin, x_margin = config->requested_left_margin + config->requested_right_margin;
+    monitor_width = monitor_width > x_margin ? monitor_width - x_margin : 0;
+    monitor_height = monitor_height > y_margin ? monitor_height - y_margin : 0;
+    float xscale = (float)config->expected.xscale, yscale = (float)config->expected.yscale;
+    if (window->wl.window_fully_created) _glfwPlatformGetWindowContentScale(window, &xscale, &yscale);
+    unsigned cell_width, cell_height; double left_edge_spacing, top_edge_spacing, right_edge_spacing, bottom_edge_spacing;
+    config->size_callback((GLFWwindow*)window, xscale, yscale, &cell_width, &cell_height, &left_edge_spacing, &top_edge_spacing, &right_edge_spacing, &bottom_edge_spacing);
+    double spacing_x = left_edge_spacing + right_edge_spacing;
+    double spacing_y = top_edge_spacing + bottom_edge_spacing;
+    if (config->type == GLFW_LAYER_SHELL_BACKGROUND) {
+        if (!*width) *width = monitor_width;
+        if (!*height) *height = monitor_height;
+        return;
+    }
+    const unsigned xsz = config->x_size_in_pixels ? (unsigned)(config->x_size_in_pixels * xscale) : (cell_width * config->x_size_in_cells);
+    const unsigned ysz = config->y_size_in_pixels ? (unsigned)(config->y_size_in_pixels * yscale) : (cell_height * config->y_size_in_cells);
+    debug("Calculating layer shell window size at scale: %f cell_size: %u %u sz: %u %u\n", xscale, cell_width, cell_height, xsz, ysz);
+    if (config->edge == GLFW_EDGE_LEFT || config->edge == GLFW_EDGE_RIGHT) {
+        if (!*height) *height = monitor_height;
+        double spacing = spacing_x;
+        spacing += xsz / xscale;
+        *width = (uint32_t)(1. + spacing);
+    } else if (config->edge == GLFW_EDGE_TOP || config->edge == GLFW_EDGE_BOTTOM) {
+        if (!*width) *width = monitor_width;
+        double spacing = spacing_y;
+        spacing += ysz / yscale;
+        *height = (uint32_t)(1. + spacing);
+    } else if (config->edge == GLFW_EDGE_CENTER) {
+        if (!*width) *width = monitor_width;
+        if (!*height) *height = monitor_height;
+    } else {
+        spacing_x += xsz / xscale;
+        spacing_y += ysz / yscale;
+        *width = (uint32_t)(1. + spacing_x);
+        *height = (uint32_t)(1. + spacing_y);
+    }
+
 }
 
 static void
@@ -1017,11 +1114,9 @@ layer_surface_handle_configure(void* data, struct zwlr_layer_surface_v1* surface
         window->swaps_disallowed = false;
         wait_for_swap_to_commit(window);
         window->wl.once.surface_configured = true;
+        update_fully_created_on_configure(window);
     }
-    GLFWvidmode m = {0};
-    if (window->wl.monitorsCount) _glfwPlatformGetVideoMode(window->wl.monitors[0], &m);
-    window->wl.layer_shell.config.size_callback(
-            (GLFWwindow*)window, &window->wl.layer_shell.config, m.width, m.height, &width, &height);
+    calculate_layer_size(window, &width, &height);
     zwlr_layer_surface_v1_ack_configure(surface, serial);
     if ((int)width != window->wl.width || (int)height != window->wl.height) {
         debug("Layer shell size changed to %ux%u in layer_surface_handle_configure\n", width, height);
@@ -1029,7 +1124,8 @@ layer_surface_handle_configure(void* data, struct zwlr_layer_surface_v1* surface
         window->wl.width = width; window->wl.height = height;
         resizeFramebuffer(window);
         _glfwInputWindowDamage(window);
-        layer_set_properties(window);
+        layer_set_properties(window, false, window->wl.width, window->wl.height);
+        if (window->wl.wp_viewport) wp_viewport_set_destination(window->wl.wp_viewport, window->wl.width, window->wl.height);
     }
     commit_window_surface_if_safe(window);
     if (!window->wl.window_fully_created) {
@@ -1057,19 +1153,19 @@ create_layer_shell_surface(_GLFWwindow *window) {
     }
     window->decorated = false;  // shell windows must not have decorations
     struct wl_output *wl_output = find_output_by_name(window->wl.layer_shell.config.output_name);
-    enum zwlr_layer_shell_v1_layer which_layer = ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND;
-    if (window->wl.layer_shell.config.type == GLFW_LAYER_SHELL_PANEL) which_layer = ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM;
 #define ls window->wl.layer_shell.zwlr_layer_surface_v1
     ls = zwlr_layer_shell_v1_get_layer_surface(
-            _glfw.wl.zwlr_layer_shell_v1, window->wl.surface, wl_output, which_layer, "kitty");
+            _glfw.wl.zwlr_layer_shell_v1, window->wl.surface, wl_output, get_layer_shell_layer(window), window->wl.appId[0] ? window->wl.appId : "kitty");
     if (!ls) {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: layer-surface creation failed");
         return false;
     }
     zwlr_layer_surface_v1_add_listener(ls, &zwlr_layer_surface_v1_listener, window);
-    layer_set_properties(window);
+    layer_set_properties(window, true, window->wl.width, window->wl.height);
+    if (window->wl.wp_viewport) wp_viewport_set_destination(window->wl.wp_viewport, window->wl.width, window->wl.height);
     commit_window_surface(window);
     wl_display_roundtrip(_glfw.wl.display);
+    window->wl.created = true;
 #undef ls
     return true;
 }
@@ -1113,8 +1209,10 @@ create_window_desktop_surface(_GLFWwindow* window)
         zxdg_toplevel_decoration_v1_add_listener(window->wl.xdg.decoration, &xdgDecorationListener, window);
     }
 
-    if (strlen(window->wl.appId))
+    if (window->wl.appId[0])
         xdg_toplevel_set_app_id(window->wl.xdg.toplevel, window->wl.appId);
+    if (window->wl.windowTag[0] && _glfw.wl.xdg_toplevel_tag_manager_v1)
+        xdg_toplevel_tag_manager_v1_set_toplevel_tag(_glfw.wl.xdg_toplevel_tag_manager_v1, window->wl.xdg.toplevel, window->wl.windowTag);
 
     if (window->wl.title)
         xdg_toplevel_set_title(window->wl.xdg.toplevel, window->wl.title);
@@ -1141,6 +1239,7 @@ create_window_desktop_surface(_GLFWwindow* window)
 
     commit_window_surface(window);
     wl_display_roundtrip(_glfw.wl.display);
+    window->wl.created = true;
 
     return true;
 }
@@ -1193,6 +1292,25 @@ wayland_read_events(int poll_result, int events, void *data UNUSED) {
     else wl_display_cancel_read(_glfw.wl.display);
 }
 
+static void
+handle_key_repeat_events(void) {
+    uint64_t num_events = 0;
+#ifdef HAS_TIMER_FD
+    if (read(_glfw.wl.eventLoopData.key_repeat_fd, &num_events, sizeof(num_events)) < (ssize_t)sizeof(num_events)) return;
+#else
+    char buf[16];
+    while(1) {
+        ssize_t num = read(_glfw.wl.eventLoopData.key_repeat_fds[0], buf, sizeof(buf));
+        if (num > 0) num_events += num;
+        else if (num == 0 || errno != EINTR) break;
+    }
+#endif
+    if (_glfw.wl.keyRepeatInfo.keyboardFocusId != _glfw.wl.keyboardFocusId || _glfw.wl.keyboardRepeatRate == 0) return;
+    _GLFWwindow* window = _glfwWindowForId(_glfw.wl.keyboardFocusId);
+    if (!window || !_glfw.wl.keyRepeatInfo.key) return;
+    while (num_events--) glfw_xkb_handle_key_event(window, &_glfw.wl.xkb, _glfw.wl.keyRepeatInfo.key, GLFW_REPEAT);
+}
+
 static void handleEvents(monotonic_t timeout)
 {
     struct wl_display* display = _glfw.wl.display;
@@ -1232,6 +1350,7 @@ static void handleEvents(monotonic_t timeout)
     glfw_dbus_session_bus_dispatch();
     EVDBG("other dispatch done");
     if (_glfw.wl.eventLoopData.wakeup_fd_ready) check_for_wakeup_events(&_glfw.wl.eventLoopData);
+    if (_glfw.wl.eventLoopData.key_repeat_fd_ready) handle_key_repeat_events();
 }
 
 static struct wl_cursor*
@@ -1307,58 +1426,49 @@ struct wl_cursor* _glfwLoadCursor(GLFWCursorShape shape, struct wl_cursor_theme*
 //////                       GLFW platform API                      //////
 //////////////////////////////////////////////////////////////////////////
 
-int _glfwPlatformCreateWindow(_GLFWwindow* window,
-                              const _GLFWwndconfig* wndconfig,
-                              const _GLFWctxconfig* ctxconfig,
-                              const _GLFWfbconfig* fbconfig)
-{
-    window->wl.layer_shell.config = layer_shell_config_for_next_window;
-    memset(&layer_shell_config_for_next_window, 0, sizeof(layer_shell_config_for_next_window));
+static bool
+attach_opengl_context_to_window(_GLFWwindow *window, const _GLFWctxconfig *ctxconfig, const _GLFWfbconfig *fbconfig) {
+    if (ctxconfig->source == GLFW_EGL_CONTEXT_API ||
+        ctxconfig->source == GLFW_NATIVE_CONTEXT_API)
+    {
+        if (!_glfwInitEGL())
+            return false;
+        if (!_glfwCreateContextEGL(window, ctxconfig, fbconfig))
+            return false;
+    }
+    else if (ctxconfig->source == GLFW_OSMESA_CONTEXT_API)
+    {
+        if (!_glfwInitOSMesa())
+            return false;
+        if (!_glfwCreateContextOSMesa(window, ctxconfig, fbconfig))
+            return false;
+    }
+    return true;
+}
+
+int _glfwPlatformCreateWindow(
+    _GLFWwindow* window, const _GLFWwndconfig* wndconfig, const _GLFWctxconfig* ctxconfig, const _GLFWfbconfig* fbconfig,
+    const GLFWLayerShellConfig *lsc
+) {
+    window->wl.layer_shell.config = lsc ? *lsc : (GLFWLayerShellConfig){0};
     csd_initialize_metrics(window);
     window->wl.transparent = fbconfig->transparent;
     strncpy(window->wl.appId, wndconfig->wl.appId, sizeof(window->wl.appId));
     window->swaps_disallowed = true;
 
-    if (!createSurface(window, wndconfig)) return false;
-
-    if (ctxconfig->client != GLFW_NO_API)
-    {
-        if (ctxconfig->source == GLFW_EGL_CONTEXT_API ||
-            ctxconfig->source == GLFW_NATIVE_CONTEXT_API)
-        {
-            if (!_glfwInitEGL())
-                return false;
-            if (!_glfwCreateContextEGL(window, ctxconfig, fbconfig))
-                return false;
-        }
-        else if (ctxconfig->source == GLFW_OSMESA_CONTEXT_API)
-        {
-            if (!_glfwInitOSMesa())
-                return false;
-            if (!_glfwCreateContextOSMesa(window, ctxconfig, fbconfig))
-                return false;
-        }
-    }
-
-    if (wndconfig->title)
-        window->wl.title = _glfw_strdup(wndconfig->title);
-    if (wndconfig->maximized)
-        window->wl.maximize_on_first_show = true;
-
-    if (wndconfig->visible)
-    {
-        if (!create_window_desktop_surface(window))
-            return false;
-
+    if (!create_surface(window, wndconfig)) return false;
+    if (wndconfig->title) window->wl.title = _glfw_strdup(wndconfig->title);
+    if (wndconfig->maximized) window->wl.maximize_on_first_show = true;
+    if (wndconfig->visible) {
+        if (!create_window_desktop_surface(window)) return false;
         window->wl.visible = true;
-    }
-    else
-    {
+    } else {
+        window->wl.visible = false;
         window->wl.xdg.surface = NULL;
         window->wl.xdg.toplevel = NULL;
         window->wl.layer_shell.zwlr_layer_surface_v1 = NULL;
-        window->wl.visible = false;
     }
+
 
     window->wl.currentCursor = NULL;
     // Don't set window->wl.cursorTheme to NULL here.
@@ -1366,7 +1476,12 @@ int _glfwPlatformCreateWindow(_GLFWwindow* window,
     window->wl.monitors = calloc(1, sizeof(_GLFWmonitor*));
     window->wl.monitorsCount = 0;
     window->wl.monitorsSize = 1;
+    // looping till window fully created attaches a single pixel buffer to the window,
+    // this cannot be done once a OpenGL context is created for the window. So first loop
+    // and only then create the OpenGL context.
     if (window->wl.visible) loop_till_window_fully_created(window);
+    debug("Creating OpenGL context and attaching it to window\n");
+    if (ctxconfig->client != GLFW_NO_API) attach_opengl_context_to_window(window, ctxconfig, fbconfig);
     return true;
 }
 
@@ -1385,6 +1500,8 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
     if (window->id == _glfw.wl.keyRepeatInfo.keyboardFocusId) {
         _glfw.wl.keyRepeatInfo.keyboardFocusId = 0;
     }
+    if (window->wl.keyboard_shortcuts_inhibitor)
+        zwp_keyboard_shortcuts_inhibitor_v1_destroy(window->wl.keyboard_shortcuts_inhibitor);
 
     if (window->wl.temp_buffer_used_during_window_creation)
         wl_buffer_destroy(window->wl.temp_buffer_used_during_window_creation);
@@ -1412,6 +1529,9 @@ void _glfwPlatformDestroyWindow(_GLFWwindow* window)
     if (window->wl.xdg.surface)
         xdg_surface_destroy(window->wl.xdg.surface);
 
+    if (window->wl.layer_shell.zwlr_layer_surface_v1)
+        zwlr_layer_surface_v1_destroy(window->wl.layer_shell.zwlr_layer_surface_v1);
+
     if (window->wl.surface)
         wl_surface_destroy(window->wl.surface);
 
@@ -1438,11 +1558,55 @@ void _glfwPlatformSetWindowTitle(_GLFWwindow* window, const char* title)
     }
 }
 
-void _glfwPlatformSetWindowIcon(_GLFWwindow* window UNUSED,
-                                int count UNUSED, const GLFWimage* images UNUSED)
-{
-    _glfwInputError(GLFW_FEATURE_UNAVAILABLE,
-                    "Wayland: The platform does not support setting the window icon");
+void
+_glfwPlatformSetWindowIcon(_GLFWwindow* window, int count, const GLFWimage* images) {
+    if (!_glfw.wl.xdg_toplevel_icon_manager_v1) {
+        static bool warned_once = false;
+        if (!warned_once) {
+            _glfwInputError(GLFW_FEATURE_UNAVAILABLE, "Wayland: The compositor does not support changing window icons");
+            warned_once = true;
+        }
+        return;
+    }
+    if (!count) {
+        xdg_toplevel_icon_manager_v1_set_icon(_glfw.wl.xdg_toplevel_icon_manager_v1, window->wl.xdg.toplevel, NULL);
+        return;
+    }
+    struct wl_buffer* *buffers = malloc(sizeof(struct wl_buffer*) * count);
+    if (!buffers) return;
+    size_t total_data_size = 0;
+    for (int i = 0; i < count; i++) total_data_size += (size_t)images[i].width * images[i].height * 4;
+    int fd = createAnonymousFile(total_data_size);
+    if (fd < 0) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Creating a buffer file for %ld B failed: %s", (long)total_data_size, strerror(errno));
+        free(buffers);
+        return;
+    }
+    unsigned char *data = mmap(NULL, total_data_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: mmap failed: %s", strerror(errno));
+        free(buffers);
+        close(fd);
+        return;
+    }
+    struct wl_shm_pool* pool = wl_shm_create_pool(_glfw.wl.shm, fd, total_data_size);
+    struct xdg_toplevel_icon_v1 *icon = xdg_toplevel_icon_manager_v1_create_icon(_glfw.wl.xdg_toplevel_icon_manager_v1);
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+        const size_t sz = (size_t)images[i].width * images[i].height * 4;
+        convert_glfw_image_to_wayland_image(images + i, data + pos);
+        buffers[i] = wl_shm_pool_create_buffer(
+                pool, pos, images[i].width, images[i].height, images[i].width * 4, WL_SHM_FORMAT_ARGB8888);
+        xdg_toplevel_icon_v1_add_buffer(icon, buffers[i], 1);
+        pos += sz;
+    }
+    xdg_toplevel_icon_manager_v1_set_icon(_glfw.wl.xdg_toplevel_icon_manager_v1, window->wl.xdg.toplevel, icon);
+    xdg_toplevel_icon_v1_destroy(icon);
+    for (int i = 0; i < count; i++) wl_buffer_destroy(buffers[i]);
+    free(buffers);
+    wl_shm_pool_destroy(pool);
+    munmap(data, total_data_size);
+    close(fd);
 }
 
 void _glfwPlatformGetWindowPos(_GLFWwindow* window UNUSED, int* xpos UNUSED, int* ypos UNUSED)
@@ -1475,6 +1639,11 @@ void _glfwPlatformGetWindowSize(_GLFWwindow* window, int* width, int* height)
 
 void _glfwPlatformSetWindowSize(_GLFWwindow* window, int width, int height)
 {
+    if (is_layer_shell(window)) {
+        _glfwInputError(GLFW_FEATURE_UNAVAILABLE,
+                        "Wayland: Resizing of layer shell surfaces is not supported");
+        return;
+    }
     if (width != window->wl.width || height != window->wl.height) {
         window->wl.user_requested_content_size.width = width;
         window->wl.user_requested_content_size.height = height;
@@ -1482,7 +1651,7 @@ void _glfwPlatformSetWindowSize(_GLFWwindow* window, int width, int height)
         csd_set_window_geometry(window, &w, &h);
         window->wl.width = w; window->wl.height = h;
         resizeFramebuffer(window);
-        csd_set_visible(window, true);  // resizes the csd iff the window currently has csd
+        csd_set_visible(window, csd_should_window_be_decorated(window));  // resizes the csd iff the window currently has csd
         commit_window_surface_if_safe(window);
         inform_compositor_of_window_geometry(window, "SetWindowSize");
     }
@@ -1593,27 +1762,42 @@ void _glfwPlatformMaximizeWindow(_GLFWwindow* window)
     }
 }
 
-void _glfwPlatformShowWindow(_GLFWwindow* window)
+void _glfwPlatformShowWindow(_GLFWwindow* window, bool move_to_active_screen UNUSED)
 {
     if (!window->wl.visible) {
-        create_window_desktop_surface(window);
-        window->wl.visible = true;
-        loop_till_window_fully_created(window);
+        if (!window->wl.created) {
+            create_window_desktop_surface(window);
+            window->wl.visible = true;
+        } else {
+            // workaround for kwin layer shell bug: https://bugs.kde.org/show_bug.cgi?id=503121
+            if (is_layer_shell(window)) layer_set_properties(window, false, window->wl.width, window->wl.height);
+            window->wl.visible = true;
+            commit_window_surface(window);
+        }
+        debug("Window %llu mapped waiting for configure event from compositor\n", window->id);
     }
 }
 
 void _glfwPlatformHideWindow(_GLFWwindow* window)
 {
-    if (window->wl.xdg.toplevel)
-    {
-        xdg_toplevel_destroy(window->wl.xdg.toplevel);
-        xdg_surface_destroy(window->wl.xdg.surface);
-        window->wl.xdg.toplevel = NULL;
-        window->wl.xdg.surface = NULL;
-        window->wl.once.surface_configured = false;
-        window->swaps_disallowed = true;
-    }
+    if (!window->wl.visible) return;
+    wl_surface_attach(window->wl.surface, NULL, 0, 0);
+    window->wl.once.surface_configured = false;
+    window->swaps_disallowed = true;
     window->wl.visible = false;
+    commit_window_surface(window);
+    debug("Window %llu unmapped\n", window->id);
+}
+
+bool
+_glfwPlatformSetLayerShellConfig(_GLFWwindow* window, const GLFWLayerShellConfig *value) {
+    if (!is_layer_shell(window)) return false;
+    if (value) window->wl.layer_shell.config = *value;
+    uint32_t width, height;
+    calculate_layer_size(window, &width, &height);
+    layer_set_properties(window, false, width, height);
+    commit_window_surface(window);
+    return true;
 }
 
 static void
@@ -2075,35 +2259,6 @@ read_offer(int data_pipe, GLFWclipboardwritedatafun write_data, void *object) {
 }
 
 
-typedef struct chunked_writer {
-    char *buf; size_t sz, cap;
-} chunked_writer;
-
-static bool
-write_chunk(void *object, const char *data, size_t sz) {
-    chunked_writer *cw = object;
-    if (cw->cap < cw->sz + sz) {
-        cw->cap = MAX(cw->cap * 2, cw->sz + 8*sz);
-        cw->buf = realloc(cw->buf, cw->cap * sizeof(cw->buf[0]));
-    }
-    memcpy(cw->buf + cw->sz, data, sz);
-    cw->sz += sz;
-    return true;
-}
-
-
-static char*
-read_offer_string(int data_pipe, size_t *sz) {
-    chunked_writer cw = {0};
-    read_offer(data_pipe, write_chunk, &cw);
-    if (cw.buf) {
-        *sz = cw.sz;
-        return cw.buf;
-    }
-    *sz = 0;
-    return NULL;
-}
-
 static void
 read_clipboard_data_offer(struct wl_data_offer *data_offer, const char *mime, GLFWclipboardwritedatafun write_data, void *object) {
     int pipefd[2];
@@ -2122,18 +2277,11 @@ read_primary_selection_offer(struct zwp_primary_selection_offer_v1 *primary_sele
     read_offer(pipefd[0], write_data, object);
 }
 
-static char* read_data_offer(struct wl_data_offer *data_offer, const char *mime, size_t *sz) {
-    int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC) != 0) return NULL;
-    wl_data_offer_receive(data_offer, mime, pipefd[1]);
-    close(pipefd[1]);
-    return read_offer_string(pipefd[0], sz);
-}
-
 static void data_source_canceled(void *data UNUSED, struct wl_data_source *wl_data_source) {
     if (_glfw.wl.dataSourceForClipboard == wl_data_source) {
         _glfw.wl.dataSourceForClipboard = NULL;
         _glfw_free_clipboard_data(&_glfw.clipboard);
+        _glfwInputClipboardLost(GLFW_CLIPBOARD);
     }
     wl_data_source_destroy(wl_data_source);
 }
@@ -2142,6 +2290,7 @@ static void primary_selection_source_canceled(void *data UNUSED, struct zwp_prim
     if (_glfw.wl.dataSourceForPrimarySelection == primary_selection_source) {
         _glfw.wl.dataSourceForPrimarySelection = NULL;
         _glfw_free_clipboard_data(&_glfw.primary);
+        _glfwInputClipboardLost(GLFW_PRIMARY_SELECTION);
     }
     zwp_primary_selection_source_v1_destroy(primary_selection_source);
 }
@@ -2165,6 +2314,17 @@ static const struct zwp_primary_selection_source_v1_listener primary_selection_s
     .cancelled = primary_selection_source_canceled,
 };
 
+// Getting data from clipboard and drops {{{
+static void
+destroy_drop_data(_GLFWWaylandDataOffer *offer) {
+    for (size_t i = 0; i < offer->dd_count; i++) {
+        if (offer->requested_drop_data[i].mime) free(offer->requested_drop_data[i].mime);
+        if (offer->requested_drop_data[i].fd > -1) { safe_close(offer->requested_drop_data[i].fd); }
+        if (offer->requested_drop_data[i].watch_id) removeWatch(&_glfw.wl.eventLoopData, offer->requested_drop_data[i].watch_id);
+    }
+    free(offer->requested_drop_data);
+}
+
 void
 destroy_data_offer(_GLFWWaylandDataOffer *offer) {
     if (offer->id) {
@@ -2175,47 +2335,41 @@ destroy_data_offer(_GLFWWaylandDataOffer *offer) {
         for (size_t i = 0; i < offer->mimes_count; i++) free((char*)offer->mimes[i]);
         free(offer->mimes);
     }
-    memset(offer, 0, sizeof(_GLFWWaylandDataOffer));
-}
-
-static void prune_unclaimed_data_offers(void) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id && !_glfw.wl.dataOffers[i].offer_type) {
-            destroy_data_offer(&_glfw.wl.dataOffers[i]);
-        }
-    }
-}
-
-static void mark_selection_offer(void *data UNUSED, struct wl_data_device *data_device UNUSED, struct wl_data_offer *data_offer)
-{
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == data_offer) {
-            _glfw.wl.dataOffers[i].offer_type = CLIPBOARD;
-        } else if (_glfw.wl.dataOffers[i].offer_type == CLIPBOARD) {
-            _glfw.wl.dataOffers[i].offer_type = EXPIRED;  // previous selection offer
-        }
-    }
-    prune_unclaimed_data_offers();
-}
-
-static void mark_primary_selection_offer(void *data UNUSED, struct zwp_primary_selection_device_v1* primary_selection_device UNUSED,
-        struct zwp_primary_selection_offer_v1 *primary_selection_offer) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == primary_selection_offer) {
-            _glfw.wl.dataOffers[i].offer_type = PRIMARY_SELECTION;
-        } else if (_glfw.wl.dataOffers[i].offer_type == PRIMARY_SELECTION) {
-            _glfw.wl.dataOffers[i].offer_type = EXPIRED;  // previous selection offer
-        }
-    }
-    prune_unclaimed_data_offers();
+    if (offer->requested_drop_data) destroy_drop_data(offer);
+    memset(offer, 0, sizeof(offer[0]));
 }
 
 static void
-set_offer_mimetype(_GLFWWaylandDataOffer* offer, const char* mime) {
+mark_data_offer(_GLFWWaylandDataOffer *ans, void *id) {
+    if (ans->id) destroy_data_offer(ans);
+    for (size_t i = 0; i < arraysz(_glfw.wl.untyped_data_offers); i++) {
+        _GLFWWaylandDataOffer *offer = _glfw.wl.untyped_data_offers + i;
+        if (offer->id == id) {
+            *ans = *offer;
+            memset(offer, 0, sizeof(offer[0]));
+            break;
+        }
+    }
+}
+
+static void
+mark_selection_offer(void *data UNUSED, struct wl_data_device *data_device UNUSED, struct wl_data_offer *data_offer) {
+    mark_data_offer(&_glfw.wl.clipboard_data_offer, data_offer);
+}
+
+static void
+mark_primary_selection_offer(void *data UNUSED, struct zwp_primary_selection_device_v1* primary_selection_device UNUSED,
+        struct zwp_primary_selection_offer_v1 *primary_selection_offer) {
+    mark_data_offer(&_glfw.wl.primary_data_offer, primary_selection_offer);
+}
+
+static void
+add_offer_mimetype(_GLFWWaylandDataOffer* offer, const char* mime, bool is_self_offer) {
+    if (is_self_offer) offer->is_self_offer = is_self_offer;
     if (strcmp(mime, clipboard_mime()) == 0) {
         offer->is_self_offer = true;
     }
-    if (!offer->mimes || offer->mimes_count >= offer->mimes_capacity - 1) {
+    if (!offer->mimes || offer->mimes_count + 1 >= offer->mimes_capacity) {
         offer->mimes = realloc(offer->mimes, sizeof(char*) * (offer->mimes_capacity + 64));
         if (offer->mimes) offer->mimes_capacity += 64;
         else return;
@@ -2223,42 +2377,41 @@ set_offer_mimetype(_GLFWWaylandDataOffer* offer, const char* mime) {
     offer->mimes[offer->mimes_count++] = _glfw_strdup(mime);
 }
 
-static void handle_offer_mimetype(void *data UNUSED, struct wl_data_offer* id, const char *mime) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == id) {
-            set_offer_mimetype(&_glfw.wl.dataOffers[i], mime);
-            break;
-        }
+static _GLFWWaylandDataOffer*
+data_offer_for_id(void *id) {
+    for (size_t i = 0; i < arraysz(_glfw.wl.untyped_data_offers); i++) {
+        _GLFWWaylandDataOffer *offer = _glfw.wl.untyped_data_offers + i;
+        if (offer->id == id) return offer;
     }
+    if (_glfw.wl.clipboard_data_offer.id == id) return &_glfw.wl.clipboard_data_offer;
+    if (_glfw.wl.primary_data_offer.id == id) return &_glfw.wl.primary_data_offer;
+    if (_glfw.wl.drop_data_offer.id == id) return &_glfw.wl.drop_data_offer;
+    return NULL;
+}
+
+static void
+add_generic_offer_mimetype(void *id, const char *mime, bool is_self_offer) {
+    _GLFWWaylandDataOffer *offer = data_offer_for_id(id);
+    if (offer) add_offer_mimetype(offer, mime, is_self_offer);
+}
+
+static void handle_offer_mimetype(void *data UNUSED, struct wl_data_offer* id, const char *mime) {
+    add_generic_offer_mimetype(id, mime, strcmp(mime, clipboard_mime()) == 0);
 }
 
 static void handle_primary_selection_offer_mimetype(void *data UNUSED, struct zwp_primary_selection_offer_v1* id, const char *mime) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == id) {
-            set_offer_mimetype((_GLFWWaylandDataOffer*)&_glfw.wl.dataOffers[i], mime);
-            break;
-        }
-    }
+    add_generic_offer_mimetype(id, mime, strcmp(mime, clipboard_mime()) == 0);
 }
 
 static void data_offer_source_actions(void *data UNUSED, struct wl_data_offer* id, uint32_t actions) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == id) {
-            _glfw.wl.dataOffers[i].source_actions = actions;
-            break;
-        }
-    }
+    _GLFWWaylandDataOffer *offer = data_offer_for_id(id);
+    if (offer) offer->source_actions = actions;
 }
 
 static void data_offer_action(void *data UNUSED, struct wl_data_offer* id, uint32_t action) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].id == id) {
-            _glfw.wl.dataOffers[i].dnd_action = action;
-            break;
-        }
-    }
+    _GLFWWaylandDataOffer *offer = data_offer_for_id(id);
+    if (offer) offer->dnd_action = action;
 }
-
 
 static const struct wl_data_offer_listener data_offer_listener = {
     .offer = handle_offer_mimetype,
@@ -2270,25 +2423,20 @@ static const struct zwp_primary_selection_offer_v1_listener primary_selection_of
     .offer = handle_primary_selection_offer_mimetype,
 };
 
-static size_t
+static void
 handle_data_offer_generic(void *id, bool is_primary) {
-    size_t smallest_idx = SIZE_MAX, pos = 0;
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].idx && _glfw.wl.dataOffers[i].idx < smallest_idx) {
-            smallest_idx = _glfw.wl.dataOffers[i].idx;
-            pos = i;
-        }
-        if (_glfw.wl.dataOffers[i].id == NULL) {
-            pos = i;
-            goto end;
+    for (size_t i = 0; i < arraysz(_glfw.wl.untyped_data_offers); i++) {
+        _GLFWWaylandDataOffer *offer = _glfw.wl.untyped_data_offers + i;
+        if (offer->id == NULL) {
+            offer->id = id;
+            offer->is_primary = is_primary;
+            return;
         }
     }
-    if (_glfw.wl.dataOffers[pos].id) destroy_data_offer(&_glfw.wl.dataOffers[pos]);
-end:
-    _glfw.wl.dataOffers[pos].id = id;
-    _glfw.wl.dataOffers[pos].is_primary = is_primary;
-    _glfw.wl.dataOffers[pos].idx = ++_glfw.wl.dataOffersCounter;
-    return pos;
+    if (is_primary) zwp_primary_selection_offer_v1_destroy(id);
+    else wl_data_offer_destroy(id);
+    _glfwInputError(GLFW_PLATFORM_ERROR,
+                    "Wayland: too many untyped data offers");
 }
 
 static void handle_data_offer(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, struct wl_data_offer *id) {
@@ -2301,70 +2449,205 @@ static void handle_primary_selection_offer(void *data UNUSED, struct zwp_primary
     zwp_primary_selection_offer_v1_add_listener(id, &primary_selection_offer_listener, NULL);
 }
 
-static void drag_enter(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, uint32_t serial, struct wl_surface *surface, wl_fixed_t x UNUSED, wl_fixed_t y UNUSED, struct wl_data_offer *id) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        _GLFWWaylandDataOffer *d = _glfw.wl.dataOffers + i;
-        if (d->id == id) {
-            d->offer_type = DRAG_AND_DROP;
-            d->surface = surface;
+// Helper function to update drop state from callback results
+static void
+update_drop_state(_GLFWWaylandDataOffer *d, _GLFWwindow* window UNUSED, size_t mime_count) {
+    for (size_t i = mime_count; i < d->mimes_count; i++) {
+        if (d->mimes[i]) { free((void*)d->mimes[i]); d->mimes[i] = NULL; }
+    }
+    d->mimes_count = mime_count;
+    bool accepted = mime_count > 0;
+    bool acceptance_changed = (accepted != d->drag_accepted);
+    // The first MIME in the sorted list is the preferred one for drop
+    const char* new_preferred_mime = (accepted && mime_count > 0) ? d->mimes[0] : NULL;
+    bool mime_changed = false;
+
+    // Check if the preferred MIME changed
+    if (d->mime_for_drop == NULL && new_preferred_mime != NULL) {
+        mime_changed = true;
+    } else if (d->mime_for_drop != NULL && new_preferred_mime == NULL) {
+        mime_changed = true;
+    } else if (d->mime_for_drop != NULL && new_preferred_mime != NULL) {
+        mime_changed = (strcmp(d->mime_for_drop, new_preferred_mime) != 0);
+    }
+
+    if (acceptance_changed || mime_changed) {
+        d->drag_accepted = accepted;
+        d->mime_for_drop = new_preferred_mime;
+        wl_data_offer_accept(d->id, d->serial, d->mime_for_drop);
+    }
+}
+
+static void
+drag_enter(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, uint32_t serial, struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y, struct wl_data_offer *id) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    mark_data_offer(offer, id);
+    if (!offer->id) return;
+    offer->is_self_offer = (_glfw.wl.drag.window_id != 0);
+    offer->surface = surface;
+    offer->serial = serial;
+    offer->drag_accepted = false;
+    offer->mime_for_drop = NULL;
+    _GLFWwindow* window = _glfw.windowListHead;
+    while (window) {
+        if (window->wl.surface == surface) {
+            double xpos = wl_fixed_to_double(x);
+            double ypos = wl_fixed_to_double(y);
+            size_t mime_count = _glfwInputDropEvent(
+                    window, GLFW_DROP_ENTER, xpos, ypos,
+                    offer->mimes, offer->mimes_count, offer->is_self_offer);
+            update_drop_state(offer, window, mime_count);
+            break;
+        }
+        window = window->next;
+    }
+}
+
+static void
+drag_leave(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (offer->id) {
+        _GLFWwindow* window = _glfw.windowListHead;
+        while (window) {
+            if (window->wl.surface == _glfw.wl.drop_data_offer.surface) {
+                _glfwInputDropEvent(window, GLFW_DROP_LEAVE, 0, 0, NULL, 0, offer->is_self_offer);
+                break;
+            }
+            window = window->next;
+        }
+        if (!offer->dropped) destroy_data_offer(offer);
+    }
+}
+
+void
+_glfwPlatformEndDrop(GLFWwindow *w UNUSED, GLFWDragOperationType op UNUSED) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (offer->id) destroy_data_offer(offer);
+}
+
+ssize_t
+_glfwPlatformReadAvailableDropData(GLFWwindow *w, GLFWDropEvent *ev, char *buffer, size_t sz) {
+    _GLFWwindow *window = (_GLFWwindow*)w;
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (!offer->id || offer->surface != window->wl.surface) return -ENOENT;
+    int fd = (int)ev->xpos;
+    for (size_t o = 0; o < offer->dd_count; o++) {
+        if (offer->requested_drop_data[o].fd == fd) {
+            ssize_t ret;
+            do { ret = read(fd, buffer, sz); } while (ret < 0 && errno == EINTR);
+            if (ret <= 0) removeWatch(&_glfw.wl.eventLoopData, offer->requested_drop_data[o].watch_id);
+            return ret < 0 ? -errno : ret;
+        }
+    }
+    return -ENOENT;
+}
+
+static void
+drop_data_available(int fd, int events UNUSED, void *data UNUSED) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (!offer->id) return;
+    for (size_t o = 0; o < offer->dd_count; o++) {
+        if (offer->requested_drop_data[o].fd == fd) {
             _GLFWwindow* window = _glfw.windowListHead;
-            int format_priority = 0;
-            while (window)
-            {
-                if (window->wl.surface == surface) {
-                    for (size_t j = 0; j < d->mimes_count; j++) {
-                        int prio = _glfwInputDrop(window, d->mimes[j], NULL, 0);
-                        if (prio > format_priority) d->mime_for_drop = d->mimes[j];
-                    }
-                    break;
+            while (window) {
+                if (window->wl.surface == offer->surface) {
+                    const char *mimes[1] = {offer->requested_drop_data[o].mime};
+                    _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, fd, 0, mimes, 1, offer->is_self_offer);
+                    return;
                 }
                 window = window->next;
             }
-            wl_data_offer_accept(id, serial, d->mime_for_drop);
-        } else if (_glfw.wl.dataOffers[i].offer_type == DRAG_AND_DROP) {
-            _glfw.wl.dataOffers[i].offer_type = EXPIRED;  // previous drag offer
-        }
-    }
-    prune_unclaimed_data_offers();
-}
-
-static void drag_leave(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].offer_type == DRAG_AND_DROP) {
-            destroy_data_offer(&_glfw.wl.dataOffers[i]);
+            destroy_data_offer(offer);
         }
     }
 }
 
-static void drop(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        if (_glfw.wl.dataOffers[i].offer_type == DRAG_AND_DROP && _glfw.wl.dataOffers[i].mime_for_drop) {
-            size_t sz = 0;
-            char *d = read_data_offer(_glfw.wl.dataOffers[i].id, _glfw.wl.dataOffers[i].mime_for_drop, &sz);
-            if (d) {
-                // We dont do finish as this requires version 3 for wl_data_device_manager
-                // which then requires more work with calling set_actions for drag and drop to function
-                // wl_data_offer_finish(_glfw.wl.dataOffers[i].id);
+static int
+request_drop_data(_GLFWWaylandDataOffer *offer, const char *mime) {
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0) return errno;
+    wl_data_offer_receive(offer->id, mime, pipefd[1]);
+    safe_close(pipefd[1]);
+    // Flush to ensure the compositor processes the receive request
+    wl_display_flush(_glfw.wl.display);
+    id_type watch_id = addWatch(&_glfw.wl.eventLoopData, "drop_data", pipefd[0], POLLIN | POLLERR | POLLHUP, true, drop_data_available, NULL);
+    if (!watch_id) {
+        safe_close(pipefd[0]);
+        return ERANGE;
+    }
+    char *mt = _glfw_strdup(mime);
+    if (!mt) {
+        safe_close(pipefd[0]);
+        removeWatch(&_glfw.wl.eventLoopData, watch_id);
+        return ENOMEM;
+    }
+    if (!offer->requested_drop_data || offer->dd_count + 1 >= offer->dd_capacity) {
+        void *p = realloc(offer->requested_drop_data, sizeof(offer->requested_drop_data[0]) * (offer->dd_capacity + 8));
+        if (!p) {
+            safe_close(pipefd[0]);
+            removeWatch(&_glfw.wl.eventLoopData, watch_id);
+            free(mt);
+            return ENOMEM;
+        }
+        offer->requested_drop_data = p;
+        offer->dd_capacity += 64;
+    }
+    offer->requested_drop_data[offer->dd_count].mime = mt;
+    offer->requested_drop_data[offer->dd_count].watch_id = watch_id;
+    offer->requested_drop_data[offer->dd_count].fd = pipefd[0];
+    offer->dd_count++;
+    return 0;
+}
 
-                _GLFWwindow* window = _glfw.windowListHead;
-                while (window)
-                {
-                    if (window->wl.surface == _glfw.wl.dataOffers[i].surface) {
-                        _glfwInputDrop(window, _glfw.wl.dataOffers[i].mime_for_drop, d, sz);
-                        break;
-                    }
-                    window = window->next;
-                }
+int
+_glfwPlatformRequestDropData(_GLFWwindow *window UNUSED, const char *mime) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (offer->id) return request_drop_data(offer, mime);
+    return EINVAL;
+}
 
-                free(d);
-            }
-            destroy_data_offer(&_glfw.wl.dataOffers[i]);
+static void
+drop(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (!offer->id) return;
+    offer->dropped = true;
+    _GLFWwindow* window = _glfw.windowListHead;
+    while (window) {
+        if (window->wl.surface == offer->surface) {
+            size_t num_mimes = _glfwInputDropEvent(window, GLFW_DROP_DROP, 0, 0, offer->mimes, offer->mimes_count, offer->is_self_offer);
+            if (!offer->mimes) { destroy_data_offer(offer); return; }
+            for (size_t i = 0; i < num_mimes; i++) request_drop_data(offer, offer->mimes[i]);
             break;
         }
+        window = window->next;
     }
 }
 
-static void motion(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, uint32_t time UNUSED, wl_fixed_t x UNUSED, wl_fixed_t y UNUSED) {
+static void
+motion(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, uint32_t time UNUSED, wl_fixed_t x, wl_fixed_t y) {
+    _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
+    if (!offer->id) return;
+    _GLFWwindow* window = _glfw.windowListHead;
+    while (window) {
+        if (window->wl.surface == offer->surface) {
+            double xpos = wl_fixed_to_double(x);
+            double ypos = wl_fixed_to_double(y);
+            size_t mime_count = _glfwInputDropEvent(
+                window, GLFW_DROP_MOVE, xpos, ypos, offer->mimes, offer->mimes_count, offer->is_self_offer);
+            update_drop_state(offer, window, mime_count);
+            break;
+        }
+        window = window->next;
+    }
+}
+
+void
+_glfwPlatformRequestDropUpdate(_GLFWwindow* window) {
+    _GLFWWaylandDataOffer *d = &_glfw.wl.drop_data_offer;
+    if (d->id) {
+        size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_STATUS_UPDATE, 0, 0, d->mimes, d->mimes_count, d->is_self_offer);
+        update_drop_state(d, window, mime_count);
+    }
 }
 
 static const struct wl_data_device_listener data_device_listener = {
@@ -2380,7 +2663,7 @@ static const struct zwp_primary_selection_device_v1_listener primary_selection_d
     .data_offer = handle_primary_selection_offer,
     .selection = mark_primary_selection_offer,
 };
-
+// }}}
 
 void _glfwSetupWaylandDataDevice(void) {
     _glfw.wl.dataDevice = wl_data_device_manager_get_data_device(_glfw.wl.dataDeviceManager, _glfw.wl.seat);
@@ -2517,39 +2800,34 @@ plain_text_mime_for_offer(const _GLFWWaylandDataOffer *d) {
 
 void
 _glfwPlatformGetClipboard(GLFWClipboardType clipboard_type, const char* mime_type, GLFWclipboardwritedatafun write_data, void *object) {
-    _GLFWWaylandOfferType offer_type = clipboard_type == GLFW_PRIMARY_SELECTION ? PRIMARY_SELECTION : CLIPBOARD;
-    for (size_t i = 0; i < arraysz(_glfw.wl.dataOffers); i++) {
-        _GLFWWaylandDataOffer *d = _glfw.wl.dataOffers + i;
-        if (d->id && d->offer_type == offer_type) {
-            if (d->is_self_offer) {
-                write_data(object, NULL, 1);
-                return;
-            }
-            if (mime_type == NULL) {
-                bool ok = true;
-                for (size_t o = 0; o < d->mimes_count; o++) {
-                    const char *q = d->mimes[o];
-                    if (strchr(d->mimes[0], '/')) {
-                        if (strcmp(q, clipboard_mime()) == 0) continue;
-                        if (strcmp(q, "text/plain;charset=utf-8") == 0) q = "text/plain";
-                    } else {
-                        if (strcmp(q, "UTF8_STRING") == 0 || strcmp(q, "STRING") == 0 || strcmp(q, "TEXT") == 0) q = "text/plain";
-                    }
-                    if (ok) ok = write_data(object, q, strlen(q));
-                }
-                return;
-            }
-            if (strcmp(mime_type, "text/plain") == 0) {
-                mime_type = plain_text_mime_for_offer(d);
-                if (!mime_type) return;
-            }
-            if (d->is_primary) {
-                read_primary_selection_offer(d->id, mime_type, write_data, object);
+    _GLFWWaylandDataOffer *d = clipboard_type == GLFW_PRIMARY_SELECTION ? &_glfw.wl.primary_data_offer : &_glfw.wl.clipboard_data_offer;
+    if (!d->id) return;
+    if (d->is_self_offer) {
+        write_data(object, NULL, 1);
+        return;
+    }
+    if (mime_type == NULL) {
+        bool ok = true;
+        for (size_t o = 0; o < d->mimes_count; o++) {
+            const char *q = d->mimes[o];
+            if (strchr(d->mimes[0], '/')) {
+                if (strcmp(q, clipboard_mime()) == 0) continue;
+                if (strcmp(q, "text/plain;charset=utf-8") == 0) q = "text/plain";
             } else {
-                read_clipboard_data_offer(d->id, mime_type, write_data, object);
+                if (strcmp(q, "UTF8_STRING") == 0 || strcmp(q, "STRING") == 0 || strcmp(q, "TEXT") == 0) q = "text/plain";
             }
-            break;
+            if (ok) ok = write_data(object, q, strlen(q));
         }
+        return;
+    }
+    if (strcmp(mime_type, "text/plain") == 0) {
+        mime_type = plain_text_mime_for_offer(d);
+        if (!mime_type) return;
+    }
+    if (d->is_primary) {
+        read_primary_selection_offer(d->id, mime_type, write_data, object);
+    } else {
+        read_clipboard_data_offer(d->id, mime_type, write_data, object);
     }
 }
 
@@ -2667,6 +2945,16 @@ _glfwPlatformSetWindowBlur(_GLFWwindow *window, int blur_radius) {
     return has_blur ? 1 : 0;
 }
 
+bool
+_glfwPlatformGrabKeyboard(bool grab) {
+    if (!_glfw.wl.keyboard_shortcuts_inhibit_manager) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "The Wayland compositor does not implement inhibit-keyboard-shortcuts, cannot grab keyboard");
+        return false;
+    }
+    for (_GLFWwindow* window = _glfw.windowListHead; window; window = window->next) inhibit_shortcuts_for(window, grab);
+    return true;
+}
+
 //////////////////////////////////////////////////////////////////////////
 //////                        GLFW native API                       //////
 //////////////////////////////////////////////////////////////////////////
@@ -2680,6 +2968,8 @@ GLFWAPI struct wl_display* glfwGetWaylandDisplay(void)
 GLFWAPI struct wl_surface* glfwGetWaylandWindow(GLFWwindow* handle)
 {
     _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
     return window->wl.surface;
 }
@@ -2742,9 +3032,14 @@ GLFWAPI void glfwWaylandRedrawCSDWindowTitle(GLFWwindow *handle) {
     if (csd_change_title(window)) commit_window_surface_if_safe(window);
 }
 
-GLFWAPI void glfwWaylandSetupLayerShellForNextWindow(const GLFWLayerShellConfig *c) {
-    layer_shell_config_for_next_window = *c;
+const GLFWLayerShellConfig*
+_glfwPlatformGetLayerShellConfig(_GLFWwindow *window) {
+    return &window->wl.layer_shell.config;
 }
+
+GLFWAPI bool glfwIsLayerShellSupported(void) { return _glfw.wl.zwlr_layer_shell_v1 != NULL; }
+
+GLFWAPI bool glfwWaylandIsWindowFullyCreated(GLFWwindow *handle) { return handle != NULL && ((_GLFWwindow*)handle)->wl.window_fully_created; }
 
 void
 _glfwPlatformInputColorScheme(GLFWColorScheme appearance UNUSED) {
@@ -2754,3 +3049,316 @@ _glfwPlatformInputColorScheme(GLFWColorScheme appearance UNUSED) {
         window = window->next;
     }
 }
+
+GLFWAPI bool glfwWaylandBeep(GLFWwindow *handle) {
+    if (!_glfw.wl.xdg_system_bell_v1) return false;
+    _GLFWwindow *window = (_GLFWwindow*)handle;
+    xdg_system_bell_v1_ring(_glfw.wl.xdg_system_bell_v1, window ? window->wl.surface : NULL);
+    return true;
+}
+
+// Drag operation implementation
+
+static void
+cleanup_wl_drag_source_data(GLFWDragSourceData* data) {
+    if (!data) return;
+    if (data->write_fd >= 0) {
+        close(data->write_fd);
+        data->write_fd = -1;
+    }
+    free(data->mime_type);
+    free(data);
+}
+
+// Remove a finished request from the pending requests array
+static void
+remove_wl_pending_request(int index) {
+    if (index < 0 || index >= _glfw.wl.drag.pending_request_count) return;
+
+    cleanup_wl_drag_source_data(_glfw.wl.drag.pending_requests[index]);
+
+    // Shift remaining elements
+    for (int i = index; i < _glfw.wl.drag.pending_request_count - 1; i++) {
+        _glfw.wl.drag.pending_requests[i] = _glfw.wl.drag.pending_requests[i + 1];
+    }
+    _glfw.wl.drag.pending_request_count--;
+}
+
+// Clean up all finished requests from the pending requests array
+static void
+cleanup_wl_finished_requests(void) {
+    for (int i = _glfw.wl.drag.pending_request_count - 1; i >= 0; i--) {
+        if (_glfw.wl.drag.pending_requests[i]->finished) {
+            remove_wl_pending_request(i);
+        }
+    }
+}
+
+// Clean up all pending requests
+static void
+cleanup_all_wl_pending_requests(void) {
+    for (int i = 0; i < _glfw.wl.drag.pending_request_count; i++) {
+        cleanup_wl_drag_source_data(_glfw.wl.drag.pending_requests[i]);
+    }
+    free(_glfw.wl.drag.pending_requests);
+    _glfw.wl.drag.pending_requests = NULL;
+    _glfw.wl.drag.pending_request_count = 0;
+    _glfw.wl.drag.pending_request_capacity = 0;
+}
+
+// Add a request to the pending requests array
+static bool
+add_wl_pending_request(GLFWDragSourceData* request) {
+    // First, clean up any finished requests to make room
+    cleanup_wl_finished_requests();
+
+    // Grow the array if necessary
+    if (_glfw.wl.drag.pending_request_count >= _glfw.wl.drag.pending_request_capacity) {
+        // Cap maximum capacity to prevent excessive memory use
+        if (_glfw.wl.drag.pending_request_capacity >= 512) {
+            return false;
+        }
+        int new_capacity = _glfw.wl.drag.pending_request_capacity ? _glfw.wl.drag.pending_request_capacity * 2 : 4;
+        GLFWDragSourceData** new_array = realloc(_glfw.wl.drag.pending_requests,
+                                                  new_capacity * sizeof(GLFWDragSourceData*));
+        if (!new_array) return false;
+        _glfw.wl.drag.pending_requests = new_array;
+        _glfw.wl.drag.pending_request_capacity = new_capacity;
+    }
+
+    _glfw.wl.drag.pending_requests[_glfw.wl.drag.pending_request_count++] = request;
+    return true;
+}
+
+static void
+cleanup_drag(struct wl_data_source *source) {
+    // Notify the application that the drag source is closed
+    _GLFWwindow *window = _glfwWindowForId(_glfw.wl.drag.window_id);
+    if (window && window->callbacks.dragSource) _glfwInputDragSourceRequest(window, NULL, NULL);
+
+    // Clean up all pending data requests
+    cleanup_all_wl_pending_requests();
+
+    // Clean up MIME type strings
+    for (int i = 0; i < _glfw.wl.drag.mime_count; i++) free(_glfw.wl.drag.mimes[i]);
+    free(_glfw.wl.drag.mimes);
+    _glfw.wl.drag.mimes = NULL;
+    _glfw.wl.drag.mime_count = 0;
+    _glfw.wl.drag.window_id = 0;
+    if (_glfw.wl.drag.drag_viewport) wp_viewport_destroy(_glfw.wl.drag.drag_viewport);
+    if (_glfw.wl.drag.drag_icon) wl_surface_destroy(_glfw.wl.drag.drag_icon);
+    _glfw.wl.drag.drag_icon = NULL; _glfw.wl.drag.drag_viewport = NULL;
+    if (_glfw.wl.drag.source && _glfw.wl.drag.source != source) wl_data_source_destroy(_glfw.wl.drag.source);
+    _glfw.wl.drag.source = NULL;
+    if (source) wl_data_source_destroy(source);
+}
+
+static void
+drag_source_send(void *data UNUSED, struct wl_data_source *source UNUSED, const char *mime_type, int fd) {
+    _GLFWwindow *window = _glfwWindowForId(_glfw.wl.drag.window_id);
+    if (!window) {
+        close(fd);
+        return;
+    }
+
+    // Create a new drag source data request
+    GLFWDragSourceData* request = calloc(1, sizeof(GLFWDragSourceData));
+    if (!request) {
+        close(fd);
+        return;
+    }
+
+    request->window_id = _glfw.wl.drag.window_id;
+    request->mime_type = _glfw_strdup(mime_type);
+    request->write_fd = fd;
+    request->finished = false;
+    request->error_code = 0;
+
+    if (!request->mime_type) {
+        cleanup_wl_drag_source_data(request);
+        return;
+    }
+
+    // Add to pending requests array
+    if (!add_wl_pending_request(request)) {
+        cleanup_wl_drag_source_data(request);
+        return;
+    }
+
+    // Notify the application via callback
+    _glfwInputDragSourceRequest(window, mime_type, request);
+}
+
+static void
+drag_source_cancelled(void *data UNUSED, struct wl_data_source *source) {
+    cleanup_drag(source);
+}
+
+static void
+drag_source_target(void *data UNUSED, struct wl_data_source *source UNUSED, const char *mime_type UNUSED) {
+}
+
+static void
+drag_source_action(void *data UNUSED, struct wl_data_source *source UNUSED, uint32_t dnd_action UNUSED) {
+}
+
+static void
+drag_source_dnd_drop_performed(void *data UNUSED, struct wl_data_source *source UNUSED) {
+}
+
+static void
+drag_source_dnd_finished(void *data UNUSED, struct wl_data_source *source) {
+    drag_source_cancelled(data, source);
+}
+
+static const struct wl_data_source_listener drag_source_listener = {
+    .send = drag_source_send,
+    .cancelled = drag_source_cancelled,
+    .target = drag_source_target,
+    .action = drag_source_action,
+    .dnd_drop_performed = drag_source_dnd_drop_performed,
+    .dnd_finished = drag_source_dnd_finished,
+};
+
+void
+_glfwPlatformCancelDrag(_GLFWwindow* window UNUSED) {
+    cleanup_drag(_glfw.wl.drag.source);
+}
+
+int
+_glfwPlatformStartDrag(_GLFWwindow* window, const char* const* mime_types, int mime_count, const GLFWimage* thumbnail, int operations) {
+    if (!_glfw.wl.dataDeviceManager) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Data device manager not available");
+        return EIO;
+    }
+
+    if (!_glfw.wl.dataDevice) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Data device not available");
+        return EIO;
+    }
+
+    // Clean up any existing drag operation
+    _glfwPlatformCancelDrag(window);
+
+    // Create the data source
+    _glfw.wl.drag.source = wl_data_device_manager_create_data_source(_glfw.wl.dataDeviceManager);
+    if (!_glfw.wl.drag.source) {
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Failed to create data source for drag");
+        return EIO;
+    }
+
+    // Set the DND action based on operation type (bitfield)
+    uint32_t wl_actions = 0;
+    if (operations & GLFW_DRAG_OPERATION_COPY)
+        wl_actions |= WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    if (operations & GLFW_DRAG_OPERATION_MOVE)
+        wl_actions |= WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+    if (operations & GLFW_DRAG_OPERATION_GENERIC)
+        wl_actions |= WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+    wl_data_source_set_actions(_glfw.wl.drag.source, wl_actions);
+
+    // Allocate storage for MIME types
+    _glfw.wl.drag.mimes = calloc(mime_count, sizeof(char*));
+    _glfw.wl.drag.mime_count = mime_count;
+    _glfw.wl.drag.window_id = window->id;
+
+    if (!_glfw.wl.drag.mimes) {
+        _glfwPlatformCancelDrag(window);
+        _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Failed to allocate drag MIME types");
+        return ENOMEM;
+    }
+
+    // Copy MIME types and offer them
+    for (int i = 0; i < mime_count; i++) {
+        _glfw.wl.drag.mimes[i] = _glfw_strdup(mime_types[i]);
+        if (!_glfw.wl.drag.mimes[i]) {
+            _glfwPlatformCancelDrag(window);
+            _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Failed to allocate drag MIME type");
+            return ENOMEM;
+        }
+        wl_data_source_offer(_glfw.wl.drag.source, mime_types[i]);
+    }
+
+    wl_data_source_add_listener(_glfw.wl.drag.source, &drag_source_listener, NULL);
+
+    // Set up the drag icon surface if thumbnail is provided
+    if (thumbnail && thumbnail->pixels) {
+        struct wl_buffer* icon_buffer = NULL;
+        _glfw.wl.drag.drag_icon = wl_compositor_create_surface(_glfw.wl.compositor);
+        if (_glfw.wl.drag.drag_icon) {
+            icon_buffer = createShmBuffer(thumbnail, false, true);
+            if (icon_buffer) {
+                if (_glfw.wl.wp_viewporter) {
+                    double f_scale = _glfwWaylandWindowScale(window);
+                    int logical_width = (int)(thumbnail->width / f_scale);
+                    int logical_height = (int)(thumbnail->height / f_scale);
+                    _glfw.wl.drag.drag_viewport = wp_viewporter_get_viewport(
+                            _glfw.wl.wp_viewporter, _glfw.wl.drag.drag_icon);
+                    wp_viewport_set_destination(_glfw.wl.drag.drag_viewport, logical_width, logical_height);
+                } else {
+                    int scale = _glfwWaylandIntegerWindowScale(window);
+                    wl_surface_set_buffer_scale(_glfw.wl.drag.drag_icon, scale);
+                }
+                wl_surface_attach(_glfw.wl.drag.drag_icon, icon_buffer, 0, 0);
+                wl_surface_commit(_glfw.wl.drag.drag_icon);
+                wl_buffer_destroy(icon_buffer);
+            }
+        }
+    }
+    // Start the drag operation
+    wl_data_device_start_drag(_glfw.wl.dataDevice, _glfw.wl.drag.source, window->wl.surface, _glfw.wl.drag.drag_icon,
+                              _glfw.wl.pointer_serial);
+
+    return 0;
+}
+
+ssize_t
+_glfwPlatformSendDragData(GLFWDragSourceData* source_data, const void* data, size_t size) {
+    if (!source_data || source_data->finished) return -EINVAL;
+    if (source_data->write_fd < 0) return -EIO;
+
+    // End of data: NULL data pointer and size zero
+    if (!data && size == 0) {
+        source_data->finished = true;
+        close(source_data->write_fd);
+        source_data->write_fd = -1;
+        // Clean up this and any other finished requests
+        cleanup_wl_finished_requests();
+        return 0;
+    }
+
+    // Error from application: NULL data pointer and size is error code
+    if (!data && size > 0) {
+        source_data->finished = true;
+        source_data->error_code = (int)size;
+        close(source_data->write_fd);
+        source_data->write_fd = -1;
+        // Clean up this and any other finished requests
+        cleanup_wl_finished_requests();
+        return 0;
+    }
+
+    // Non-blocking write - retry on EINTR, return 0 on would-block
+    ssize_t written;
+    do {
+        written = write(source_data->write_fd, data, size);
+    } while (written < 0 && errno == EINTR);
+
+    if (written < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Would block, return 0 bytes written
+            return 0;
+        }
+        // Actual error
+        source_data->finished = true;
+        source_data->error_code = errno;
+        close(source_data->write_fd);
+        source_data->write_fd = -1;
+        // Clean up this and any other finished requests
+        cleanup_wl_finished_requests();
+        return -errno;
+    }
+
+    return written;
+}
+

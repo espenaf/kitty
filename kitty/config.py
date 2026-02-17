@@ -3,17 +3,17 @@
 
 import json
 import os
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, suppress
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
 from .conf.utils import BadLine, parse_config_base
 from .conf.utils import load_config as _load_config
 from .constants import cache_dir, defconf
 from .options.types import Options, defaults, option_names
 from .options.utils import KeyboardMode, KeyboardModeMap, KeyDefinition, MouseMap, MouseMapping, build_action_aliases
-from .typing import TypedDict
+from .typing_compat import TypedDict
 from .utils import log_error
 
 
@@ -78,7 +78,7 @@ def prepare_config_file_for_editing() -> str:
     return defconf
 
 
-def finalize_keys(opts: Options, accumulate_bad_lines: Optional[list[BadLine]] = None) -> None:
+def finalize_keys(opts: Options, accumulate_bad_lines: list[BadLine] | None = None) -> None:
     defns: list[KeyDefinition] = []
     for d in opts.map:
         if d is None:  # clear_all_shortcuts
@@ -117,7 +117,7 @@ def finalize_keys(opts: Options, accumulate_bad_lines: Optional[list[BadLine]] =
     opts.keyboard_modes = modes
 
 
-def finalize_mouse_mappings(opts: Options, accumulate_bad_lines: Optional[list[BadLine]] = None) -> None:
+def finalize_mouse_mappings(opts: Options, accumulate_bad_lines: list[BadLine] | None = None) -> None:
     defns: list[MouseMapping] = []
     for d in opts.mouse_map:
         if d is None:  # clear_all_mouse_actions
@@ -140,24 +140,37 @@ def finalize_mouse_mappings(opts: Options, accumulate_bad_lines: Optional[list[B
     opts.mousemap = mousemap
 
 
-def parse_config(lines: Iterable[str], accumulate_bad_lines: Optional[list[BadLine]] = None) -> dict[str, Any]:
+def parse_config(
+    lines: Iterable[str], accumulate_bad_lines: list[BadLine] | None = None, effective_config_lines: Callable[[str, str], None] | None = None
+) -> dict[str, Any]:
     from .options.parse import create_result_dict, parse_conf_item
     ans: dict[str, Any] = create_result_dict()
     parse_config_base(
         lines,
         parse_conf_item,
         ans,
-        accumulate_bad_lines=accumulate_bad_lines
+        accumulate_bad_lines=accumulate_bad_lines,
+        effective_config_lines=effective_config_lines,
     )
     return ans
 
 
-def load_config(*paths: str, overrides: Optional[Iterable[str]] = None, accumulate_bad_lines: Optional[list[BadLine]] = None) -> Options:
+effective_config_lines: list[str] = []
+
+
+def load_config(*paths: str, overrides: Iterable[str] | None = None, accumulate_bad_lines: list[BadLine] | None = None) -> Options:
     from .options.parse import merge_result_dicts
+    from .options.types import secret_options
+    del effective_config_lines[:]
+
+    def add_effective_config_line(key: str, line: str) -> None:
+        if key not in secret_options:
+            effective_config_lines.append(line)
 
     overrides = tuple(overrides) if overrides is not None else ()
     opts_dict, found_paths = _load_config(
-        defaults, partial(parse_config, accumulate_bad_lines=accumulate_bad_lines), merge_result_dicts, *paths, overrides=overrides)
+        defaults, partial(parse_config, accumulate_bad_lines=accumulate_bad_lines, effective_config_lines=add_effective_config_line),
+        merge_result_dicts, *paths, overrides=overrides)
     opts = Options(opts_dict)
 
     opts.alias_map = build_action_aliases(opts.kitten_alias, 'kitten')
@@ -169,13 +182,25 @@ def load_config(*paths: str, overrides: Optional[Iterable[str]] = None, accumula
     opts.action_alias = {}
     opts.mouse_map = []
     opts.map = []
-    if opts.background_opacity < 1.0 and opts.macos_titlebar_color > 0:
-        log_error('Cannot use both macos_titlebar_color and background_opacity')
-        opts.macos_titlebar_color = 0
     opts.config_paths = found_paths
     opts.all_config_paths = paths
     opts.config_overrides = overrides
     return opts
+
+
+def store_effective_config() -> str:
+    import os
+    import stat
+    import tempfile
+    dest = os.path.join(cache_dir(), 'effective-config')
+    os.makedirs(dest, exist_ok=True)
+    raw = '\n'.join(effective_config_lines)
+    with suppress(FileNotFoundError), tempfile.NamedTemporaryFile('w', dir=dest) as tf:
+        os.chmod(tf.name, stat.S_IRUSR | stat.S_IWUSR)
+        print(raw, file=tf)
+        path = os.path.join(dest, f'{os.getpid()}')
+        os.replace(tf.name, path)
+    return path
 
 
 class KittyCommonOpts(TypedDict):
@@ -184,7 +209,7 @@ class KittyCommonOpts(TypedDict):
     url_prefixes: tuple[str, ...]
 
 
-def common_opts_as_dict(opts: Optional[Options] = None) -> KittyCommonOpts:
+def common_opts_as_dict(opts: Options | None = None) -> KittyCommonOpts:
     if opts is None:
         opts = defaults
     return {

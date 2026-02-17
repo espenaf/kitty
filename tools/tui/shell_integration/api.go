@@ -13,9 +13,9 @@ import (
 	"slices"
 	"strings"
 
-	"kitty"
-	"kitty/tools/tty"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -110,7 +110,7 @@ func PathToTerminfoDb(term string) (ans string) {
 		return ans
 	}
 	if td := os.Getenv("TERMINFO_DIRS"); td != "" {
-		for _, q := range strings.Split(td, string(os.PathListSeparator)) {
+		for q := range strings.SplitSeq(td, string(os.PathListSeparator)) {
 			if q == "" {
 				q = "/usr/share/terminfo"
 			}

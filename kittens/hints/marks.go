@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -20,10 +19,10 @@ import (
 	"github.com/dlclark/regexp2"
 	"github.com/seancfoley/ipaddress-go/ipaddr"
 
-	"kitty"
-	"kitty/tools/config"
-	"kitty/tools/tty"
-	"kitty/tools/utils"
+	"github.com/kovidgoyal/kitty"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/utils"
 )
 
 var _ = fmt.Print
@@ -80,7 +79,7 @@ func process_escape_codes(text string) (ans string, hyperlinks []Mark) {
 			active_hyperlink_url = url
 			active_hyperlink_start_offset = start
 			if metadata != "" {
-				for _, entry := range strings.Split(metadata, ":") {
+				for entry := range strings.SplitSeq(metadata, ":") {
 					if strings.HasPrefix(entry, "id=") && len(entry) > 3 {
 						active_hyperlink_id = entry[3:]
 					}
@@ -211,7 +210,7 @@ type KittyOpts struct {
 	Select_by_word_characters string
 }
 
-func read_relevant_kitty_opts(path string) KittyOpts {
+func read_relevant_kitty_opts() KittyOpts {
 	ans := KittyOpts{
 		Select_by_word_characters: kitty.KittyConfigDefaults.Select_by_word_characters,
 		Url_excluded_characters:   kitty.KittyConfigDefaults.Url_excluded_characters}
@@ -228,8 +227,7 @@ func read_relevant_kitty_opts(path string) KittyOpts {
 		}
 		return nil
 	}
-	cp := config.ConfigParser{LineHandler: handle_line}
-	_ = cp.ParseFiles(path) // ignore errors and use defaults
+	config.ReadKittyConfig(handle_line)
 	if ans.Url_prefixes == nil {
 		ans.Url_prefixes = utils.NewSetWithItems(kitty.KittyConfigDefaults.Url_prefixes...)
 	}
@@ -237,7 +235,7 @@ func read_relevant_kitty_opts(path string) KittyOpts {
 }
 
 var RelevantKittyOpts = sync.OnceValue(func() KittyOpts {
-	return read_relevant_kitty_opts(filepath.Join(utils.ConfigDir(), "kitty.conf"))
+	return read_relevant_kitty_opts()
 })
 
 var debugprintln = tty.DebugPrintln
@@ -377,7 +375,7 @@ func functions_for(opts *Options) (pattern string, post_processors []PostProcess
 		// IPv4 with no validation
 		`((?:\d{1,3}\.){3}\d{1,3}` + "|" +
 			// IPv6 with no validation
-			`(?:[a-fA-F0-9]{0,4}:){2,7}[a-fA-F0-9]{1,4})`)
+			`(?:[a-fA-F0-9]{0,4}:){2,7}[a-fA-F0-9]{0,4})`)
 		post_processors = append(post_processors, PostProcessorMap()["ip"])
 	default:
 		pattern = opts.Regex

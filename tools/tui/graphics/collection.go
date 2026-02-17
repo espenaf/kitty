@@ -10,11 +10,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"kitty/tools/tui"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/utils/images"
-	"kitty/tools/utils/shm"
+	"github.com/kovidgoyal/go-shm"
+	"github.com/kovidgoyal/kitty/tools/tui"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/images"
 )
 
 var _ = fmt.Print
@@ -136,14 +136,16 @@ func (self *ImageCollection) ResizeForPageSize(width, height int) {
 
 	ctx := images.Context{}
 	keys := utils.Keys(self.images)
-	ctx.Parallel(0, len(keys), func(nums <-chan int) {
+	if err := ctx.SafeParallel(0, len(keys), func(nums <-chan int) {
 		for i := range nums {
 			img := self.images[keys[i]]
 			if img.src.loaded && img.err == nil {
 				img.ResizeForPageSize(width, height)
 			}
 		}
-	})
+	}); err != nil {
+		panic(err)
+	}
 }
 
 func (self *ImageCollection) DeleteAllVisiblePlacements(lp *loop.Loop) {
@@ -294,7 +296,7 @@ func (self *ImageCollection) LoadAll() {
 	defer self.mutex.Unlock()
 	ctx := images.Context{}
 	all := utils.Values(self.images)
-	ctx.Parallel(0, len(self.images), func(nums <-chan int) {
+	if err := ctx.SafeParallel(0, len(self.images), func(nums <-chan int) {
 		for i := range nums {
 			img := all[i]
 			if !img.src.loaded {
@@ -305,7 +307,9 @@ func (self *ImageCollection) LoadAll() {
 				img.src.loaded = true
 			}
 		}
-	})
+	}); err != nil {
+		panic(err)
+	}
 }
 
 func NewImageCollection(paths ...string) *ImageCollection {
@@ -332,7 +336,8 @@ func transmit_by_escape_code(lp *loop.Loop, image_id uint32, temp_file_map map[u
 	atomic := lp.IsAtomicUpdateActive()
 	lp.EndAtomicUpdate()
 	gc.SetTransmission(GRT_transmission_direct)
-	_ = gc.WriteWithPayloadToLoop(lp, frame.Data())
+	_, _, _, data := frame.Data()
+	_ = gc.WriteWithPayloadToLoop(lp, data)
 	if atomic {
 		lp.StartAtomicUpdate()
 	}
@@ -358,7 +363,8 @@ func transmit_by_file(lp *loop.Loop, image_id uint32, temp_file_map map[uint32]*
 	}
 	defer f.Close()
 	temp_file_map[image_id] = &temp_resource{path: f.Name()}
-	_, err = f.Write(frame.Data())
+	_, _, _, data := frame.Data()
+	_, err = f.Write(data)
 	if err != nil {
 		transmit_by_escape_code(lp, image_id, temp_file_map, frame, gc)
 		return
@@ -398,6 +404,9 @@ func (self *ImageCollection) transmit_rendering(lp *loop.Loop, r *rendering) {
 			gc.SetGap(frame.Delay_ms)
 			if frame.Compose_onto > 0 {
 				gc.SetOverlaidFrame(uint64(frame.Compose_onto))
+			}
+			if frame.Replace {
+				gc.SetCompositionMode(Overwrite)
 			}
 			gc.SetLeftEdge(uint64(frame.Left)).SetTopEdge(uint64(frame.Top))
 		}

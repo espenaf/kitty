@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"strings"
 
-	"kitty/tools/cli"
-	"kitty/tools/cli/markup"
-	"kitty/tools/tui/loop"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/cli"
+	"github.com/kovidgoyal/kitty/tools/cli/markup"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -277,8 +277,12 @@ func (self *Readline) CursorAtEndOfLine() bool {
 	return self.input_state.cursor.X >= len(self.input_state.lines[self.input_state.cursor.Y])
 }
 
-func (self *Readline) OnResize(old_size loop.ScreenSize, new_size loop.ScreenSize) error {
+func (self *Readline) ClearCachedScreenSize() {
 	self.screen_width, self.screen_height = 0, 0
+}
+
+func (self *Readline) OnResize(old_size loop.ScreenSize, new_size loop.ScreenSize) error {
+	self.ClearCachedScreenSize()
 	self.Redraw()
 	return nil
 }

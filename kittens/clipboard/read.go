@@ -14,10 +14,10 @@ import (
 	"strings"
 	"sync"
 
-	"kitty/tools/tty"
-	"kitty/tools/tui/loop"
-	"kitty/tools/utils"
-	"kitty/tools/utils/images"
+	"github.com/kovidgoyal/kitty/tools/tty"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/utils/images"
 )
 
 var _ = fmt.Print
@@ -201,9 +201,13 @@ func unescape_metadata_value(k, x string) (ans string) {
 	return x
 }
 
-func encode_bytes(metadata map[string]string, payload []byte) string {
+func Encode_bytes(metadata map[string]string, payload []byte) string {
 	ans := strings.Builder{}
-	ans.Grow(2048)
+	enc_payload := ""
+	if len(payload) > 0 {
+		enc_payload = base64.StdEncoding.EncodeToString(payload)
+	}
+	ans.Grow(2048 + len(enc_payload))
 	ans.WriteString("\x1b]")
 	ans.WriteString(OSC_NUMBER)
 	ans.WriteString(";")
@@ -217,14 +221,14 @@ func encode_bytes(metadata map[string]string, payload []byte) string {
 	}
 	if len(payload) > 0 {
 		ans.WriteString(";")
-		ans.WriteString(base64.StdEncoding.EncodeToString(payload))
+		ans.WriteString(enc_payload)
 	}
 	ans.WriteString("\x1b\\")
 	return ans.String()
 }
 
 func encode(metadata map[string]string, payload string) string {
-	return encode_bytes(metadata, utils.UnsafeStringToBytes(payload))
+	return Encode_bytes(metadata, utils.UnsafeStringToBytes(payload))
 }
 
 func error_from_status(status string) error {
@@ -254,7 +258,7 @@ func parse_escape_code(etype loop.EscapeCodeType, data []byte) (metadata map[str
 		}
 	}
 	if len(parts) > 1 {
-		for _, record := range bytes.Split(parts[1], utils.UnsafeStringToBytes(":")) {
+		for record := range bytes.SplitSeq(parts[1], utils.UnsafeStringToBytes(":")) {
 			rp := bytes.SplitN(record, utils.UnsafeStringToBytes("="), 2)
 			v := ""
 			if len(rp) == 2 {
@@ -282,7 +286,7 @@ func parse_aliases(raw []string) (map[string][]string, error) {
 }
 
 func run_get_loop(opts *Options, args []string) (err error) {
-	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking)
+	lp, err := loop.New(loop.NoAlternateScreen, loop.NoRestoreColors, loop.NoMouseTracking, loop.NoInBandResizeNotifications)
 	if err != nil {
 		return err
 	}
@@ -325,9 +329,14 @@ func run_get_loop(opts *Options, args []string) (err error) {
 	if opts.UsePrimary {
 		basic_metadata["loc"] = "primary"
 	}
-
 	lp.OnInitialize = func() (string, error) {
 		lp.QueueWriteString(encode(basic_metadata, "."))
+		if opts.Password != "" {
+			basic_metadata["pw"] = base64.StdEncoding.EncodeToString(utils.UnsafeStringToBytes(opts.Password))
+		}
+		if opts.HumanName != "" {
+			basic_metadata["name"] = base64.StdEncoding.EncodeToString(utils.UnsafeStringToBytes(opts.HumanName))
+		}
 		return "", nil
 	}
 

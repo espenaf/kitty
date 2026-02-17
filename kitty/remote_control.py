@@ -15,7 +15,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Optional,
-    Union,
     cast,
 )
 
@@ -34,7 +33,7 @@ from .fast_data_types import (
 )
 from .rc.base import NoResponse, PayloadGetter, all_command_names, command_for_name
 from .types import AsyncResponse
-from .typing import BossType, WindowType
+from .typing_compat import BossType, WindowType
 from .utils import TTYIO, log_error, parse_address_spec, resolve_custom_file
 
 active_async_requests: dict[str, float] = {}
@@ -82,7 +81,7 @@ def parse_cmd(serialized_cmd: memoryview, encryption_key: EllipticCurveKey) -> d
 
 class CMDChecker:
 
-    def __call__(self, pcmd: dict[str, Any], window: Optional['Window'], from_socket: bool, extra_data: dict[str, Any]) -> Optional[bool]:
+    def __call__(self, pcmd: dict[str, Any], window: Optional['Window'], from_socket: bool, extra_data: dict[str, Any]) -> bool | None:
         return False
 
 
@@ -105,7 +104,7 @@ def fnmatch_pattern(pat: str) -> 're.Pattern[str]':
 
 
 def remote_control_allowed(
-    pcmd: dict[str, Any], remote_control_passwords: Optional[dict[str, Sequence[str]]],
+    pcmd: dict[str, Any], remote_control_passwords: dict[str, Sequence[str]] | None,
     window: Optional['Window'], extra_data: dict[str, Any]
 ) -> bool:
     if not remote_control_passwords:
@@ -127,7 +126,7 @@ def remote_control_allowed(
 
 class PasswordAuthorizer:
 
-    def __init__(self, auth_items: frozenset[str]) -> None:
+    def __init__(self, auth_items: Iterable[str]) -> None:
         self.command_patterns = []
         self.function_checkers = []
         self.name = ''
@@ -168,7 +167,7 @@ def password_authorizer(auth_items: frozenset[str]) -> PasswordAuthorizer:
 user_password_allowed: dict[str, bool] = {}
 
 
-def is_cmd_allowed(pcmd: dict[str, Any], window: Optional['Window'], from_socket: bool, extra_data: dict[str, Any]) -> Optional[bool]:
+def is_cmd_allowed(pcmd: dict[str, Any], window: Optional['Window'], from_socket: bool, extra_data: dict[str, Any]) -> bool | None:
     sid = pcmd.get('stream_id', '')
     if sid and active_streams.get(sid, '') == pcmd['cmd']:
         return True
@@ -205,8 +204,8 @@ def close_active_stream(stream_id: str) -> None:
 
 
 def handle_cmd(
-    boss: BossType, window: Optional[WindowType], cmd: dict[str, Any], peer_id: int, self_window: Optional[WindowType]
-) -> Union[dict[str, Any], None, AsyncResponse]:
+    boss: BossType, window: WindowType | None, cmd: dict[str, Any], peer_id: int, self_window: WindowType | None
+) -> dict[str, Any] | None | AsyncResponse:
     v = cmd['version']
     no_response = cmd.get('no_response', False)
     if tuple(v)[:2] > version[:2]:
@@ -279,6 +278,7 @@ completion=type:file relative:conf kwds:-
 default=rc-pass
 A file from which to read the password. Trailing whitespace is ignored. Relative
 paths are resolved from the kitty configuration directory. Use - to read from STDIN.
+Use :code:`fd:num` to read from the file descriptor :code:`num`.
 Used if no :option:`kitten @ --password` is supplied. Defaults to checking for the
 :file:`rc-pass` file in the kitty configuration directory.
 
@@ -325,7 +325,7 @@ class SocketIO:
             self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
 
-    def send(self, data: Union[bytes, Iterable[Union[str, bytes]]]) -> None:
+    def send(self, data: bytes | Iterable[str | bytes]) -> None:
         import socket
         with self.socket.makefile('wb') as out:
             if isinstance(data, bytes):
@@ -361,11 +361,11 @@ class RCIO(TTYIO):
 
 
 def do_io(
-    to: Optional[str], original_cmd: dict[str, Any], no_response: bool, response_timeout: float, encrypter: 'CommandEncrypter'
+    to: str | None, original_cmd: dict[str, Any], no_response: bool, response_timeout: float, encrypter: 'CommandEncrypter'
 ) -> dict[str, Any]:
     payload = original_cmd.get('payload')
     if not isinstance(payload, GeneratorType):
-        send_data: Union[bytes, Iterator[bytes]] = encode_send(encrypter(original_cmd))
+        send_data: bytes | Iterator[bytes] = encode_send(encrypter(original_cmd))
     else:
         def send_generator() -> Iterator[bytes]:
             assert payload is not None
@@ -374,7 +374,7 @@ def do_io(
                 yield encode_send(encrypter(original_cmd))
         send_data = send_generator()
 
-    io: Union[SocketIO, RCIO] = SocketIO(to) if to else RCIO()
+    io: SocketIO | RCIO = SocketIO(to) if to else RCIO()
     with io:
         io.send(send_data)
         if no_response:
@@ -461,13 +461,13 @@ def send_response_to_client(data: Any = None, error: str = '', peer_id: int = 0,
     if active_async_requests.pop(async_id, None) is None:
         return
     if error:
-        response: dict[str, Union[bool, int, str]] = {'ok': False, 'error': error}
+        response: dict[str, bool | int | str] = {'ok': False, 'error': error}
     else:
         response = {'ok': True, 'data': data}
     if peer_id > 0:
         send_data_to_peer(peer_id, encode_response_for_peer(response))
     elif window_id > 0:
-        w = get_boss().window_id_map[window_id]
+        w = get_boss().window_id_map.get(window_id)
         if w is not None:
             w.send_cmd_response(response)
 

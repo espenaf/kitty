@@ -47,16 +47,11 @@
 //
 static Atom getAtomIfSupported(Atom* supportedAtoms,
                                unsigned long atomCount,
-                               const char* atomName)
+                               const Atom atom)
 {
-    const Atom atom = XInternAtom(_glfw.x11.display, atomName, False);
-
-    for (unsigned long i = 0;  i < atomCount;  i++)
-    {
-        if (supportedAtoms[i] == atom)
-            return atom;
+    for (unsigned long i = 0;  i < atomCount;  i++) {
+        if (supportedAtoms[i] == atom) return atom;
     }
-
     return None;
 }
 
@@ -120,40 +115,138 @@ static void detectEWMH(void)
 
     // See which of the atoms we support that are supported by the WM
 
-    _glfw.x11.NET_WM_STATE =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE");
-    _glfw.x11.NET_WM_STATE_ABOVE =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE_ABOVE");
-    _glfw.x11.NET_WM_STATE_FULLSCREEN =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE_FULLSCREEN");
-    _glfw.x11.NET_WM_STATE_MAXIMIZED_VERT =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE_MAXIMIZED_VERT");
-    _glfw.x11.NET_WM_STATE_MAXIMIZED_HORZ =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE_MAXIMIZED_HORZ");
-    _glfw.x11.NET_WM_STATE_DEMANDS_ATTENTION =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STATE_DEMANDS_ATTENTION");
-    _glfw.x11.NET_WM_FULLSCREEN_MONITORS =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_FULLSCREEN_MONITORS");
-    _glfw.x11.NET_WM_WINDOW_TYPE =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_WINDOW_TYPE");
-    _glfw.x11.NET_WM_WINDOW_TYPE_NORMAL =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_WINDOW_TYPE_NORMAL");
-    _glfw.x11.NET_WM_WINDOW_TYPE_DOCK =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_WINDOW_TYPE_DOCK");
-    _glfw.x11.NET_WORKAREA =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WORKAREA");
-    _glfw.x11.NET_CURRENT_DESKTOP =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_CURRENT_DESKTOP");
-    _glfw.x11.NET_ACTIVE_WINDOW =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_ACTIVE_WINDOW");
-    _glfw.x11.NET_FRAME_EXTENTS =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_FRAME_EXTENTS");
-    _glfw.x11.NET_REQUEST_FRAME_EXTENTS =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_REQUEST_FRAME_EXTENTS");
-    _glfw.x11.NET_WM_STRUT_PARTIAL =
-        getAtomIfSupported(supportedAtoms, atomCount, "_NET_WM_STRUT_PARTIAL");
+#define ALL_ATOMS  \
+    S(NET_WM_STATE) S(NET_WM_STATE_ABOVE) S(NET_WM_STATE_BELOW) S(NET_WM_STATE_FULLSCREEN) \
+    S(NET_WM_STATE_MAXIMIZED_VERT) S(NET_WM_STATE_MAXIMIZED_HORZ) S(NET_WM_STATE_DEMANDS_ATTENTION) \
+    S(NET_WM_STATE_SKIP_TASKBAR) S(NET_WM_STATE_SKIP_PAGER) S(NET_WM_STATE_STICKY) \
+\
+    S(NET_WM_FULLSCREEN_MONITORS) S(NET_WM_STRUT_PARTIAL) \
+\
+    S(NET_WM_WINDOW_TYPE) S(NET_WM_WINDOW_TYPE_NORMAL) S(NET_WM_WINDOW_TYPE_DOCK) S(NET_WM_WINDOW_TYPE_DESKTOP) \
+    S(NET_WM_WINDOW_TYPE_UTILITY) S(NET_WM_WINDOW_TYPE_SPLASH) S(NET_WM_WINDOW_TYPE_DIALOG) S(NET_WM_WINDOW_TYPE_MENU) \
+    S(NET_WM_WINDOW_TYPE_NOTIFICATION) \
+\
+    S(NET_WORKAREA) S(NET_CURRENT_DESKTOP) S(NET_ACTIVE_WINDOW) S(NET_FRAME_EXTENTS) S(NET_REQUEST_FRAME_EXTENTS) \
+\
+    S(NET_WM_ALLOWED_ACTIONS) S(NET_WM_ACTION_MOVE) S(NET_WM_ACTION_RESIZE) S(NET_WM_ACTION_MINIMIZE) \
+    S(NET_WM_ACTION_SHADE) S(NET_WM_ACTION_STICK) S(NET_WM_ACTION_MAXIMIZE_HORZ) S(NET_WM_ACTION_MAXIMIZE_VERT) \
+    S(NET_WM_ACTION_FULLSCREEN) S(NET_WM_ACTION_CHANGE_DESKTOP) S(NET_WM_ACTION_CLOSE) S(NET_WM_ACTION_ABOVE) \
+    S(NET_WM_ACTION_BELOW) S(NET_WM_ACTION_ABOVE_BELOW)
 
+    static const char* atom_names[40] = {
+#define S(x) "_" #x,
+        ALL_ATOMS
+    };
+#undef S
+    Atom atoms[arraysz(atom_names)];
+    XInternAtoms(_glfw.x11.display, (char**)atom_names, arraysz(atom_names), False, atoms);
+    unsigned i = 0;
+#define S(name) _glfw.x11.name = getAtomIfSupported(supportedAtoms, atomCount, atoms[i++]);
+    ALL_ATOMS
+#undef S
+#undef ALL_ATOMS
     XFree(supportedAtoms);
+}
+
+void
+read_xi_scroll_devices(void) {
+#define xi _glfw.x11.xi
+    xi.num_scroll_devices = 0;
+    // Require XI2.1 or later for smooth scrolling
+    if (!xi.available || xi.major < 2 || (xi.major == 2 && xi.minor < 1) || !xi.LIBINPUT_SCROLL_METHOD_ENABLED) return;
+#undef xi
+    int deviceCount;
+    XIDeviceInfo* devices = XIQueryDevice(_glfw.x11.display, XIAllDevices, &deviceCount);
+    if (!devices) return;
+    for (int i = 0; i < deviceCount; i++) {
+        XIDeviceInfo* device = &devices[i];
+        if (device->use == XIMasterPointer) _glfw.x11.xi.master_pointer_id = device->deviceid;
+        if (device->use != XISlavePointer || !device->enabled) continue;
+        Atom actual_type;
+        int actual_format;
+        unsigned long nitems, bytes_after;
+        unsigned char *data = NULL;
+        bool is_highres = false;
+
+        XIGetProperty(_glfw.x11.display, device->deviceid, _glfw.x11.xi.LIBINPUT_SCROLL_METHOD_ENABLED, 0, 2, False, XA_INTEGER, &actual_type, &actual_format, &nitems, &bytes_after, &data);
+        if (data) {
+            if (nitems > 1) is_highres = data[0] || data[1];
+            XFree(data);
+        }
+
+        // Detect if this is a finger-based device (touchpad/touchscreen)
+        bool is_finger_based = false;
+
+        // Method 1: Check for libinput tapping support (touchpads only)
+        if (_glfw.x11.xi.LIBINPUT_TAPPING != None) {
+            Atom tapping_type;
+            int tapping_format;
+            unsigned long tapping_nitems, tapping_bytes;
+            unsigned char *tapping_data = NULL;
+
+            if (XIGetProperty(_glfw.x11.display, device->deviceid,
+                              _glfw.x11.xi.LIBINPUT_TAPPING, 0, 1, False, AnyPropertyType,
+                              &tapping_type, &tapping_format, &tapping_nitems,
+                              &tapping_bytes, &tapping_data) == Success) {
+                if (tapping_data) {
+                    if (tapping_nitems > 0) is_finger_based = true;
+                    XFree(tapping_data);
+                }
+            }
+        }
+
+        // Method 2: Check for touch class (touchscreens/touchpads)
+        if (!is_finger_based) {
+            for (int j = 0; j < device->num_classes; j++) {
+                if (device->classes[j]->type == XITouchClass) {
+                    is_finger_based = true;
+                    break;
+                }
+            }
+        }
+        for (int j = 0; j < device->num_classes; j++) {
+            if (device->classes[j]->type != XIScrollClass) continue;
+            XIScrollClassInfo* scroll = (XIScrollClassInfo*)device->classes[j];
+            XIScrollDevice *d = NULL;
+            for (unsigned k = 0; k < _glfw.x11.xi.num_scroll_devices; k++) {
+                XIScrollDevice *t = _glfw.x11.xi.scroll_devices + k;
+                if (t->deviceid == device->deviceid && t->sourceid == scroll->sourceid) { d = t; break; }
+            }
+            if (!d) {
+                if (_glfw.x11.xi.num_scroll_devices >= arraysz(_glfw.x11.xi.scroll_devices)) continue;
+                d = &_glfw.x11.xi.scroll_devices[_glfw.x11.xi.num_scroll_devices++];
+                *d = (XIScrollDevice){
+                    .is_highres=is_highres, .is_finger_based=is_finger_based, .deviceid=device->deviceid, .sourceid=scroll->sourceid,
+                };
+                memcpy(d->name, device->name, MIN(sizeof(d->name)-1, strlen(device->name)));
+            }
+            if (d->num_valuators >= arraysz(d->valuators)) continue;
+            XIScrollValuator *v = d->valuators + d->num_valuators++;
+            *v = (XIScrollValuator){
+                .number=scroll->number, .is_vertical=scroll->scroll_type == XIScrollTypeVertical,
+                .increment=scroll->increment,
+            };
+        }
+        for (int j = 0; j < device->num_classes; j++) {
+            if (device->classes[j]->type != XIValuatorClass) continue;
+            XIValuatorClassInfo* vi = (XIValuatorClassInfo*)device->classes[j];
+            XIScrollDevice *d = NULL;
+            for (unsigned k = 0; k < _glfw.x11.xi.num_scroll_devices; k++) {
+                XIScrollDevice *t = _glfw.x11.xi.scroll_devices + k;
+                if (t->deviceid == device->deviceid && t->sourceid == vi->sourceid) { d = t; break; }
+            }
+            if (!d) continue;
+            XIScrollValuator *v = NULL;
+            for (unsigned k = 0; k < d->num_valuators; k++) {
+                XIScrollValuator *t = d->valuators + k;
+                if (t->number == vi->number) { v = t; break; }
+            }
+            if (!v) continue;
+            v->value = vi->value; v->mode = vi->mode; v->resolution = vi->resolution;
+            v->min = vi->min; v->max = vi->max;
+        }
+    }
+    XIFreeDeviceInfo(devices);
 }
 
 // Look for and initialize supported X11 extensions
@@ -183,6 +276,9 @@ static bool initExtensions(void)
     {
         glfw_dlsym(_glfw.x11.xi.QueryVersion, _glfw.x11.xi.handle, "XIQueryVersion");
         glfw_dlsym(_glfw.x11.xi.SelectEvents, _glfw.x11.xi.handle, "XISelectEvents");
+        glfw_dlsym(_glfw.x11.xi.QueryDevice, _glfw.x11.xi.handle, "XIQueryDevice");
+        glfw_dlsym(_glfw.x11.xi.FreeDeviceInfo, _glfw.x11.xi.handle, "XIFreeDeviceInfo");
+        glfw_dlsym(_glfw.x11.xi.GetProperty, _glfw.x11.xi.handle, "XIGetProperty");
 
         if (XQueryExtension(_glfw.x11.display,
                             "XInputExtension",
@@ -191,7 +287,7 @@ static bool initExtensions(void)
                             &_glfw.x11.xi.errorBase))
         {
             _glfw.x11.xi.major = 2;
-            _glfw.x11.xi.minor = 0;
+            _glfw.x11.xi.minor = 1;
 
             if (XIQueryVersion(_glfw.x11.display,
                                &_glfw.x11.xi.major,
@@ -410,10 +506,13 @@ static bool initExtensions(void)
     _glfw.x11.XdndPosition = XInternAtom(_glfw.x11.display, "XdndPosition", False);
     _glfw.x11.XdndStatus = XInternAtom(_glfw.x11.display, "XdndStatus", False);
     _glfw.x11.XdndActionCopy = XInternAtom(_glfw.x11.display, "XdndActionCopy", False);
+    _glfw.x11.XdndActionMove = XInternAtom(_glfw.x11.display, "XdndActionMove", False);
+    _glfw.x11.XdndActionLink = XInternAtom(_glfw.x11.display, "XdndActionLink", False);
     _glfw.x11.XdndDrop = XInternAtom(_glfw.x11.display, "XdndDrop", False);
     _glfw.x11.XdndFinished = XInternAtom(_glfw.x11.display, "XdndFinished", False);
     _glfw.x11.XdndSelection = XInternAtom(_glfw.x11.display, "XdndSelection", False);
     _glfw.x11.XdndTypeList = XInternAtom(_glfw.x11.display, "XdndTypeList", False);
+    _glfw.x11.XdndLeave = XInternAtom(_glfw.x11.display, "XdndLeave", False);
 
     // ICCCM, EWMH and Motif window property atoms
     // These can be set safely even without WM support
@@ -444,6 +543,23 @@ static bool initExtensions(void)
         XInternAtom(_glfw.x11.display, "_NET_WM_WINDOW_OPACITY", False);
     _glfw.x11.MOTIF_WM_HINTS =
         XInternAtom(_glfw.x11.display, "_MOTIF_WM_HINTS", False);
+
+    _glfw.x11.xi.LIBINPUT_SCROLL_METHOD_ENABLED = XInternAtom(_glfw.x11.display, "libinput Scroll Method Enabled", False);
+    _glfw.x11.xi.LIBINPUT_TAPPING = XInternAtom(_glfw.x11.display, "libinput Tapping Enabled", False);
+    read_xi_scroll_devices();
+
+    // Select XI_HierarchyChanged events to detect device add/remove
+    if (_glfw.x11.xi.available) {
+        XIEventMask em;
+        unsigned char mask[XIMaskLen(XI_HierarchyChanged)] = { 0 };
+
+        em.deviceid = XIAllDevices;
+        em.mask_len = sizeof(mask);
+        em.mask = mask;
+        XISetMask(mask, XI_HierarchyChanged);
+
+        XISelectEvents(_glfw.x11.display, _glfw.x11.root, &em, 1);
+    }
 
     // The compositing manager selection name contains the screen number
     {
@@ -615,14 +731,15 @@ Cursor _glfwCreateCursorX11(const GLFWimage* image, int xhot, int yhot)
 //////                       GLFW platform API                      //////
 //////////////////////////////////////////////////////////////////////////
 
-GLFWAPI GLFWColorScheme glfwGetCurrentSystemColorTheme(void) {
-    return GLFW_COLOR_SCHEME_NO_PREFERENCE;
+GLFWAPI GLFWColorScheme glfwGetCurrentSystemColorTheme(bool query_if_unintialized) {
+    return glfw_current_system_color_theme(query_if_unintialized);
 }
 
 void _glfwPlatformInputColorScheme(GLFWColorScheme appearance UNUSED) { }
 
-int _glfwPlatformInit(void)
+int _glfwPlatformInit(bool *supports_window_occlusion)
 {
+    *supports_window_occlusion = false;
     XInitThreads();
     XrmInitialize();
 
@@ -702,6 +819,7 @@ void _glfwPlatformTerminate(void)
     if (_glfw.x11.clipboard_atoms.array) { free(_glfw.x11.clipboard_atoms.array); }
     if (_glfw.x11.primary_atoms.array) { free(_glfw.x11.primary_atoms.array); }
 
+    free_dnd_data();
     if (_glfw.x11.display)
     {
         XCloseDisplay(_glfw.x11.display);

@@ -185,22 +185,6 @@ class TestParser(BaseTest):
         pb('😀'.encode()[:-1])
         pb('\x1b\x1b%a', '\ufffd', ('Unknown char after ESC: 0x1b',), ('draw', '%a'))
 
-    def test_utf8_parsing(self):
-        s = self.create_screen()
-        pb = partial(self.parse_bytes_dump, s)
-        pb(b'"\xbf"', '"\ufffd"')
-        pb(b'"\x80"', '"\ufffd"')
-        pb(b'"\x80\xbf"', '"\ufffd\ufffd"')
-        pb(b'"\x80\xbf\x80"', '"\ufffd\ufffd\ufffd"')
-        pb(b'"\xc0 "', '"\ufffd "')
-        pb(b'"\xfe"', '"\ufffd"')
-        pb(b'"\xff"', '"\ufffd"')
-        pb(b'"\xff\xfe"', '"\ufffd\ufffd"')
-        pb(b'"\xfe\xfe\xff\xff"', '"\ufffd\ufffd\ufffd\ufffd"')
-        pb(b'"\xef\xbf"', '"\ufffd"')
-        pb(b'"\xe0\xa0"', '"\ufffd"')
-        pb(b'"\xf0\x9f\x98"', '"\ufffd"')
-
     def test_utf8_simd_decode(self):
         def unsupported(which):
             return (which == 2 and not has_sse4_2) or (which == 3 and not has_avx2)
@@ -230,9 +214,9 @@ class TestParser(BaseTest):
                 return esc_found, ''.join(parts), total_consumed
 
             reset_state()
-            actual = parse_parts(1)
+            expected = parse_parts(1)
             reset_state()
-            expected = parse_parts(which)
+            actual = parse_parts(which)
             self.ae(expected, actual, msg=f'Failed for {a} with {which=}\n{expected!r} !=\n{actual!r}')
             return actual
 
@@ -284,7 +268,11 @@ class TestParser(BaseTest):
             pb('\uffff', '\uffff')
             pb('\0', '\0')
             pb(chr(0x10ffff), chr(0x10ffff))
-            # various invalid input
+            # Kitty's UTF-8 decoding uses `U+FFFD substitution of maximal subparts
+            # <https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-3/#G66453>`_,
+            # same as in the WHATWG Encoding Standard.
+            # This means that ill-formed sequences may be replaced by multiple
+            # U+FFFD REPLACEMENT CHARACTERs.
             pb(b'abcd\xf51234', 'abcd\ufffd1234')  # bytes > 0xf4
             pb(b'abcd\xff1234', 'abcd\ufffd1234')  # bytes > 0xf4
             pb(b'"\xbf"', '"\ufffd"')
@@ -300,6 +288,354 @@ class TestParser(BaseTest):
             pb(b'"\xe0\xa0"', '"\ufffd"')
             pb(b'"\xf0\x9f\x98"', '"\ufffd"')
             pb(b'"\xef\x93\x94\x95"', '"\uf4d4\ufffd"')
+
+            # Lone continuation bytes with no leading starts
+            pb(b'"\xbf"', '"\ufffd"')
+            pb(b'"\x80"', '"\ufffd"')
+
+            # Multiple lone continuation bytes
+            pb(b'"\x80\xbf"', '"\ufffd\ufffd"')
+            pb(b'"\x80\xbf\x80"', '"\ufffd\ufffd\ufffd"')
+
+            # Lone starter byte of 2-byte sequence
+            pb(b'"\xc0 "', '"\ufffd "')
+
+            # Single never-valid bytes
+            pb(b'"\xfe"', '"\ufffd"')
+            pb(b'"\xff"', '"\ufffd"')
+
+            # Multiple never-valid bytes
+            pb(b'"\xff\xfe"', '"\ufffd\ufffd"')
+            pb(b'"\xfe\xfe\xff\xff"', '"\ufffd\ufffd\ufffd\ufffd"')
+
+            # Truncated 2-byte sequence (only 1 byte)
+            pb(b'"\xc2"', '"\ufffd"')
+
+            # Truncated 3-byte sequences (only 2 bytes)
+            pb(b'"\xef\xbf"', '"\ufffd"')
+            pb(b'"\xe0\xa0"', '"\ufffd"')
+
+            # Truncated 4-byte sequence (only 2 or 3 bytes)
+            pb(b'"\xf0\x9f"', '"\ufffd"')
+            pb(b'"\xf0\x9f\x98"', '"\ufffd"')
+
+            # Bad continuation byte (restored as ASCII)
+            pb(b'"\xe1\x28\xa1"', '"\ufffd(\ufffd"')  # )
+
+            # Overlong 2-byte sequence for U+0000 (should be `0x00`)
+            pb(b'"\xc0\x80"', '"\ufffd\ufffd"')
+
+            # Overlong 3-byte sequence for U+0000 (violates boundary)
+            pb(b'"\xe0\x80\x80"', '"\ufffd\ufffd\ufffd"')
+
+            # Overlong 4-byte sequence for U+0000 (violates boundary)
+            pb(b'"\xf0\x80\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+
+            # High surrogate code point
+            pb(b'"\xed\xa0\x80"', '"\ufffd\ufffd\ufffd"')
+
+            # Low surrogate code point
+            pb(b'"\xed\xb0\x80"', '"\ufffd\ufffd\ufffd"')
+
+            # Too large starter byte
+            pb(b'"\xff\x80\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+
+            # The following boundary cases come from the table of well-formed UTF-8 byte sequences
+            # <https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-3/#G27506>`_.
+            # For continuation bytes, both 0xC0 and 0xC2 are tested as values that exceed the valid maximum.
+            # This is because 0xC0 is an invalid starter byte, but 0xC2 is also a starter byte for 2-byte sequences.
+            # simd-string-impl.h prefers classifying bytes as starter bytes when possible (e.g., in "\xf0\x90\xc2\x80").
+            # The tests need to check that simd-string-impl.h correctly detects
+            # starter bytes that are actually invalid continution bytes, like 0xC2.
+
+            # Boundary cases: 2-byte sequences
+            pb(b'"\xc1\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xc1\x80"', '"\ufffd\ufffd"')
+            pb(b'"\xc1\xbf"', '"\ufffd\ufffd"')
+            pb(b'"\xc1\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xc1\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xc2\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xc2\x80"', '"\x80"')
+            pb(b'"\xc2\xbf"', '"\xbf"')
+            pb(b'"\xc2\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xc2\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xdf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xdf\x80"', '"\u07c0"')
+            pb(b'"\xdf\xbf"', '"\u07ff"')
+            pb(b'"\xdf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xdf\xc2"', '"\ufffd\ufffd"')
+
+            # Boundary cases: 3-byte sequences starting with 0xE0
+            pb(b'"\xe0\x9f\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xe0\xa0\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xe0\xa0\x80"', '"\u0800"')
+            pb(b'"\xe0\xa0\xbf"', '"\u083f"')
+            pb(b'"\xe0\xa0\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xe0\xa0\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xe0\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xe0\xbf\x80"', '"\u0fc0"')
+            pb(b'"\xe0\xbf\xbf"', '"\u0fff"')
+            pb(b'"\xe0\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xe0\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xe0\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xe0\xc2\x80"', '"\ufffd\x80"')
+
+            # Boundary cases: 3-byte sequences starting with 0xE1..0xEC
+            pb(b'"\xe1\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xe1\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xe1\x80\x80"', '"\u1000"')
+            pb(b'"\xe1\x80\xbf"', '"\u103f"')
+            pb(b'"\xe1\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xe1\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xe1\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xe1\xbf\x80"', '"\u1fc0"')
+            pb(b'"\xe1\xbf\xbf"', '"\u1fff"')
+            pb(b'"\xe1\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xe1\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xe1\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xe1\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xec\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xec\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xec\x80\x80"', '"\uc000"')
+            pb(b'"\xec\x80\xbf"', '"\uc03f"')
+            pb(b'"\xec\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xec\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xec\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xec\xbf\x80"', '"\ucfc0"')
+            pb(b'"\xec\xbf\xbf"', '"\ucfff"')
+            pb(b'"\xec\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xec\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xec\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xec\xc2\x80"', '"\ufffd\x80"')
+
+            # Boundary cases: 3-byte sequences starting with 0xED
+            pb(b'"\xed\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xed\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xed\x80\x80"', '"\ud000"')
+            pb(b'"\xed\x80\xbf"', '"\ud03f"')
+            pb(b'"\xed\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xed\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xed\x9f\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xed\x9f\x80"', '"\ud7c0"')
+            pb(b'"\xed\x9f\xbf"', '"\ud7ff"')
+            pb(b'"\xed\x9f\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xed\x9f\xc2"', '"\ufffd\ufffd"')
+
+            # Boundary cases: 3-byte sequences starting with 0xEE..0xEF
+            pb(b'"\xed\xa0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xee\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xee\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xee\x80\x80"', '"\ue000"')
+            pb(b'"\xee\x80\xbf"', '"\ue03f"')
+            pb(b'"\xee\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xee\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xee\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xee\xbf\x80"', '"\uefc0"')
+            pb(b'"\xee\xbf\xbf"', '"\uefff"')
+            pb(b'"\xee\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xee\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xee\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xee\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xef\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xef\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xef\x80\x80"', '"\uf000"')
+            pb(b'"\xef\x80\xbf"', '"\uf03f"')
+            pb(b'"\xef\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xef\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xef\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xef\xbf\x80"', '"\uffc0"')
+            pb(b'"\xef\xbf\xbf"', '"\uffff"')
+            pb(b'"\xef\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xef\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xef\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xef\xc2\x80"', '"\ufffd\x80"')
+
+            # Boundary cases: 4-byte sequences starting with 0xF0
+            pb(b'"\xf0\x8f\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf0\x90\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf0\x90\x80\x80"', '"\U00010000"')
+            pb(b'"\xf0\x90\x80\xbf"', '"\U0001003f"')
+            pb(b'"\xf0\x90\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\x90\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf0\x90\xbf\x80"', '"\U00010fc0"')
+            pb(b'"\xf0\x90\xbf\xbf"', '"\U00010fff"')
+            pb(b'"\xf0\x90\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf0\x90\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf0\x90\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf0\x90\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf0\x90\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\x90\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf0\xbf\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf0\xbf\x80\x80"', '"\U0003f000"')
+            pb(b'"\xf0\xbf\x80\xbf"', '"\U0003f03f"')
+            pb(b'"\xf0\xbf\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf0\xbf\xbf\x80"', '"\U0003ffc0"')
+            pb(b'"\xf0\xbf\xbf\xbf"', '"\U0003ffff"')
+            pb(b'"\xf0\xbf\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf0\xbf\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf0\xbf\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf0\xbf\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf0\xbf\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xbf\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf0\xc0\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+
+            # Boundary cases: 4-byte sequences starting with 0xF1..0xF3
+            pb(b'"\xf1\x7f\x80\x80"', '"\ufffd\x7f\ufffd\ufffd"')
+            pb(b'"\xf1\x80\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf1\x80\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf1\x80\x80\x80"', '"\U00040000"')
+            pb(b'"\xf1\x80\x80\xbf"', '"\U0004003f"')
+            pb(b'"\xf1\x80\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\x80\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf1\x80\xbf\x80"', '"\U00040fc0"')
+            pb(b'"\xf1\x80\xbf\xbf"', '"\U00040fff"')
+            pb(b'"\xf1\x80\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf1\x80\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\x80\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf1\x80\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf1\x80\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf1\x80\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf1\xbf\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf1\xbf\x80\x80"', '"\U0007f000"')
+            pb(b'"\xf1\xbf\x80\xbf"', '"\U0007f03f"')
+            pb(b'"\xf1\xbf\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf1\xbf\xbf\x80"', '"\U0007ffc0"')
+            pb(b'"\xf1\xbf\xbf\xbf"', '"\U0007ffff"')
+            pb(b'"\xf1\xbf\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf1\xbf\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf1\xbf\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf1\xbf\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf1\xbf\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xbf\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xc0\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+            pb(b'"\xf1\xc2\x80\x80"', '"\ufffd\x80\ufffd"')
+            pb(b'"\xf3\x7f\x80\x80"', '"\ufffd\x7f\ufffd\ufffd"')
+            pb(b'"\xf3\x80\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf3\x80\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf3\x80\x80\x80"', '"\U000c0000"')
+            pb(b'"\xf3\x80\x80\xbf"', '"\U000c003f"')
+            pb(b'"\xf3\x80\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\x80\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf3\x80\xbf\x80"', '"\U000c0fc0"')
+            pb(b'"\xf3\x80\xbf\xbf"', '"\U000c0fff"')
+            pb(b'"\xf3\x80\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf3\x80\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf3\x80\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf3\x80\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf3\x80\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\x80\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf3\xbf\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf3\xbf\x80\x80"', '"\U000ff000"')
+            pb(b'"\xf3\xbf\x80\xbf"', '"\U000ff03f"')
+            pb(b'"\xf3\xbf\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf3\xbf\xbf\x80"', '"\U000fffc0"')
+            pb(b'"\xf3\xbf\xbf\xbf"', '"\U000fffff"')
+            pb(b'"\xf3\xbf\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf3\xbf\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf3\xbf\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf3\xbf\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf3\xbf\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xbf\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xc0\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+            pb(b'"\xf3\xc2\x80\x80"', '"\ufffd\x80\ufffd"')
+
+            # Boundary cases: 4-byte sequences starting with 0xF4
+            pb(b'"\xf4\x7f\x80\x80"', '"\ufffd\x7f\ufffd\ufffd"')
+            pb(b'"\xf4\x80\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf4\x80\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf4\x80\x80\x80"', '"\U00100000"')
+            pb(b'"\xf4\x80\x80\xbf"', '"\U0010003f"')
+            pb(b'"\xf4\x80\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x80\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf4\x80\xbf\x80"', '"\U00100fc0"')
+            pb(b'"\xf4\x80\xbf\xbf"', '"\U00100fff"')
+            pb(b'"\xf4\x80\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf4\x80\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf4\x80\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf4\x80\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf4\x80\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x80\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\x7f\x80"', '"\ufffd\x7f\ufffd"')
+            pb(b'"\xf4\x8f\x80\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf4\x8f\x80\x80"', '"\U0010f000"')
+            pb(b'"\xf4\x8f\x80\xbf"', '"\U0010f03f"')
+            pb(b'"\xf4\x8f\x80\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\x80\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xbf\x7f"', '"\ufffd\x7f"')
+            pb(b'"\xf4\x8f\xbf\x80"', '"\U0010ffc0"')
+            pb(b'"\xf4\x8f\xbf\xbf"', '"\U0010ffff"')
+            pb(b'"\xf4\x8f\xbf\xc0"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xbf\xc2"', '"\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc0\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf4\x8f\xc0\x80"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc0\xbf"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc0\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc0\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc2\x7f"', '"\ufffd\ufffd\x7f"')
+            pb(b'"\xf4\x8f\xc2\x80"', '"\ufffd\x80"')
+            pb(b'"\xf4\x8f\xc2\xbf"', '"\ufffd\xbf"')
+            pb(b'"\xf4\x8f\xc2\xc0"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x8f\xc2\xc2"', '"\ufffd\ufffd\ufffd"')
+            pb(b'"\xf4\x90\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+            pb(b'"\xf5\x80\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+
+            # Boundary case: too large codepoint (> U+10FFFF)
+            pb(b'"\xf5\x80\x80\x80"', '"\ufffd\ufffd\ufffd\ufffd"')
+
 
     def test_find_either_of_two_bytes(self):
         sizes = []
@@ -353,7 +689,7 @@ class TestParser(BaseTest):
         s = self.create_screen()
         pb = partial(self.parse_bytes_dump, s)
         pb('abcde', 'abcde')
-        s.cursor_back(5)
+        s.cursor_move(5)
         pb('x\033[2@y', 'x', ('screen_insert_characters', 2), 'y')
         self.ae(str(s.line(0)), 'xy bc')
         pb('x\033[2;7@y', 'x', ('CSI code @ has 2 > 1 parameters',), 'y')
@@ -385,7 +721,7 @@ class TestParser(BaseTest):
         def sgr(*params):
             return (('select_graphic_rendition', f'{x}') for x in params)
 
-        pb('\033[1;2;3;4;7;9;34;44m', *sgr('1 2 3 4 7 9 34 44'))
+        pb('\033[1;2;3;4;7;9;34;44m', *sgr('1;2;3;4;7;9;34;44'))
         for attr in 'bold italic reverse strikethrough dim'.split():
             self.assertTrue(getattr(s.cursor, attr), attr)
         self.ae(s.cursor.decoration, 1)
@@ -397,10 +733,10 @@ class TestParser(BaseTest):
         pb('\033[38;2;1;2;3;48;2;7;8;9m', ('select_graphic_rendition', '38:2:1:2:3'), ('select_graphic_rendition', '48:2:7:8:9'))
         self.ae(s.cursor.fg, 1 << 24 | 2 << 16 | 3 << 8 | 2)
         self.ae(s.cursor.bg, 7 << 24 | 8 << 16 | 9 << 8 | 2)
-        pb('\033[0;2m', *sgr('0 2'))
-        pb('\033[;2m', *sgr('0 2'))
+        pb('\033[0;2m', *sgr('0;2'))
+        pb('\033[;2m', *sgr('0;2'))
         pb('\033[m', *sgr('0'))
-        pb('\033[1;;2m', *sgr('1 0 2'))
+        pb('\033[1;;2m', *sgr('1;0;2'))
         pb('\033[38;5;1m', ('select_graphic_rendition', '38:5:1'))
         pb('\033[58;2;1;2;3m', ('select_graphic_rendition', '58:2:1:2:3'))
         pb('\033[38;2;1;2;3m', ('select_graphic_rendition', '38:2:1:2:3'))
@@ -408,7 +744,7 @@ class TestParser(BaseTest):
         pb('\033[38:2:1:2:3;48:5:9;58;5;7m', (
             'select_graphic_rendition', '38:2:1:2:3'), ('select_graphic_rendition', '48:5:9'), ('select_graphic_rendition', '58:5:7'))
         s.reset()
-        pb('\033[1;2;3;4:5;7;9;34;44m', *sgr('1 2 3', '4:5', '7 9 34 44'))
+        pb('\033[1;2;3;4:5;7;9;34;44m', *sgr('1;2;3', '4:5', '7;9;34;44'))
         for attr in 'bold italic reverse strikethrough dim'.split():
             self.assertTrue(getattr(s.cursor, attr), attr)
         self.ae(s.cursor.decoration, 5)
@@ -433,8 +769,9 @@ class TestParser(BaseTest):
         self.ae(c.wtcbuf, b'\033[?1;2$y')
         pb('\033[2;4r', ('screen_set_margins', 2, 4))
         c.clear()
-        pb('\033[14t', ('screen_report_size', 14))
-        self.ae(c.wtcbuf, b'\033[4;100;50t')
+        pb('\033[14t', ('screen_report_size', 14, 0))
+        pb('\033[14;2t', ('screen_report_size', 14, 2))
+        self.ae(c.wtcbuf, b'\033[4;100;50t\033[4;100;50t')
         self.ae(s.margin_top, 1), self.ae(s.margin_bottom, 3)
         pb('\033[r', ('screen_set_margins', 0, 0))
         self.ae(s.margin_top, 0), self.ae(s.margin_bottom, 4)
@@ -518,6 +855,8 @@ class TestParser(BaseTest):
         pb(f'\033]52;p;{payload}\x07', ('clipboard_control', 52, f'p;{payload}'))
         c.clear()
         pb('\033]52;p;xyz\x07', ('clipboard_control', 52, 'p;xyz'))
+        c.clear()
+        pb('\033]22;?__current__\x07', ('set_dynamic_color', 22, '?__current__'))
 
     def test_dcs_codes(self):
         s = self.create_screen()
@@ -534,7 +873,7 @@ class TestParser(BaseTest):
         pb('\033P$qm\033\\', ('screen_request_capabilities', ord('$'), 'm'))
         self.ae(c.wtcbuf, b'\033P1$rm\033\\')
         for sgr in '0;34;102;1;2;3;4 0;38:5:200;58:2:10:11:12'.split():
-            expected = set(sgr.split(';')) - {'0'}
+            expected = set(sgr.split(';'))
             c.clear()
             parse_bytes(s, f'\033[{sgr}m\033P$qm\033\\'.encode('ascii'))
             r = c.wtcbuf.decode('ascii').partition('r')[2].partition('m')[0]
@@ -584,9 +923,9 @@ class TestParser(BaseTest):
                       ' parent_id parent_placement_id offset_from_parent_x offset_from_parent_y'
             ).split():
                 k.setdefault(f, 0)
-            p = k.pop('payload', '').encode('utf-8')
-            k['payload_sz'] = len(p)
-            return ('graphics_command', k, p)
+            p = k.pop('payload', '')
+            k[''] = p
+            return ('graphics_command', k)
 
         def t(cmd, **kw):
             pb('\033_G{};{}\033\\'.format(cmd, enc(kw.get('payload', ''))), c(**kw))
@@ -601,8 +940,8 @@ class TestParser(BaseTest):
         t('i=3,p=4', id=3, placement_id=4)
         e('i=%d' % (uint32_max + 1), 'Malformed GraphicsCommand control block, number is too large')
         pb('\033_Gi=12\033\\', c(id=12))
-        t('a=t,t=d,s=100,z=-9', payload='X', action='t', transmission_type='d', data_width=100, z_index=-9, payload_sz=1)
-        t('a=t,t=d,s=100,z=9', payload='payload', action='t', transmission_type='d', data_width=100, z_index=9, payload_sz=7)
+        t('a=t,t=d,s=100,z=-9', payload='X', action='t', transmission_type='d', data_width=100, z_index=-9)
+        t('a=t,t=d,s=100,z=9', payload='payload', action='t', transmission_type='d', data_width=100, z_index=9)
         t('a=t,t=d,s=100,z=9,q=2', action='t', transmission_type='d', data_width=100, z_index=9, quiet=2)
         e(',s=1', 'Malformed GraphicsCommand control block, invalid key character: 0x2c')
         e('W=1', 'Malformed GraphicsCommand control block, invalid key character: 0x57')
@@ -611,14 +950,14 @@ class TestParser(BaseTest):
         e('s', 'Malformed GraphicsCommand control block, no = after key')
         e('s=', 'Malformed GraphicsCommand control block, expecting an integer value')
         e('s==', 'Malformed GraphicsCommand control block, expecting an integer value for key: s')
-        e('s=1=', 'Malformed GraphicsCommand control block, expecting a comma or semi-colon after a value, found: 0x3d')
+        e('s=1=', 'Malformed GraphicsCommand control block, expecting a , or semi-colon after a value, found: 0x3d')
 
     def test_deccara(self):
         s = self.create_screen()
         pb = partial(self.parse_bytes_dump, s)
-        pb('\033[$r', ('deccara', '0 0 0 0 0'))
+        pb('\033[$r', ('deccara', '0;0;0;0;0'))
         pb('\033[;;;;4:3;38:5:10;48:2:1:2:3;1$r',
-           ('deccara', '0 0 0 0 4:3'), ('deccara', '0 0 0 0 38:5:10'), ('deccara', '0 0 0 0 48:2:1:2:3'), ('deccara', '0 0 0 0 1'))
+           ('deccara', '0;0;0;0;4:3'), ('deccara', '0;0;0;0;38:5:10'), ('deccara', '0;0;0;0;48:2:1:2:3'), ('deccara', '0;0;0;0;1'))
         for y in range(s.lines):
             line = s.line(y)
             for x in range(s.columns):
@@ -629,7 +968,7 @@ class TestParser(BaseTest):
                 self.ae(c.fg, (10 << 8) | 1)
                 self.ae(c.bg, (1 << 24 | 2 << 16 | 3 << 8 | 2))
         self.ae(s.line(0).cursor_from(0).bold, True)
-        pb('\033[1;2;2;3;22;39$r', ('deccara', '1 2 2 3 22 39'))
+        pb('\033[1;2;2;3;22;39$r', ('deccara', '1;2;2;3;22;39'))
         self.ae(s.line(0).cursor_from(0).bold, True)
         line = s.line(0)
         for x in range(1, s.columns):
@@ -641,7 +980,7 @@ class TestParser(BaseTest):
             c = line.cursor_from(x)
             self.ae(c.bold, False)
         self.ae(line.cursor_from(3).bold, True)
-        pb('\033[2*x\033[3;2;4;3;34$r\033[*x', ('screen_decsace', 2), ('deccara', '3 2 4 3 34'), ('screen_decsace', 0))
+        pb('\033[2*x\033[3;2;4;3;34$r\033[*x', ('screen_decsace', 2), ('deccara', '3;2;4;3;34'), ('screen_decsace', 0))
         for y in range(2, 4):
             line = s.line(y)
             for x in range(s.columns):

@@ -36,8 +36,8 @@ ap = re.search(r"^appname: str\s+=\s+'([^']+)'", raw, flags=re.MULTILINE)
 if ap is not None:
     appname = ap.group(1)
 
-ALL_ACTIONS = 'local_build man html build tag sdist upload website'.split()
-NIGHTLY_ACTIONS = 'local_build man html build sdist upload_nightly'.split()
+ALL_ACTIONS = 'local_build man html build tag sdist sbom upload website'.split()
+NIGHTLY_ACTIONS = 'local_build man html build sdist sbom upload_nightly'.split()
 
 
 def echo_cmd(cmd: Iterable[str]) -> None:
@@ -45,18 +45,28 @@ def echo_cmd(cmd: Iterable[str]) -> None:
     end = '\n'
     if isatty:
         end = f'\x1b[m{end}'
-        print('\x1b[92m', end='')
+        print('\x1b[32m', end='')  # ]]]]]
     print(shlex.join(cmd), end=end, flush=True)
 
 
-def call(*cmd: str, cwd: Optional[str] = None, echo: bool = False) -> None:
+def call(*cmd: str, cwd: Optional[str] = None, echo: bool = False, timeout: float | None = None) -> None:
     if len(cmd) == 1:
         q = shlex.split(cmd[0])
     else:
         q = list(cmd)
     if echo:
         echo_cmd(cmd)
-    ret = subprocess.Popen(q, cwd=cwd).wait()
+    p = subprocess.Popen(q, cwd=cwd)
+    try:
+        ret = p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        p.terminate()
+        try:
+            p.wait(1)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        raise
     if ret != 0:
         raise SystemExit(ret)
 
@@ -71,24 +81,24 @@ def run_build(args: Any) -> None:
     m = runpy.run_path('./setup.py', run_name='__publish__')
     vcs_rev: str = m['get_vcs_rev']()
 
-    def run_with_retry(cmd: str) -> None:
+    def run_with_retry(cmd: str, timeout: float | None = 20 * 60, retry_cmd: str = '') -> None:
         try:
-            call(cmd, echo=True)
+            call(cmd, echo=True, timeout=timeout)
         except (SystemExit, Exception):
-            needs_retry = 'arm64' in cmd or building_nightly
-            if not needs_retry:
+            if not (building_nightly and retry_cmd):
                 raise
-            print('Build failed, retrying in a minute seconds...', file=sys.stderr)
-            if 'macos' in cmd:
-                call('python ../bypy macos shutdown')
+            print('Build failed, retrying in a minute...', file=sys.stderr)
+            call(retry_cmd)
             time.sleep(60)
-            call(cmd, echo=True)
+            call(cmd, echo=True, timeout=timeout)
 
-    for x in ('64', 'arm64'):
+    for x, retry_cmd in {'64': '', 'arm64': 'pkill -9 qemu-aarch64-static'}.items():
         prefix = f'python ../bypy linux --arch {x} '
-        run_with_retry(prefix + f'program --non-interactive --extra-program-data "{vcs_rev}"')
-        call(prefix + 'shutdown', echo=True)
-    run_with_retry(f'python ../bypy macos program --sign-installers --notarize --non-interactive --extra-program-data "{vcs_rev}"')
+        run_with_retry(prefix + f'program --non-interactive --extra-program-data "{vcs_rev}"', retry_cmd=retry_cmd)
+    run_with_retry(
+        f'python ../bypy macos program --sign-installers --notarize --non-interactive --extra-program-data "{vcs_rev}"',
+        retry_cmd='python ../bypy macos shutdown'
+    )
     call('python ../bypy macos shutdown', echo=True)
     call('make debug')
     call('./setup.py build-static-binaries')
@@ -198,6 +208,10 @@ def run_sdist(args: Any) -> None:
         sign_file(f'{dest}.xz')
 
 
+def run_sbom(args: Any) -> None:
+    call(f'python ../bypy sbom --output build/kitty-{version}.tar.xz.spdx.json --url https://sw.kovidgoyal.net/kitty/binary kovidgoyal/{appname} {version}')
+
+
 class ReadFileWithProgressReporting(io.FileIO):  # {{{
     def __init__(self, path: str):
         super().__init__(path, 'rb')
@@ -210,7 +224,7 @@ class ReadFileWithProgressReporting(io.FileIO):  # {{{
     def __len__(self) -> int:
         return self._total
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: Optional[int] = -1) -> bytes:
         data = io.FileIO.read(self, size)
         if data:
             self.report_progress(len(data))
@@ -442,7 +456,6 @@ def files_for_upload() -> Dict[str, str]:
     for f, desc in {
         'macos/dist/kitty-{}.dmg': 'macOS dmg',
         'linux/64/dist/kitty-{}-x86_64.txz': 'Linux amd64 binary bundle',
-        'linux/32/dist/kitty-{}-i686.txz': 'Linux x86 binary bundle',
         'linux/arm64/dist/kitty-{}-arm64.txz': 'Linux arm64 binary bundle',
     }.items():
         path = os.path.join('bypy', 'b', f.format(version))
@@ -463,6 +476,7 @@ def files_for_upload() -> Dict[str, str]:
 
     files[f'build/kitty-{version}.tar.xz'] = 'Source code'
     files[f'build/kitty-{version}.tar.xz.sig'] = 'Source code GPG signature'
+    files[f'build/kitty-{version}.tar.xz.spdx.json'] = 'SBOM for kitty (all builds)'
     for path, desc in signatures.items():
         sign_file(path)
         files[f'{path}.sig'] = desc

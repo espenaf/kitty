@@ -4,20 +4,20 @@ package themes
 
 import (
 	"fmt"
+	"github.com/kovidgoyal/kitty"
 	"io"
 	"maps"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
-	"kitty/tools/config"
-	"kitty/tools/themes"
-	"kitty/tools/tui/loop"
-	"kitty/tools/tui/readline"
-	"kitty/tools/utils"
-	"kitty/tools/wcswidth"
+	"github.com/kovidgoyal/kitty/tools/config"
+	"github.com/kovidgoyal/kitty/tools/themes"
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
+	"github.com/kovidgoyal/kitty/tools/tui/readline"
+	"github.com/kovidgoyal/kitty/tools/utils"
+	"github.com/kovidgoyal/kitty/tools/wcswidth"
 )
 
 var _ = fmt.Print
@@ -169,8 +169,7 @@ func ReadKittyColorSettings() map[string]string {
 		}
 		return nil
 	}
-	cp := config.ConfigParser{LineHandler: handle_line}
-	cp.ParseFiles(filepath.Join(utils.ConfigDir(), "kitty.conf"))
+	config.ReadKittyConfig(handle_line)
 	return settings
 }
 
@@ -231,13 +230,13 @@ func (self *handler) next(delta int, allow_wrapping bool) {
 }
 
 func (self *handler) on_browsing_key_event(ev *loop.KeyEvent) error {
-	if ev.MatchesPressOrRepeat("esc") || ev.MatchesPressOrRepeat("q") {
+	if ev.MatchesPressOrRepeat("esc") || ev.MatchesCaseInsensitiveTextOrKey("q") {
 		self.lp.Quit(0)
 		ev.Handled = true
 		return nil
 	}
 	for _, cat := range self.tabs {
-		if ev.MatchesPressOrRepeat(cat[0:1]) || ev.MatchesPressOrRepeat("alt+"+cat[0:1]) {
+		if ev.MatchesPressOrRepeat(cat[0:1]) || ev.MatchesPressOrRepeat("alt+"+cat[0:1]) || ev.MatchesCaseInsensitiveTextOrKey(cat[0:1]) {
 			ev.Handled = true
 			if cat != self.current_category() {
 				self.set_current_category(cat)
@@ -256,12 +255,12 @@ func (self *handler) on_browsing_key_event(ev *loop.KeyEvent) error {
 		ev.Handled = true
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("j") || ev.MatchesPressOrRepeat("down") {
+	if ev.MatchesCaseInsensitiveTextOrKey("j") || ev.MatchesPressOrRepeat("down") {
 		self.next(1, true)
 		ev.Handled = true
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("k") || ev.MatchesPressOrRepeat("up") {
+	if ev.MatchesCaseInsensitiveTextOrKey("k") || ev.MatchesPressOrRepeat("up") {
 		self.next(-1, true)
 		ev.Handled = true
 		return nil
@@ -282,12 +281,12 @@ func (self *handler) on_browsing_key_event(ev *loop.KeyEvent) error {
 		}
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("s") || ev.MatchesPressOrRepeat("/") {
+	if ev.MatchesCaseInsensitiveTextOrKey("s") || ev.MatchesCaseInsensitiveTextOrKey("/") {
 		ev.Handled = true
 		self.start_search()
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("c") || ev.MatchesPressOrRepeat("enter") {
+	if ev.MatchesCaseInsensitiveTextOrKey("c") || ev.MatchesPressOrRepeat("enter") {
 		ev.Handled = true
 		if self.themes_list == nil || self.themes_list.Len() == 0 {
 			self.lp.Beep()
@@ -496,30 +495,48 @@ func (self *handler) draw_theme_demo() {
 // accepting {{{
 
 func (self *handler) on_accepting_key_event(ev *loop.KeyEvent) error {
-	if ev.MatchesPressOrRepeat("q") || ev.MatchesPressOrRepeat("esc") || ev.MatchesPressOrRepeat("shift+q") {
+	if ev.MatchesCaseInsensitiveTextOrKey("q") || ev.MatchesPressOrRepeat("esc") || ev.MatchesPressOrRepeat("shift+q") {
 		ev.Handled = true
 		self.lp.Quit(0)
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("a") || ev.MatchesPressOrRepeat("shift+a") {
+	if ev.MatchesCaseInsensitiveTextOrKey("a") || ev.MatchesPressOrRepeat("shift+a") {
 		ev.Handled = true
 		self.state = BROWSING
 		self.draw_screen()
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("p") || ev.MatchesPressOrRepeat("shift+p") {
+	if ev.MatchesCaseInsensitiveTextOrKey("p") || ev.MatchesPressOrRepeat("shift+p") {
 		ev.Handled = true
 		self.themes_list.CurrentTheme().SaveInDir(utils.ConfigDir())
 		self.update_recent()
 		self.lp.Quit(0)
 		return nil
 	}
-	if ev.MatchesPressOrRepeat("m") || ev.MatchesPressOrRepeat("shift+m") {
+	if ev.MatchesCaseInsensitiveTextOrKey("m") || ev.MatchesPressOrRepeat("shift+m") {
 		ev.Handled = true
 		self.themes_list.CurrentTheme().SaveInConf(utils.ConfigDir(), self.opts.ReloadIn, self.opts.ConfigFileName)
 		self.update_recent()
 		self.lp.Quit(0)
 		return nil
+	}
+
+	scheme := func(name string) error {
+		ev.Handled = true
+		self.themes_list.CurrentTheme().SaveInFile(utils.ConfigDir(), name)
+		self.update_recent()
+		self.lp.Quit(0)
+		return nil
+
+	}
+	if ev.MatchesCaseInsensitiveTextOrKey("d") || ev.MatchesPressOrRepeat("shift+d") {
+		return scheme(kitty.DarkThemeFileName)
+	}
+	if ev.MatchesCaseInsensitiveTextOrKey("l") || ev.MatchesPressOrRepeat("shift+l") {
+		return scheme(kitty.LightThemeFileName)
+	}
+	if ev.MatchesCaseInsensitiveTextOrKey("n") || ev.MatchesPressOrRepeat("shift+n") {
+		return scheme(kitty.NoPreferenceThemeFileName)
 	}
 	return nil
 }
@@ -543,7 +560,7 @@ func (self *handler) draw_accepting_screen() {
 	kc := self.lp.SprintStyled("italic", self.opts.ConfigFileName)
 
 	ac := func(x string) string {
-		return self.lp.SprintStyled("fg=red", x)
+		return self.lp.SprintStyled("fg=red underline=true", x)
 	}
 	self.lp.AllowLineWrapping(true)
 	defer self.lp.AllowLineWrapping(false)
@@ -556,6 +573,15 @@ func (self *handler) draw_accepting_screen() {
 	self.lp.Println()
 	self.lp.Println()
 	self.lp.Printf(` %slace the theme file in %s but do not modify %s`, ac("P"), utils.ConfigDir(), kc)
+	self.lp.Println()
+	self.lp.Println()
+	self.lp.Printf(` Save as colors to use when the OS switches to:`)
+	self.lp.Println()
+	self.lp.Printf(`   %sark mode`, ac("D"))
+	self.lp.Println()
+	self.lp.Printf(`   %sight mode`, ac("L"))
+	self.lp.Println()
+	self.lp.Printf(`   %so preference mode`, ac("N"))
 	self.lp.Println()
 	self.lp.Println()
 	self.lp.Printf(` %sbort and return to list of themes`, ac("A"))
